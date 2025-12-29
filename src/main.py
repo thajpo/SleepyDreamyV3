@@ -4,6 +4,8 @@ from torch.utils.tensorboard import SummaryWriter
 import multiprocessing as mp
 import subprocess
 import atexit
+import os
+from datetime import datetime
 
 from .config import config
 from .trainer import train_world_model
@@ -60,8 +62,13 @@ def main():
         if args.warmup_steps is not None:
             config.train.actor_warmup_steps = args.warmup_steps
 
+        # Generate unique run ID for this session
+        run_id = datetime.now().strftime("%m-%d_%H%M")
+        log_dir = f"runs/{run_id}"
+        os.makedirs(log_dir, exist_ok=True)
+
         print(f"Training: {config.train.max_train_steps} steps, warmup: {config.train.actor_warmup_steps} steps")
-        start_tensorboard()
+        start_tensorboard(logdir=log_dir)  # Point to this run only
         print("Starting experience collection and training processes...")
 
         # Create a queue to pass data from collector to trainer
@@ -69,7 +76,7 @@ def main():
         data_queue = mp.Queue(maxsize=config.train.batch_size * 5)
         model_queue = mp.Queue(maxsize=1)
         experience_loop = mp.Process(target=collect_experiences, args=(data_queue,model_queue))
-        trainer_loop = mp.Process(target=train_world_model, args=(config, data_queue, model_queue))
+        trainer_loop = mp.Process(target=train_world_model, args=(config, data_queue, model_queue, log_dir))
 
         experience_loop.start()
         trainer_loop.start()

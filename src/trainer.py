@@ -26,7 +26,8 @@ class WorldModelTrainer:
         self,
         config,
         data_queue,
-        model_queue
+        model_queue,
+        log_dir
     ):
         self.device = torch.device(config.general.device)
         self.model_update_frequency = 10 # fix later
@@ -67,44 +68,68 @@ class WorldModelTrainer:
         self.d_hidden = config.models.d_hidden
         self.n_actions = config.environment.n_actions
         self.steps_per_weight_sync = config.train.steps_per_weight_sync
+        self.batch_size = config.train.batch_size
 
-        # Initialize TensorBoard writer with timestamped run directory
-        run_id = datetime.now().strftime("%m-%d_%H%M")
-        log_dir = f"runs/{run_id}"
-        os.makedirs(log_dir, exist_ok=True)
+        # Initialize TensorBoard writer with the provided log directory
         self.writer = SummaryWriter(log_dir=log_dir)
         print(f"TensorBoard logging to: {log_dir}")
 
 
     def get_data_from_queue(self):
+        """Collect batch_size sequences from queue, truncate to min length, stack into batch."""
         try:
-            # pixels, states, actions, rewards, terminated = loader.sample()
-            pixels, states, actions, rewards, terminated = self.data_queue.get()
-            # Convert pixels from (T, H, W, C) to (1, T, C, H, W) and resize to target_size
-            # Batch dimension B=1 is kept from the start for proper batching
-            # Encoder expects (B, C, H, W) at target_size
-            pixels_tensor = torch.from_numpy(pixels).to(self.device).float().permute(0, 3, 1, 2)  # (T, C, H, W)
-            pixels_tensor = resize_pixels_to_target(pixels_tensor, config.models.encoder.cnn.target_size)  # (T, C, H, W)
-            self.pixels = pixels_tensor.unsqueeze(0)  # (1, T, C, H, W) - batch dimension for encoder
-            self.states = torch.from_numpy(states).to(self.device).unsqueeze(0)
-            self.states = symlog(self.states) # vector states are symlog transformed
-            self.actions = torch.from_numpy(actions).to(self.device).unsqueeze(0)
-            self.rewards = torch.from_numpy(rewards).to(self.device).unsqueeze(0)
-            self.terminated = torch.from_numpy(terminated).to(self.device).unsqueeze(0)
+            batch_pixels = []
+            batch_pixels_original = []
+            batch_states = []
+            batch_actions = []
+            batch_rewards = []
+            batch_terminated = []
+
+            # Collect batch_size sequences
+            for _ in range(self.batch_size):
+                pixels, states, actions, rewards, terminated = self.data_queue.get()
+                # Convert pixels from (T, H, W, C) to (T, C, H, W)
+                pixels_tensor = torch.from_numpy(pixels).float().permute(0, 3, 1, 2)
+                batch_pixels_original.append(pixels_tensor)  # Keep original resolution
+                pixels_resized = resize_pixels_to_target(pixels_tensor, config.models.encoder.cnn.target_size)
+                batch_pixels.append(pixels_resized)
+                batch_states.append(torch.from_numpy(states))
+                batch_actions.append(torch.from_numpy(actions))
+                batch_rewards.append(torch.from_numpy(rewards))
+                batch_terminated.append(torch.from_numpy(terminated))
+
+            # Find minimum sequence length and truncate all to match
+            min_len = min(p.shape[0] for p in batch_pixels)
+            batch_pixels = [p[:min_len] for p in batch_pixels]
+            batch_pixels_original = [p[:min_len] for p in batch_pixels_original]
+            batch_states = [s[:min_len] for s in batch_states]
+            batch_actions = [a[:min_len] for a in batch_actions]
+            batch_rewards = [r[:min_len] for r in batch_rewards]
+            batch_terminated = [t[:min_len] for t in batch_terminated]
+
+            # Stack into batch tensors: (B, T, ...)
+            self.pixels = torch.stack(batch_pixels).to(self.device)  # (B, T, C, H, W)
+            self.pixels_original = torch.stack(batch_pixels_original).to(self.device)  # Original res
+            self.states = symlog(torch.stack(batch_states).to(self.device))  # (B, T, state_dim)
+            self.actions = torch.stack(batch_actions).to(self.device)  # (B, T, n_actions)
+            self.rewards = torch.stack(batch_rewards).to(self.device)  # (B, T)
+            self.terminated = torch.stack(batch_terminated).to(self.device)  # (B, T)
         except Empty:
             pass
 
     def train_models(self):
         while self.train_step < self.max_train_steps:
-            self.get_data_from_queue() # TODO: Implement batching with this
+            self.get_data_from_queue()  # Collects batch_size sequences
 
             # Skip if no data was retrieved
             if not hasattr(self, 'pixels') or self.pixels.shape[1] == 0:
                 print(f"Trainer: No data was retrieved at step {self.train_step}.")
                 continue
 
-            # Reset hidden states per trajectory and move to self.device
-            self.world_model.h_prev = torch.zeros_like(self.world_model.h_prev).to(self.device)
+            # Reset hidden states per trajectory - match actual input batch size
+            actual_batch_size = self.pixels.shape[0]
+            h_dim = self.world_model.h_prev.shape[1]
+            self.world_model.h_prev = torch.zeros(actual_batch_size, h_dim, device=self.device)
 
             # Zero gradients before accumulating losses
             self.wm_optimizer.zero_grad()
@@ -135,6 +160,7 @@ class WorldModelTrainer:
             actor_loss = torch.tensor(0.0, device=self.device)
             critic_loss = torch.tensor(0.0, device=self.device)
             last_obs_pixels = None
+            last_obs_pixels_original = None
             last_reconstruction_pixels = None
             last_posterior_probs = None
             last_dreamed_pixels = None
@@ -147,7 +173,7 @@ class WorldModelTrainer:
                 terminated_t = self.terminated[:, t_step]
 
                 posterior_logits = self.encoder(obs_t)  # This is z_t
-                posterior_dist = dist.Categorical(logits=posterior_logits) 
+                posterior_dist = dist.Categorical(logits=posterior_logits)
 
                 (
                     obs_reconstruction,
@@ -175,6 +201,7 @@ class WorldModelTrainer:
 
                 # Store visualization data
                 last_obs_pixels = obs_t["pixels"]
+                last_obs_pixels_original = self.pixels_original[:, t_step]  # Original resolution
                 last_reconstruction_pixels = obs_reconstruction["pixels"]
                 last_posterior_probs = posterior_dist.probs.detach()  # (batch, d_hidden, d_hidden/16)
 
@@ -187,7 +214,7 @@ class WorldModelTrainer:
                         dreamed_actions_sampled
                     ) = self.dream_sequence(
                         h_z_joined,
-                        self.world_model.z_embedding(posterior_dist.probs.view(1, -1)),
+                        self.world_model.z_embedding(posterior_dist.probs.view(actual_batch_size, -1)),
                         self.n_dream_steps
                     )
                     self.world_model.h_prev = h_prev_backup
@@ -281,6 +308,7 @@ class WorldModelTrainer:
                 dreamed_values_list,
                 actor_entropy_list,
                 last_obs_pixels,
+                last_obs_pixels_original,
                 last_reconstruction_pixels,
                 last_posterior_probs,
                 last_dreamed_pixels
@@ -521,6 +549,7 @@ class WorldModelTrainer:
         dreamed_values_list,
         actor_entropy_list,
         last_obs_pixels=None,
+        last_obs_pixels_original=None,
         last_reconstruction_pixels=None,
         last_posterior_probs=None,
         last_dreamed_pixels=None
@@ -644,6 +673,11 @@ class WorldModelTrainer:
                 dream_strip = torch.cat([dream_frames[i] for i in range(n_show)], dim=2)
                 self.writer.add_images("images/dream_rollout", dream_strip.unsqueeze(0), step)
 
+            # 5. Original resolution image (larger, easier to see)
+            if last_obs_pixels_original is not None:
+                original = (last_obs_pixels_original / 255.0).clamp(0, 1)
+                self.writer.add_images("images/original_resolution", original, step)
+
         self.writer.flush()
 
     def send_models_to_collector(self, training_step):
@@ -663,6 +697,6 @@ class WorldModelTrainer:
             print("Trainer: Model queue was full. Skipping update.")
             pass
 
-def train_world_model(config, data_queue, model_queue):
-    trainer = WorldModelTrainer(config, data_queue, model_queue)
+def train_world_model(config, data_queue, model_queue, log_dir):
+    trainer = WorldModelTrainer(config, data_queue, model_queue, log_dir)
     trainer.train_models()

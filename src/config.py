@@ -47,7 +47,7 @@ class MLPEncoderConfig(BaseModel):
 
 
 class GRUConfig(BaseModel):
-    n_blocks: int = 8
+    n_blocks: int = 4
 
 
 class EncoderConfig(BaseModel):
@@ -62,7 +62,7 @@ class ModelsConfig(BaseModel):
 
 
 class TrainConfig(BaseModel):
-    sequence_length: int = 50
+    sequence_length: int = 25
     max_train_steps: int = 10000
     num_dream_steps: int = 10
     gamma: float = 0.99
@@ -71,7 +71,7 @@ class TrainConfig(BaseModel):
     critic_lr: float = 1e-4
     actor_lr: float = 1e-4
     weight_decay: float = 1e-6
-    batch_size: int = 1
+    batch_size: int = 24
     steps_per_weight_sync: int = 5
     beta_dyn: float = 0.99
     beta_rep: float = 0.99
