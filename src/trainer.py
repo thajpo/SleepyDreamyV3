@@ -19,6 +19,7 @@ from .trainer_utils import (
 )
 from .encoder import ObservationEncoder, ThreeLayerMLP
 from .world_model import RSSMWorldModel
+from datetime import datetime
 
 class WorldModelTrainer:
     def __init__(
@@ -67,10 +68,12 @@ class WorldModelTrainer:
         self.n_actions = config.environment.n_actions
         self.steps_per_weight_sync = config.train.steps_per_weight_sync
 
-        # Initialize TensorBoard writer
-        log_dir = "runs"
+        # Initialize TensorBoard writer with timestamped run directory
+        run_id = datetime.now().strftime("%m-%d_%H%M")
+        log_dir = f"runs/{run_id}"
         os.makedirs(log_dir, exist_ok=True)
         self.writer = SummaryWriter(log_dir=log_dir)
+        print(f"TensorBoard logging to: {log_dir}")
 
 
     def get_data_from_queue(self):
@@ -133,6 +136,8 @@ class WorldModelTrainer:
             critic_loss = torch.tensor(0.0, device=self.device)
             last_obs_pixels = None
             last_reconstruction_pixels = None
+            last_posterior_probs = None
+            last_dreamed_pixels = None
 
             for t_step in range(self.pixels.shape[1]):  # shape[1] is time dimension in (1, T, C, H, W)
                 # Extract time step with batch dimension: (1, T, C, H, W) -> (1, C, H, W)
@@ -168,9 +173,10 @@ class WorldModelTrainer:
                 for key in wm_loss_components:
                     wm_loss_components[key] += wm_loss_dict[key].item()
 
-                # Store last frame for visualization
+                # Store visualization data
                 last_obs_pixels = obs_t["pixels"]
                 last_reconstruction_pixels = obs_reconstruction["pixels"]
+                last_posterior_probs = posterior_dist.probs.detach()  # (batch, d_hidden, d_hidden/16)
 
                 # --- Dream Sequence for Actor-Critic (skip during warmup) ---
                 if self.train_step >= self.actor_warmup_steps:
@@ -220,6 +226,12 @@ class WorldModelTrainer:
                     )
                     actor_entropy_list.append(entropy.detach().cpu())
 
+                    # Decode dreamed states for visualization (every 50 steps)
+                    if self.train_step % 50 == 0:
+                        with torch.no_grad():
+                            dreamed_obs = self.world_model.decoder(dreamed_recurrent_states)
+                            last_dreamed_pixels = torch.sigmoid(dreamed_obs["pixels"]).detach()
+
                 # Accumulate losses
                 if total_wm_loss is None:
                     total_wm_loss = wm_loss
@@ -250,9 +262,10 @@ class WorldModelTrainer:
                 # Warmup: WM only
                 total_wm_loss.backward()
                 self.wm_optimizer.step()
-                # Log warmup progress
+                # Log warmup progress (per-step loss)
                 if self.train_step % 100 == 0:
-                    print(f"Warmup step {self.train_step}/{self.actor_warmup_steps}, WM Loss: {total_wm_loss.item():.4f}")
+                    seq_len = self.pixels.shape[1] if hasattr(self, 'pixels') else 1
+                    print(f"Warmup {self.train_step}/{self.actor_warmup_steps} | WM Loss/step: {total_wm_loss.item()/seq_len:.4f}")
 
             self.train_step += 1
 
@@ -268,7 +281,9 @@ class WorldModelTrainer:
                 dreamed_values_list,
                 actor_entropy_list,
                 last_obs_pixels,
-                last_reconstruction_pixels
+                last_reconstruction_pixels,
+                last_posterior_probs,
+                last_dreamed_pixels
             )
 
             # Send models to collector (only after warmup - triggers switch from random to learned)
@@ -277,9 +292,9 @@ class WorldModelTrainer:
                     print(f"Trainer: Warmup complete at step {self.train_step}. Sending initial models.")
                 else:
                     print(f"Trainer: Sending model updates at step {self.train_step}.")
-                print(f"World Model Loss: {total_wm_loss.item():.4f}")
-                print(f"Actor Loss: {total_actor_loss.item():.4f}")
-                print(f"Critic Loss: {total_critic_loss.item():.4f}")
+                # Print per-step losses (divide by sequence length)
+                seq_len = sequence_length if sequence_length > 0 else 1
+                print(f"WM Loss/step: {total_wm_loss.item()/seq_len:.4f} | Actor: {total_actor_loss.item()/seq_len:.4f} | Critic: {total_critic_loss.item()/seq_len:.4f}")
                 self.send_models_to_collector(self.train_step)
 
         torch.save(self.encoder.state_dict(), config.general.encoder_path)
@@ -506,7 +521,9 @@ class WorldModelTrainer:
         dreamed_values_list,
         actor_entropy_list,
         last_obs_pixels=None,
-        last_reconstruction_pixels=None
+        last_reconstruction_pixels=None,
+        last_posterior_probs=None,
+        last_dreamed_pixels=None
     ):
         """Log metrics to TensorBoard."""
         step = self.train_step
@@ -583,7 +600,7 @@ class WorldModelTrainer:
         self.writer.add_scalar("training/learning_rate/actor", self.actor_optimizer.param_groups[0]['lr'], step)
         self.writer.add_scalar("training/learning_rate/critic", self.critic_optimizer.param_groups[0]['lr'], step)
 
-        # Visualize reconstruction every 50 steps
+        # Visualizations every 50 steps
         if step % 50 == 0 and last_obs_pixels is not None and last_reconstruction_pixels is not None:
             # Actual pixels: already in [0, 255], normalize to [0, 1]
             actual = (last_obs_pixels / 255.0).clamp(0, 1)
@@ -592,9 +609,40 @@ class WorldModelTrainer:
             # Resize reconstruction to match actual if needed
             if recon.shape != actual.shape:
                 recon = F.interpolate(recon, size=actual.shape[2:], mode='bilinear', align_corners=False)
-            # Stack side by side: [actual, reconstruction]
-            comparison = torch.cat([actual, recon], dim=3)  # concat along width
-            self.writer.add_images("reconstruction/actual_vs_predicted", comparison, step)
+
+            # 1. Actual vs Reconstruction side by side
+            comparison = torch.cat([actual, recon], dim=3)
+            self.writer.add_images("images/actual_vs_reconstruction", comparison, step)
+
+            # 2. Reconstruction error heatmap (absolute diff, averaged over RGB)
+            error = torch.abs(actual - recon).mean(dim=1, keepdim=True)  # (B, 1, H, W)
+            # Normalize to [0, 1] for visibility and repeat to 3 channels
+            error_norm = error / (error.max() + 1e-8)
+            error_heatmap = error_norm.repeat(1, 3, 1, 1)  # grayscale to RGB
+            self.writer.add_images("images/reconstruction_error", error_heatmap, step)
+
+            # 3. Latent activation heatmap
+            if last_posterior_probs is not None:
+                # Shape: (batch, d_hidden, categories) -> take first batch, make 2D
+                latent_probs = last_posterior_probs[0]  # (512, 32)
+                # Normalize and add batch/channel dims for add_images
+                latent_img = latent_probs.unsqueeze(0).unsqueeze(0)  # (1, 1, 512, 32)
+                self.writer.add_images("images/latent_activations", latent_img, step)
+
+            # 4. Dream rollout video (imagined future frames)
+            if last_dreamed_pixels is not None:
+                # Shape: (n_dream_steps, batch, C, H, W) -> take first batch
+                dream_frames = last_dreamed_pixels[:, 0]  # (n_steps, C, H, W)
+                # Resize to match actual size if needed
+                if dream_frames.shape[2:] != actual.shape[2:]:
+                    dream_frames = F.interpolate(dream_frames, size=actual.shape[2:], mode='bilinear', align_corners=False)
+                # Add video: shape (N, T, C, H, W) - batch, time, channels, height, width
+                video = dream_frames.unsqueeze(0)  # (1, n_steps, C, H, W)
+                self.writer.add_video("video/dream_rollout", video, step, fps=4)
+                # Also add strip image for quick glance
+                n_show = min(5, dream_frames.shape[0])
+                dream_strip = torch.cat([dream_frames[i] for i in range(n_show)], dim=2)
+                self.writer.add_images("images/dream_rollout", dream_strip.unsqueeze(0), step)
 
         self.writer.flush()
 
