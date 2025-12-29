@@ -41,7 +41,7 @@ class CNNEncoderConfig(BaseModel):
 
 
 class MLPEncoderConfig(BaseModel):
-    hidden_dim_ratio: int = 16
+    hidden_dim_ratio: int = 8
     n_layers: int = 3
     latent_categories: int = 16  # Number of categories per latent variable
 
@@ -56,14 +56,14 @@ class EncoderConfig(BaseModel):
 
 
 class ModelsConfig(BaseModel):
-    d_hidden: int = 512
+    d_hidden: int = 64
     encoder: EncoderConfig = EncoderConfig()
     rnn: GRUConfig = GRUConfig()
 
 
 class TrainConfig(BaseModel):
     sequence_length: int = 25
-    max_train_steps: int = 10000
+    max_train_steps: int = 200000
     num_dream_steps: int = 10
     gamma: float = 0.99
     lam: float = 0.95
@@ -71,7 +71,7 @@ class TrainConfig(BaseModel):
     critic_lr: float = 1e-4
     actor_lr: float = 1e-4
     weight_decay: float = 1e-6
-    batch_size: int = 24
+    batch_size: int = 4
     steps_per_weight_sync: int = 5
     beta_dyn: float = 0.99
     beta_rep: float = 0.99
@@ -81,7 +81,7 @@ class TrainConfig(BaseModel):
     # Actor training stabilization
     actor_entropy_coef: float = 1e-3  # Entropy regularization coefficient
     normalize_advantages: bool = True  # Normalize advantages to stabilize training
-    actor_warmup_steps: int = 1000  # Bootstrap: WM-only training, random actions in collector
+    actor_warmup_steps: int = 0  # Bootstrap: WM-only training, random actions in collector
 
 
 class Config(BaseModel):
