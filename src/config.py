@@ -63,7 +63,7 @@ class ModelsConfig(BaseModel):
 
 class TrainConfig(BaseModel):
     sequence_length: int = 25
-    max_train_steps: int = 200000
+    max_train_steps: int = 1000000
     num_dream_steps: int = 10
     gamma: float = 0.99
     lam: float = 0.95
