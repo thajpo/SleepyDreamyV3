@@ -28,6 +28,51 @@ def start_tensorboard(logdir="runs", port=6006):
         print("TensorBoard not found. Install with: pip install tensorboard")
 
 
+def _run_training(args, mode, checkpoint_path=None):
+    """Unified training launcher for all modes."""
+    if hasattr(args, 'debug_memory') and args.debug_memory:
+        config.general.debug_memory = True
+
+    # Set steps based on mode
+    if mode == 'bootstrap':
+        config.train.max_train_steps = args.steps
+    elif hasattr(args, 'train_steps') and args.train_steps:
+        config.train.max_train_steps = args.train_steps
+
+    if mode == 'train' and hasattr(args, 'warmup_steps') and args.warmup_steps is not None:
+        config.train.actor_warmup_steps = args.warmup_steps
+
+    # Generate unique run ID for this session
+    run_id = datetime.now().strftime("%m-%d_%H%M")
+    log_dir = f"runs/{run_id}"
+    os.makedirs(log_dir, exist_ok=True)
+
+    print(f"Mode: {mode} | Steps: {config.train.max_train_steps}")
+    if checkpoint_path:
+        print(f"Loading checkpoint: {checkpoint_path}")
+
+    start_tensorboard(logdir=log_dir)
+    print("Starting experience collection and training processes...")
+
+    # Create queues for inter-process communication
+    data_queue = mp.Queue(maxsize=config.train.batch_size * 5)
+    model_queue = mp.Queue(maxsize=1)
+
+    experience_loop = mp.Process(target=collect_experiences, args=(data_queue, model_queue))
+    trainer_loop = mp.Process(
+        target=train_world_model,
+        args=(config, data_queue, model_queue, log_dir, checkpoint_path, mode)
+    )
+
+    experience_loop.start()
+    trainer_loop.start()
+
+    experience_loop.join()
+    trainer_loop.join()
+
+    print("Both processes have finished.")
+
+
 def main():
     """Initializes networks and processes for training/inference."""
     # Required for CUDA with multiprocessing
@@ -36,57 +81,55 @@ def main():
     parser = argparse.ArgumentParser(
         description="Training and inference interface for DreamerV3."
     )
-    parser.add_argument(
-        "mode",
-        help="Specify 'train' to train a world model, and 'deploy' for inference on a pretrained checkpoint",
+    subparsers = parser.add_subparsers(dest='mode', help='Operating mode')
+
+    # Train subparser (backward compatible unified training)
+    train_parser = subparsers.add_parser('train', help='Full training with warmup')
+    train_parser.add_argument(
+        '--train_steps', type=int, default=config.train.max_train_steps,
+        help=f'Number of training steps (default: {config.train.max_train_steps})'
     )
-    parser.add_argument(
-        "--train_steps", type=int, default=config.train.max_train_steps,
-        help=f"Number of training steps (default: {config.train.max_train_steps})"
+    train_parser.add_argument(
+        '--warmup_steps', type=int, default=config.train.actor_warmup_steps,
+        help=f'WM-only warmup steps before actor-critic (default: {config.train.actor_warmup_steps})'
     )
-    parser.add_argument(
-        "--debug_memory", action="store_true", help="Enable memory profiling prints"
+    train_parser.add_argument('--debug_memory', action='store_true', help='Enable memory profiling')
+
+    # Bootstrap subparser (WM-only training)
+    bootstrap_parser = subparsers.add_parser('bootstrap', help='WM-only training with random actions')
+    bootstrap_parser.add_argument(
+        '--steps', type=int, default=config.train.bootstrap_steps,
+        help=f'Number of bootstrap training steps (default: {config.train.bootstrap_steps})'
     )
-    parser.add_argument(
-        "--warmup_steps", type=int, default=config.train.actor_warmup_steps,
-        help=f"WM-only warmup steps before actor-critic training (default: {config.train.actor_warmup_steps})"
+    bootstrap_parser.add_argument('--debug_memory', action='store_true', help='Enable memory profiling')
+
+    # Dreamer subparser (full AC training from checkpoint)
+    dreamer_parser = subparsers.add_parser('dreamer', help='Full AC training from checkpoint')
+    dreamer_parser.add_argument(
+        '--checkpoint', type=str, required=True,
+        help='Path to WM or full checkpoint'
     )
+    dreamer_parser.add_argument(
+        '--train_steps', type=int, default=config.train.max_train_steps,
+        help=f'Number of training steps (default: {config.train.max_train_steps})'
+    )
+    dreamer_parser.add_argument('--debug_memory', action='store_true', help='Enable memory profiling')
+
+    # Deploy subparser (inference)
+    deploy_parser = subparsers.add_parser('deploy', help='Deploy trained model for inference')
 
     args = parser.parse_args()
 
-    if args.mode == "train":
-        if args.debug_memory:
-            config.general.debug_memory = True
-        if args.train_steps:
-            config.train.max_train_steps = args.train_steps
-        if args.warmup_steps is not None:
-            config.train.actor_warmup_steps = args.warmup_steps
-
-        # Generate unique run ID for this session
-        run_id = datetime.now().strftime("%m-%d_%H%M")
-        log_dir = f"runs/{run_id}"
-        os.makedirs(log_dir, exist_ok=True)
-
-        print(f"Training: {config.train.max_train_steps} steps, warmup: {config.train.actor_warmup_steps} steps")
-        start_tensorboard(logdir=log_dir)  # Point to this run only
-        print("Starting experience collection and training processes...")
-
-        # Create a queue to pass data from collector to trainer
-        # maxsize prevents the collector from running too far ahead and using up all the memory.
-        data_queue = mp.Queue(maxsize=config.train.batch_size * 5)
-        model_queue = mp.Queue(maxsize=1)
-        experience_loop = mp.Process(target=collect_experiences, args=(data_queue,model_queue))
-        trainer_loop = mp.Process(target=train_world_model, args=(config, data_queue, model_queue, log_dir))
-
-        experience_loop.start()
-        trainer_loop.start()
-
-        experience_loop.join()
-        trainer_loop.join()
-
-        print("Both processes have finished.")
-    elif args.mode == "deploy":
-        pass  # TODO
+    if args.mode == 'train':
+        _run_training(args, mode='train')
+    elif args.mode == 'bootstrap':
+        _run_training(args, mode='bootstrap')
+    elif args.mode == 'dreamer':
+        _run_training(args, mode='dreamer', checkpoint_path=args.checkpoint)
+    elif args.mode == 'deploy':
+        print("Deploy mode not yet implemented")
+    else:
+        parser.print_help()
 
 
 if __name__ == "__main__":

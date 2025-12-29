@@ -28,7 +28,9 @@ class WorldModelTrainer:
         config,
         data_queue,
         model_queue,
-        log_dir
+        log_dir,
+        checkpoint_path=None,
+        mode='train',
     ):
         self.device = torch.device(config.general.device)
         self.model_update_frequency = 10 # fix later
@@ -97,6 +99,22 @@ class WorldModelTrainer:
         self.step_times = []
         self.last_log_time = time.time()
         self.steps_since_log = 0
+
+        # Mode and checkpoint handling
+        self.mode = mode
+
+        if checkpoint_path:
+            self.checkpoint_type = self.load_checkpoint(checkpoint_path)
+        else:
+            self.checkpoint_type = None
+
+        # Mode-specific settings
+        if mode == 'bootstrap':
+            self.actor_warmup_steps = float('inf')  # Never train AC
+            print("Bootstrap mode: WM-only training with random actions")
+        elif mode == 'dreamer':
+            self.actor_warmup_steps = 0  # Immediate AC training
+            print("Dreamer mode: Full training from checkpoint")
 
 
     def get_data_from_queue(self):
@@ -340,11 +358,12 @@ class WorldModelTrainer:
                 last_dreamed_pixels
             )
 
-            # Send models to collector (only after warmup - triggers switch from random to learned)
-            if self.train_step >= self.actor_warmup_steps and self.train_step % self.steps_per_weight_sync == 0:
-                if self.train_step == self.actor_warmup_steps:
-                    print(f"Trainer: Warmup complete at step {self.train_step}. Sending initial models.")
-                self.send_models_to_collector(self.train_step)
+            # Send models to collector (skip in bootstrap mode - keep random actions)
+            if self.mode != 'bootstrap':
+                if self.train_step >= self.actor_warmup_steps and self.train_step % self.steps_per_weight_sync == 0:
+                    if self.train_step == self.actor_warmup_steps:
+                        print(f"Trainer: Warmup complete at step {self.train_step}. Sending initial models.")
+                    self.send_models_to_collector(self.train_step)
 
             # Periodic logging (every 100 steps)
             self.steps_since_log += 1
@@ -366,11 +385,18 @@ class WorldModelTrainer:
 
             # Checkpoint every N steps
             if self.train_step > 0 and self.train_step % self.checkpoint_interval == 0:
-                self.save_checkpoint()
+                if self.mode == 'bootstrap':
+                    self.save_wm_only_checkpoint()
+                else:
+                    self.save_checkpoint()
 
         # Final save
-        self.save_checkpoint(final=True)
-        print(f"Training complete. Final checkpoint saved to {self.checkpoint_dir}")
+        if self.mode == 'bootstrap':
+            self.save_wm_only_checkpoint(final=True)
+            print(f"Bootstrap complete. WM checkpoint saved to {self.checkpoint_dir}")
+        else:
+            self.save_checkpoint(final=True)
+            print(f"Training complete. Final checkpoint saved to {self.checkpoint_dir}")
 
         # Close TensorBoard writer
         self.writer.close()
@@ -394,6 +420,60 @@ class WorldModelTrainer:
         path = os.path.join(self.checkpoint_dir, f"checkpoint_{suffix}.pt")
         torch.save(checkpoint, path)
         print(f"Checkpoint saved: {path}")
+
+    def save_wm_only_checkpoint(self, final=False):
+        """Save WM-only checkpoint for bootstrap phase (no actor/critic)."""
+        suffix = "final" if final else f"step_{self.train_step}"
+        checkpoint = {
+            "step": self.train_step,
+            "encoder": self.encoder._orig_mod.state_dict(),
+            "world_model": {
+                k: v for k, v in self.world_model._orig_mod.state_dict().items()
+                if k not in ('h_prev', 'z_prev')
+            },
+            "wm_optimizer": self.wm_optimizer.state_dict(),
+            "checkpoint_type": "wm_only",
+        }
+        path = os.path.join(self.checkpoint_dir, f"wm_checkpoint_{suffix}.pt")
+        torch.save(checkpoint, path)
+        print(f"WM-only checkpoint saved: {path}")
+
+    def load_checkpoint(self, checkpoint_path):
+        """
+        Load checkpoint with smart actor/critic reset detection.
+
+        Returns:
+            checkpoint_type: 'wm_only' or 'full'
+        """
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+
+        # Load encoder and world_model (always present)
+        self.encoder._orig_mod.load_state_dict(checkpoint['encoder'])
+        self.world_model._orig_mod.load_state_dict(checkpoint['world_model'], strict=False)
+
+        # Restore WM optimizer if present
+        if 'wm_optimizer' in checkpoint:
+            self.wm_optimizer.load_state_dict(checkpoint['wm_optimizer'])
+
+        # Detect checkpoint type
+        if 'actor' not in checkpoint:
+            # WM-only checkpoint: actor/critic stay randomly initialized
+            print(f"Loaded WM-only checkpoint from {checkpoint_path}")
+            print("Actor/critic initialized randomly (will train from scratch)")
+            return 'wm_only'
+        else:
+            # Full checkpoint: load all weights
+            self.actor._orig_mod.load_state_dict(checkpoint['actor'])
+            self.critic._orig_mod.load_state_dict(checkpoint['critic'])
+
+            if 'actor_optimizer' in checkpoint:
+                self.actor_optimizer.load_state_dict(checkpoint['actor_optimizer'])
+            if 'critic_optimizer' in checkpoint:
+                self.critic_optimizer.load_state_dict(checkpoint['critic_optimizer'])
+
+            self.train_step = checkpoint.get('step', 0)
+            print(f"Loaded full checkpoint from {checkpoint_path} at step {self.train_step}")
+            return 'full'
 
     def update_actor_critic_losses(
             self,
@@ -763,6 +843,6 @@ class WorldModelTrainer:
             print("Trainer: Model queue was full. Skipping update.")
             pass
 
-def train_world_model(config, data_queue, model_queue, log_dir):
-    trainer = WorldModelTrainer(config, data_queue, model_queue, log_dir)
+def train_world_model(config, data_queue, model_queue, log_dir, checkpoint_path=None, mode='train'):
+    trainer = WorldModelTrainer(config, data_queue, model_queue, log_dir, checkpoint_path, mode)
     trainer.train_models()
