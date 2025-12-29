@@ -79,7 +79,20 @@ def main():
     mp.set_start_method('spawn', force=True)
 
     parser = argparse.ArgumentParser(
-        description="Training and inference interface for DreamerV3."
+        description="""DreamerV3 Training Interface
+
+Two-phase training workflow:
+  1. bootstrap  - Train world model with random actions (learns dynamics)
+  2. dreamer    - Train actor-critic on learned world model (learns policy)
+
+Or use 'train' for unified training with warmup period.
+
+Examples:
+  python -m src.main bootstrap --steps 50000
+  python -m src.main dreamer --checkpoint runs/MM-DD_HHMM/checkpoints/wm_checkpoint_final.pt
+  python -m src.main train --train_steps 100000
+""",
+        formatter_class=argparse.RawDescriptionHelpFormatter
     )
     subparsers = parser.add_subparsers(dest='mode', help='Operating mode')
 
