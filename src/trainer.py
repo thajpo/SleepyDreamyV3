@@ -92,7 +92,6 @@ class WorldModelTrainer:
             pass
 
     def train_models(self):
-        torch.autograd.set_detect_anomaly(True)
         while self.train_step < self.max_train_steps:
             self.get_data_from_queue() # TODO: Implement batching with this
 
@@ -166,93 +165,92 @@ class WorldModelTrainer:
                 # Accumulate individual loss components
                 for key in wm_loss_components:
                     wm_loss_components[key] += wm_loss_dict[key].item()
-                
-                # --- Dream Sequence for Actor-Critic ---
-                # Save h_prev to restore after dream sequence to avoid inplace modification issues
-                h_prev_backup = self.world_model.h_prev.clone()
-                (
-                    dreamed_recurrent_states,
-                    dreamed_actions_logits,
-                    dreamed_actions_sampled
-                ) = self.dream_sequence(
-                    h_z_joined,
-                    self.world_model.z_embedding(posterior_dist.probs.view(1, -1)),
-                    self.n_dream_steps
+
+                # Store last frame for visualization
+                last_obs_pixels = obs_t["pixels"]
+                last_reconstruction_pixels = obs_reconstruction["pixels"]
+
+                # --- Dream Sequence for Actor-Critic (skip during warmup) ---
+                if self.train_step >= self.actor_warmup_steps:
+                    h_prev_backup = self.world_model.h_prev.clone()
+                    (
+                        dreamed_recurrent_states,
+                        dreamed_actions_logits,
+                        dreamed_actions_sampled
+                    ) = self.dream_sequence(
+                        h_z_joined,
+                        self.world_model.z_embedding(posterior_dist.probs.view(1, -1)),
+                        self.n_dream_steps
                     )
-                # Restore h_prev to avoid affecting the computation graph
-                self.world_model.h_prev = h_prev_backup
+                    self.world_model.h_prev = h_prev_backup
 
-                # Predict rewards and values for the dreamed states
-                dreamed_rewards_logits = self.world_model.reward_predictor(
-                    dreamed_recurrent_states
-                ).detach()
-                dreamed_rewards_probs = F.softmax(dreamed_rewards_logits, dim=-1)
-                dreamed_rewards = torch.sum(dreamed_rewards_probs * self.B, dim=-1).detach()
-                dreamed_rewards_list.append(dreamed_rewards.detach().cpu())
+                    dreamed_rewards_logits = self.world_model.reward_predictor(
+                        dreamed_recurrent_states
+                    ).detach()
+                    dreamed_rewards_probs = F.softmax(dreamed_rewards_logits, dim=-1)
+                    dreamed_rewards = torch.sum(dreamed_rewards_probs * self.B, dim=-1).detach()
+                    dreamed_rewards_list.append(dreamed_rewards.detach().cpu())
 
-                dreamed_continues = self.world_model.continue_predictor(
-                    dreamed_recurrent_states
-                ).detach()
+                    dreamed_continues = self.world_model.continue_predictor(
+                        dreamed_recurrent_states
+                    ).detach()
 
-                dreamed_values_logits = self.critic(dreamed_recurrent_states)
-                dreamed_values_probs = F.softmax(dreamed_values_logits, dim=-1)
-                dreamed_values = torch.sum(dreamed_values_probs * self.B, dim=-1)
-                dreamed_values_list.append(dreamed_values.detach().cpu())
+                    dreamed_values_logits = self.critic(dreamed_recurrent_states)
+                    dreamed_values_probs = F.softmax(dreamed_values_logits, dim=-1)
+                    dreamed_values = torch.sum(dreamed_values_probs * self.B, dim=-1)
+                    dreamed_values_list.append(dreamed_values.detach().cpu())
 
-                lambda_returns = self.calculate_lambda_returns(
-                    dreamed_rewards,
-                    dreamed_values,
-                    dreamed_continues,
-                    self.gamma,
-                    self.lam,
-                    self.n_dream_steps
-                )
+                    lambda_returns = self.calculate_lambda_returns(
+                        dreamed_rewards,
+                        dreamed_values,
+                        dreamed_continues,
+                        self.gamma,
+                        self.lam,
+                        self.n_dream_steps
+                    )
 
-                actor_loss, critic_loss, entropy = self.update_actor_critic_losses(
-                    dreamed_values_logits,
-                    dreamed_values,
-                    lambda_returns,
-                    dreamed_actions_logits,
-                    dreamed_actions_sampled
-                )
-                actor_entropy_list.append(entropy.detach().cpu())
+                    actor_loss, critic_loss, entropy = self.update_actor_critic_losses(
+                        dreamed_values_logits,
+                        dreamed_values,
+                        lambda_returns,
+                        dreamed_actions_logits,
+                        dreamed_actions_sampled
+                    )
+                    actor_entropy_list.append(entropy.detach().cpu())
 
-                # Accumulate losses using regular assignment (not in-place)
-                # Only accumulate actor loss after warmup period
+                # Accumulate losses
                 if total_wm_loss is None:
                     total_wm_loss = wm_loss
                     if self.train_step >= self.actor_warmup_steps:
                         total_actor_loss = actor_loss
+                        total_critic_loss = critic_loss
                     else:
                         total_actor_loss = torch.tensor(0.0, device=self.device, requires_grad=False)
-                    total_critic_loss = critic_loss
+                        total_critic_loss = torch.tensor(0.0, device=self.device, requires_grad=False)
                 else:
-                    # Type checker: total_wm_loss is guaranteed to be a tensor here
                     total_wm_loss = total_wm_loss + wm_loss  # type: ignore
                     if self.train_step >= self.actor_warmup_steps:
                         total_actor_loss = total_actor_loss + actor_loss  # type: ignore
-                    total_critic_loss = total_critic_loss + critic_loss  # type: ignore
+                        total_critic_loss = total_critic_loss + critic_loss  # type: ignore
 
-            # Backpropagate through all objectives before updating weights to avoid
-            # autograd version issues from in-place optimizer steps.
-            # Use retain_graph=True because critic and actor losses also depend on world_model through dream sequence
-            assert (
-                total_wm_loss is not None
-                and total_actor_loss is not None
-                and total_critic_loss is not None
-            )
-            total_wm_loss.backward(retain_graph=True)
-            total_critic_loss.backward(retain_graph=True)
-            
-            # Only train actor after warmup period (allows world model to improve first)
+            # Backprop
+            assert total_wm_loss is not None and total_actor_loss is not None and total_critic_loss is not None
+
             if self.train_step >= self.actor_warmup_steps:
+                # Full training: WM + critic + actor
+                total_wm_loss.backward(retain_graph=True)
+                total_critic_loss.backward(retain_graph=True)
                 total_actor_loss.backward()
-            # Note: total_actor_loss is already set to zero tensor during warmup in accumulation phase
-
-            self.wm_optimizer.step()
-            self.critic_optimizer.step()
-            if self.train_step >= self.actor_warmup_steps:
+                self.wm_optimizer.step()
+                self.critic_optimizer.step()
                 self.actor_optimizer.step()
+            else:
+                # Warmup: WM only
+                total_wm_loss.backward()
+                self.wm_optimizer.step()
+                # Log warmup progress
+                if self.train_step % 100 == 0:
+                    print(f"Warmup step {self.train_step}/{self.actor_warmup_steps}, WM Loss: {total_wm_loss.item():.4f}")
 
             self.train_step += 1
 
@@ -266,15 +264,20 @@ class WorldModelTrainer:
                 sequence_length,
                 dreamed_rewards_list,
                 dreamed_values_list,
-                actor_entropy_list
+                actor_entropy_list,
+                last_obs_pixels if 'last_obs_pixels' in dir() else None,
+                last_reconstruction_pixels if 'last_reconstruction_pixels' in dir() else None
             )
 
-            # Periodically send updated models to the collector
-            if self.train_step % self.steps_per_weight_sync == 0:
-                print(f"Trainer: Sending model updates at step {self.train_step}.")
-                print(f"World Model Loss: {total_wm_loss.item()}")
-                print(f"Actor Loss: {total_actor_loss.item()}")
-                print(f"Critic Loss: {total_critic_loss.item()}")
+            # Send models to collector (only after warmup - triggers switch from random to learned)
+            if self.train_step >= self.actor_warmup_steps and self.train_step % self.steps_per_weight_sync == 0:
+                if self.train_step == self.actor_warmup_steps:
+                    print(f"Trainer: Warmup complete at step {self.train_step}. Sending initial models.")
+                else:
+                    print(f"Trainer: Sending model updates at step {self.train_step}.")
+                print(f"World Model Loss: {total_wm_loss.item():.4f}")
+                print(f"Actor Loss: {total_actor_loss.item():.4f}")
+                print(f"Critic Loss: {total_critic_loss.item():.4f}")
                 self.send_models_to_collector(self.train_step)
 
         torch.save(self.encoder.state_dict(), config.general.encoder_path)
@@ -302,11 +305,17 @@ class WorldModelTrainer:
 
         # Actor Loss: Policy gradient with lambda returns as advantage
         advantage = (lambda_returns - dreamed_values).detach()
+
+        # Normalize advantages for training stability
+        if self.normalize_advantages and advantage.numel() > 1:
+            advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
+
         action_dist = torch.distributions.Categorical(logits=dreamed_actions_logits)
+        entropy = action_dist.entropy().mean()
         log_probs = action_dist.log_prob(dreamed_actions_sampled)
-        
-        # Reinforce algorithm: log_prob * advantage
-        actor_loss = -torch.mean(log_probs * advantage)
+
+        # Reinforce algorithm: log_prob * advantage + entropy bonus for exploration
+        actor_loss = -torch.mean(log_probs * advantage) - self.actor_entropy_coef * entropy
 
         return actor_loss, critic_loss, entropy
 
@@ -493,7 +502,9 @@ class WorldModelTrainer:
         sequence_length,
         dreamed_rewards_list,
         dreamed_values_list,
-        actor_entropy_list
+        actor_entropy_list,
+        last_obs_pixels=None,
+        last_reconstruction_pixels=None
     ):
         """Log metrics to TensorBoard."""
         step = self.train_step
@@ -502,57 +513,49 @@ class WorldModelTrainer:
         if total_wm_loss is None or total_actor_loss is None or total_critic_loss is None:
             return
         
-        # Core losses
-        self.writer.add_scalar("loss/world_model/total", total_wm_loss.item(), step)
-        self.writer.add_scalar("loss/actor/total", total_actor_loss.item(), step)
-        self.writer.add_scalar("loss/critic/total", total_critic_loss.item(), step)
-        
-        # World model component losses
+        # All losses normalized to per-step for fair comparison
         if sequence_length > 0:
-            # Normalize by sequence length
             norm = 1.0 / sequence_length
-            self.writer.add_scalar(
-                "loss/world_model/prediction/pixel",
-                wm_loss_components['prediction_pixel'] * norm,
-                step
-            )
-            self.writer.add_scalar(
-                "loss/world_model/prediction/vector",
-                wm_loss_components['prediction_vector'] * norm,
-                step
-            )
-            self.writer.add_scalar(
-                "loss/world_model/prediction/reward",
-                wm_loss_components['prediction_reward'] * norm,
-                step
-            )
-            self.writer.add_scalar(
-                "loss/world_model/prediction/continue",
-                wm_loss_components['prediction_continue'] * norm,
-                step
-            )
-            self.writer.add_scalar(
-                "loss/world_model/dynamics",
-                wm_loss_components['dynamics'] * norm,
-                step
-            )
-            self.writer.add_scalar(
-                "loss/world_model/representation",
-                wm_loss_components['representation'] * norm,
-                step
-            )
-            
-            # Debugging: Raw KL divergences (before free bits clipping)
-            self.writer.add_scalar(
-                "debug/kl_dynamics_raw",
-                wm_loss_components['kl_dynamics_raw'] * norm,
-                step
-            )
-            self.writer.add_scalar(
-                "debug/kl_representation_raw",
-                wm_loss_components['kl_representation_raw'] * norm,
-                step
-            )
+            beta_pred = config.train.beta_pred
+            beta_dyn = config.train.beta_dyn
+            beta_rep = config.train.beta_rep
+
+            # Per-step totals
+            wm_per_step = total_wm_loss.item() * norm
+            self.writer.add_scalar("loss/world_model/total_per_step", wm_per_step, step)
+            self.writer.add_scalar("loss/actor/total_per_step", total_actor_loss.item() * norm, step)
+            self.writer.add_scalar("loss/critic/total_per_step", total_critic_loss.item() * norm, step)
+
+            # Raw component values (per-step, unscaled)
+            pixel = wm_loss_components['prediction_pixel'] * norm
+            vector = wm_loss_components['prediction_vector'] * norm
+            reward = wm_loss_components['prediction_reward'] * norm
+            cont = wm_loss_components['prediction_continue'] * norm
+            dyn = wm_loss_components['dynamics'] * norm
+            rep = wm_loss_components['representation'] * norm
+
+            # Prediction sub-components (unscaled, for debugging)
+            self.writer.add_scalar("loss/wm_components/pixel", pixel, step)
+            self.writer.add_scalar("loss/wm_components/vector", vector, step)
+            self.writer.add_scalar("loss/wm_components/reward", reward, step)
+            self.writer.add_scalar("loss/wm_components/continue", cont, step)
+            self.writer.add_scalar("loss/wm_components/dynamics", dyn, step)
+            self.writer.add_scalar("loss/wm_components/representation", rep, step)
+
+            # Scaled contributions to total (these should sum to total_per_step)
+            pred_total = pixel + vector + reward + cont
+            self.writer.add_scalar("loss/wm_scaled/prediction", beta_pred * pred_total, step)
+            self.writer.add_scalar("loss/wm_scaled/dynamics", beta_dyn * dyn, step)
+            self.writer.add_scalar("loss/wm_scaled/representation", beta_rep * rep, step)
+
+            # Raw KL divergences (before free bits clipping)
+            self.writer.add_scalar("debug/kl_dynamics_raw", wm_loss_components['kl_dynamics_raw'] * norm, step)
+            self.writer.add_scalar("debug/kl_representation_raw", wm_loss_components['kl_representation_raw'] * norm, step)
+        else:
+            # Fallback if no sequence
+            self.writer.add_scalar("loss/world_model/total_per_step", total_wm_loss.item(), step)
+            self.writer.add_scalar("loss/actor/total_per_step", total_actor_loss.item(), step)
+            self.writer.add_scalar("loss/critic/total_per_step", total_critic_loss.item(), step)
         
         # Dreamed trajectory statistics (debugging metrics)
         if dreamed_rewards_list:
@@ -569,7 +572,7 @@ class WorldModelTrainer:
         
         # Actor entropy (important for monitoring exploration)
         if actor_entropy_list:
-            all_entropy = torch.cat(actor_entropy_list, dim=0)
+            all_entropy = torch.stack(actor_entropy_list)  # stack scalars into 1D tensor
             self.writer.add_scalar("actor/entropy/mean", all_entropy.mean().item(), step)
             self.writer.add_scalar("actor/entropy/std", all_entropy.std().item(), step)
         
@@ -577,7 +580,20 @@ class WorldModelTrainer:
         self.writer.add_scalar("training/learning_rate/world_model", self.wm_optimizer.param_groups[0]['lr'], step)
         self.writer.add_scalar("training/learning_rate/actor", self.actor_optimizer.param_groups[0]['lr'], step)
         self.writer.add_scalar("training/learning_rate/critic", self.critic_optimizer.param_groups[0]['lr'], step)
-        
+
+        # Visualize reconstruction every 50 steps
+        if step % 50 == 0 and last_obs_pixels is not None and last_reconstruction_pixels is not None:
+            # Actual pixels: already in [0, 255], normalize to [0, 1]
+            actual = (last_obs_pixels / 255.0).clamp(0, 1)
+            # Reconstruction: sigmoid logits to [0, 1]
+            recon = torch.sigmoid(last_reconstruction_pixels).clamp(0, 1)
+            # Resize reconstruction to match actual if needed
+            if recon.shape != actual.shape:
+                recon = F.interpolate(recon, size=actual.shape[2:], mode='bilinear', align_corners=False)
+            # Stack side by side: [actual, reconstruction]
+            comparison = torch.cat([actual, recon], dim=3)  # concat along width
+            self.writer.add_images("reconstruction/actual_vs_predicted", comparison, step)
+
         self.writer.flush()
 
     def send_models_to_collector(self, training_step):

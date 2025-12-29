@@ -56,7 +56,7 @@ class EncoderConfig(BaseModel):
 
 
 class ModelsConfig(BaseModel):
-    d_hidden: int = 64
+    d_hidden: int = 512
     encoder: EncoderConfig = EncoderConfig()
     rnn: GRUConfig = GRUConfig()
 
@@ -81,7 +81,7 @@ class TrainConfig(BaseModel):
     # Actor training stabilization
     actor_entropy_coef: float = 1e-3  # Entropy regularization coefficient
     normalize_advantages: bool = True  # Normalize advantages to stabilize training
-    actor_warmup_steps: int = 0  # Delay actor training until world model improves
+    actor_warmup_steps: int = 1000  # Bootstrap: WM-only training, random actions in collector
 
 
 class Config(BaseModel):

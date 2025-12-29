@@ -28,10 +28,12 @@ class ObservationEncoder(nn.Module):
 
         self.latents = d_hidden
         # Use dynamic calculation based on actual config parameters
+
         n_channels = int(d_hidden / mlp_config.hidden_dim_ratio)
         cnn_out_features = (
             n_channels * 2 ** (cnn_config.num_layers - 1)
         ) * cnn_config.final_feature_size**2
+
         encoder_out = cnn_out_features + d_hidden  # CNN + MLP
         self.latent_categories = mlp_config.latent_categories
 
