@@ -87,6 +87,12 @@ class WorldModelTrainer:
         os.makedirs(self.checkpoint_dir, exist_ok=True)
         self.checkpoint_interval = 10000
 
+        # Save config snapshot
+        config_path = os.path.join(log_dir, "config.json")
+        with open(config_path, "w") as f:
+            f.write(config.model_dump_json(indent=2))
+        print(f"Config saved to: {config_path}")
+
         # Timing
         self.step_times = []
         self.last_log_time = time.time()
