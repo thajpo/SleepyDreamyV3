@@ -11,3 +11,6 @@ wheels/
 DreamerPaper.pdf
 *.h5
 *.pt
+
+# TensorBoard logs
+runs/
