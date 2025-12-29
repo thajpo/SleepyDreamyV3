@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from queue import Full, Empty
 from torch.utils.tensorboard import SummaryWriter
 import os
+import time
 
 from .config import config
 from .trainer_utils import (
@@ -53,6 +54,12 @@ class WorldModelTrainer:
             batch_size=config.train.batch_size
         )
 
+        # JIT compile models for faster execution
+        self.encoder = torch.compile(self.encoder)
+        self.world_model = torch.compile(self.world_model)
+        self.actor = torch.compile(self.actor)
+        self.critic = torch.compile(self.critic)
+
         self.wm_params = list(self.encoder.parameters()) + list(self.world_model.parameters())
         self.wm_optimizer = optim.Adam(
             self.wm_params, lr=config.train.wm_lr, weight_decay=config.train.weight_decay)
@@ -72,7 +79,18 @@ class WorldModelTrainer:
 
         # Initialize TensorBoard writer with the provided log directory
         self.writer = SummaryWriter(log_dir=log_dir)
+        self.log_dir = log_dir
         print(f"TensorBoard logging to: {log_dir}")
+
+        # Checkpointing
+        self.checkpoint_dir = os.path.join(log_dir, "checkpoints")
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
+        self.checkpoint_interval = 10000
+
+        # Timing
+        self.step_times = []
+        self.last_log_time = time.time()
+        self.steps_since_log = 0
 
 
     def get_data_from_queue(self):
@@ -228,7 +246,7 @@ class WorldModelTrainer:
 
                     dreamed_continues = self.world_model.continue_predictor(
                         dreamed_recurrent_states
-                    ).detach()
+                    ).detach().squeeze(-1)  # Remove trailing (1,) dimension
 
                     dreamed_values_logits = self.critic(dreamed_recurrent_states)
                     dreamed_values_probs = F.softmax(dreamed_values_logits, dim=-1)
@@ -279,8 +297,10 @@ class WorldModelTrainer:
 
             if self.train_step >= self.actor_warmup_steps:
                 # Full training: WM + critic + actor
-                total_wm_loss.backward(retain_graph=True)
-                total_critic_loss.backward(retain_graph=True)
+                # Note: retain_graph not needed since dream states are detached
+                # and each loss has an independent computation graph
+                total_wm_loss.backward()
+                total_critic_loss.backward()
                 total_actor_loss.backward()
                 self.wm_optimizer.step()
                 self.critic_optimizer.step()
@@ -318,18 +338,56 @@ class WorldModelTrainer:
             if self.train_step >= self.actor_warmup_steps and self.train_step % self.steps_per_weight_sync == 0:
                 if self.train_step == self.actor_warmup_steps:
                     print(f"Trainer: Warmup complete at step {self.train_step}. Sending initial models.")
-                else:
-                    print(f"Trainer: Sending model updates at step {self.train_step}.")
-                # Print per-step losses (divide by sequence length)
-                seq_len = sequence_length if sequence_length > 0 else 1
-                print(f"WM Loss/step: {total_wm_loss.item()/seq_len:.4f} | Actor: {total_actor_loss.item()/seq_len:.4f} | Critic: {total_critic_loss.item()/seq_len:.4f}")
                 self.send_models_to_collector(self.train_step)
 
-        torch.save(self.encoder.state_dict(), config.general.encoder_path)
-        torch.save(self.world_model.state_dict(), config.general.world_model_path)
-        
+            # Periodic logging (every 100 steps)
+            self.steps_since_log += 1
+            if self.train_step % 100 == 0:
+                elapsed = time.time() - self.last_log_time
+                steps_per_sec = self.steps_since_log / elapsed if elapsed > 0 else 0
+                seq_len = sequence_length if sequence_length > 0 else 1
+                eta_hours = (self.max_train_steps - self.train_step) / steps_per_sec / 3600 if steps_per_sec > 0 else 0
+
+                print(f"Step {self.train_step}/{self.max_train_steps} | "
+                      f"{steps_per_sec:.2f} steps/s | ETA: {eta_hours:.1f}h | "
+                      f"WM: {total_wm_loss.item()/seq_len:.4f} | "
+                      f"Actor: {total_actor_loss.item()/seq_len:.4f} | "
+                      f"Critic: {total_critic_loss.item()/seq_len:.4f}")
+
+                self.writer.add_scalar("training/steps_per_sec", steps_per_sec, self.train_step)
+                self.last_log_time = time.time()
+                self.steps_since_log = 0
+
+            # Checkpoint every N steps
+            if self.train_step > 0 and self.train_step % self.checkpoint_interval == 0:
+                self.save_checkpoint()
+
+        # Final save
+        self.save_checkpoint(final=True)
+        print(f"Training complete. Final checkpoint saved to {self.checkpoint_dir}")
+
         # Close TensorBoard writer
         self.writer.close()
+
+    def save_checkpoint(self, final=False):
+        """Save all model checkpoints."""
+        suffix = "final" if final else f"step_{self.train_step}"
+        checkpoint = {
+            "step": self.train_step,
+            "encoder": self.encoder._orig_mod.state_dict(),
+            "world_model": {
+                k: v for k, v in self.world_model._orig_mod.state_dict().items()
+                if k not in ('h_prev', 'z_prev')
+            },
+            "actor": self.actor._orig_mod.state_dict(),
+            "critic": self.critic._orig_mod.state_dict(),
+            "wm_optimizer": self.wm_optimizer.state_dict(),
+            "actor_optimizer": self.actor_optimizer.state_dict(),
+            "critic_optimizer": self.critic_optimizer.state_dict(),
+        }
+        path = os.path.join(self.checkpoint_dir, f"checkpoint_{suffix}.pt")
+        torch.save(checkpoint, path)
+        print(f"Checkpoint saved: {path}")
 
     def update_actor_critic_losses(
             self,
@@ -629,26 +687,24 @@ class WorldModelTrainer:
         self.writer.add_scalar("training/learning_rate/actor", self.actor_optimizer.param_groups[0]['lr'], step)
         self.writer.add_scalar("training/learning_rate/critic", self.critic_optimizer.param_groups[0]['lr'], step)
 
-        # Visualizations every 50 steps
+        # Visualizations every 50 steps (show first sample only)
         if step % 50 == 0 and last_obs_pixels is not None and last_reconstruction_pixels is not None:
-            # Actual pixels: already in [0, 255], normalize to [0, 1]
-            actual = (last_obs_pixels / 255.0).clamp(0, 1)
-            # Reconstruction: sigmoid logits to [0, 1]
-            recon = torch.sigmoid(last_reconstruction_pixels).clamp(0, 1)
+            # Take first sample from batch
+            actual = (last_obs_pixels[0] / 255.0).clamp(0, 1)  # (C, H, W)
+            recon = torch.sigmoid(last_reconstruction_pixels[0]).clamp(0, 1)  # (C, H, W)
             # Resize reconstruction to match actual if needed
             if recon.shape != actual.shape:
-                recon = F.interpolate(recon, size=actual.shape[2:], mode='bilinear', align_corners=False)
+                recon = F.interpolate(recon.unsqueeze(0), size=actual.shape[1:], mode='bilinear', align_corners=False).squeeze(0)
 
             # 1. Actual vs Reconstruction side by side
-            comparison = torch.cat([actual, recon], dim=3)
-            self.writer.add_images("images/actual_vs_reconstruction", comparison, step)
+            comparison = torch.cat([actual, recon], dim=2)  # concat on width
+            self.writer.add_image("images/actual_vs_reconstruction", comparison, step)
 
             # 2. Reconstruction error heatmap (absolute diff, averaged over RGB)
-            error = torch.abs(actual - recon).mean(dim=1, keepdim=True)  # (B, 1, H, W)
-            # Normalize to [0, 1] for visibility and repeat to 3 channels
+            error = torch.abs(actual - recon).mean(dim=0, keepdim=True)  # (1, H, W)
             error_norm = error / (error.max() + 1e-8)
-            error_heatmap = error_norm.repeat(1, 3, 1, 1)  # grayscale to RGB
-            self.writer.add_images("images/reconstruction_error", error_heatmap, step)
+            error_heatmap = error_norm.repeat(3, 1, 1)  # grayscale to RGB
+            self.writer.add_image("images/reconstruction_error", error_heatmap, step)
 
             # 3. Latent activation heatmap
             if last_posterior_probs is not None:
@@ -675,18 +731,22 @@ class WorldModelTrainer:
 
             # 5. Original resolution image (larger, easier to see)
             if last_obs_pixels_original is not None:
-                original = (last_obs_pixels_original / 255.0).clamp(0, 1)
-                self.writer.add_images("images/original_resolution", original, step)
+                original = (last_obs_pixels_original[0] / 255.0).clamp(0, 1)  # First sample only
+                self.writer.add_image("images/original_resolution", original, step)
 
         self.writer.flush()
 
     def send_models_to_collector(self, training_step):
+        # Use _orig_mod to get state_dict without torch.compile prefix
+        # Exclude h_prev/z_prev buffers as they have batch-size-dependent shapes
+        wm_state = {
+            k: v.cpu() for k, v in self.world_model._orig_mod.state_dict().items()
+            if k not in ('h_prev', 'z_prev')
+        }
         models_to_send = {
-            "actor": {k: v.cpu() for k, v in self.actor.state_dict().items()},
-            "encoder": {k: v.cpu() for k, v in self.encoder.state_dict().items()},
-            "world_model": {
-                k: v.cpu() for k, v in self.world_model.state_dict().items()
-            },
+            "actor": {k: v.cpu() for k, v in self.actor._orig_mod.state_dict().items()},
+            "encoder": {k: v.cpu() for k, v in self.encoder._orig_mod.state_dict().items()},
+            "world_model": wm_state,
         }
         try:
             # Clear queue to ensure collector gets the latest version
