@@ -131,6 +131,8 @@ class WorldModelTrainer:
             wm_loss = torch.tensor(0.0, device=self.device)
             actor_loss = torch.tensor(0.0, device=self.device)
             critic_loss = torch.tensor(0.0, device=self.device)
+            last_obs_pixels = None
+            last_reconstruction_pixels = None
 
             for t_step in range(self.pixels.shape[1]):  # shape[1] is time dimension in (1, T, C, H, W)
                 # Extract time step with batch dimension: (1, T, C, H, W) -> (1, C, H, W)
@@ -265,8 +267,8 @@ class WorldModelTrainer:
                 dreamed_rewards_list,
                 dreamed_values_list,
                 actor_entropy_list,
-                last_obs_pixels if 'last_obs_pixels' in dir() else None,
-                last_reconstruction_pixels if 'last_reconstruction_pixels' in dir() else None
+                last_obs_pixels,
+                last_reconstruction_pixels
             )
 
             # Send models to collector (only after warmup - triggers switch from random to learned)
