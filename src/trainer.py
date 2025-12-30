@@ -31,6 +31,7 @@ class WorldModelTrainer:
         log_dir,
         checkpoint_path=None,
         mode='train',
+        reset_ac=False,
     ):
         self.device = torch.device(config.general.device)
         self.model_update_frequency = 10 # fix later
@@ -102,9 +103,10 @@ class WorldModelTrainer:
 
         # Mode and checkpoint handling
         self.mode = mode
+        self.reset_ac = reset_ac
 
         if checkpoint_path:
-            self.checkpoint_type = self.load_checkpoint(checkpoint_path)
+            self.checkpoint_type = self.load_checkpoint(checkpoint_path, reset_ac=reset_ac)
         else:
             self.checkpoint_type = None
 
@@ -114,7 +116,10 @@ class WorldModelTrainer:
             print("Bootstrap mode: WM-only training with random actions")
         elif mode == 'dreamer':
             self.actor_warmup_steps = 0  # Immediate AC training
-            print("Dreamer mode: Full training from checkpoint")
+            if reset_ac:
+                print("Dreamer mode: Fresh actor/critic, keeping WM weights")
+            else:
+                print("Dreamer mode: Resuming all weights from checkpoint")
 
 
     def get_data_from_queue(self):
@@ -438,12 +443,16 @@ class WorldModelTrainer:
         torch.save(checkpoint, path)
         print(f"WM-only checkpoint saved: {path}")
 
-    def load_checkpoint(self, checkpoint_path):
+    def load_checkpoint(self, checkpoint_path, reset_ac=False):
         """
-        Load checkpoint with smart actor/critic reset detection.
+        Load checkpoint with explicit control over actor/critic loading.
+
+        Args:
+            checkpoint_path: Path to checkpoint file
+            reset_ac: If True, skip loading actor/critic (keep random init)
 
         Returns:
-            checkpoint_type: 'wm_only' or 'full'
+            checkpoint_type: 'wm_only', 'full', or 'reset_ac'
         """
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
 
@@ -455,14 +464,21 @@ class WorldModelTrainer:
         if 'wm_optimizer' in checkpoint:
             self.wm_optimizer.load_state_dict(checkpoint['wm_optimizer'])
 
-        # Detect checkpoint type
-        if 'actor' not in checkpoint:
-            # WM-only checkpoint: actor/critic stay randomly initialized
+        # Handle actor/critic based on explicit user intent
+        has_ac = 'actor' in checkpoint
+
+        if reset_ac:
+            # User explicitly requested fresh actor/critic
+            print(f"Loaded WM weights from {checkpoint_path}")
+            print("Actor/critic reset to random (--reset-ac)")
+            return 'reset_ac'
+        elif not has_ac:
+            # WM-only checkpoint, no AC to load
             print(f"Loaded WM-only checkpoint from {checkpoint_path}")
-            print("Actor/critic initialized randomly (will train from scratch)")
+            print("Actor/critic initialized randomly")
             return 'wm_only'
         else:
-            # Full checkpoint: load all weights
+            # Full checkpoint with --resume: load everything
             self.actor._orig_mod.load_state_dict(checkpoint['actor'])
             self.critic._orig_mod.load_state_dict(checkpoint['critic'])
 
@@ -472,7 +488,7 @@ class WorldModelTrainer:
                 self.critic_optimizer.load_state_dict(checkpoint['critic_optimizer'])
 
             self.train_step = checkpoint.get('step', 0)
-            print(f"Loaded full checkpoint from {checkpoint_path} at step {self.train_step}")
+            print(f"Resumed full checkpoint from {checkpoint_path} at step {self.train_step}")
             return 'full'
 
     def update_actor_critic_losses(
@@ -843,6 +859,6 @@ class WorldModelTrainer:
             print("Trainer: Model queue was full. Skipping update.")
             pass
 
-def train_world_model(config, data_queue, model_queue, log_dir, checkpoint_path=None, mode='train'):
-    trainer = WorldModelTrainer(config, data_queue, model_queue, log_dir, checkpoint_path, mode)
+def train_world_model(config, data_queue, model_queue, log_dir, checkpoint_path=None, mode='train', reset_ac=False):
+    trainer = WorldModelTrainer(config, data_queue, model_queue, log_dir, checkpoint_path, mode, reset_ac)
     trainer.train_models()

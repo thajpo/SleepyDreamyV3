@@ -28,7 +28,7 @@ def start_tensorboard(logdir="runs", port=6006):
         print("TensorBoard not found. Install with: pip install tensorboard")
 
 
-def _run_training(args, mode, checkpoint_path=None):
+def _run_training(args, mode, checkpoint_path=None, reset_ac=False):
     """Unified training launcher for all modes."""
     if hasattr(args, 'debug_memory') and args.debug_memory:
         config.general.debug_memory = True
@@ -61,7 +61,7 @@ def _run_training(args, mode, checkpoint_path=None):
     experience_loop = mp.Process(target=collect_experiences, args=(data_queue, model_queue))
     trainer_loop = mp.Process(
         target=train_world_model,
-        args=(config, data_queue, model_queue, log_dir, checkpoint_path, mode)
+        args=(config, data_queue, model_queue, log_dir, checkpoint_path, mode, reset_ac)
     )
 
     experience_loop.start()
@@ -120,7 +120,17 @@ Examples:
     dreamer_parser = subparsers.add_parser('dreamer', help='Full AC training from checkpoint')
     dreamer_parser.add_argument(
         '--checkpoint', type=str, required=True,
-        help='Path to WM or full checkpoint'
+        help='Path to checkpoint file'
+    )
+    # Require explicit intent - no auto-detection
+    dreamer_ac_group = dreamer_parser.add_mutually_exclusive_group(required=True)
+    dreamer_ac_group.add_argument(
+        '--reset-ac', action='store_true',
+        help='Reset actor/critic to random (keep WM weights only)'
+    )
+    dreamer_ac_group.add_argument(
+        '--resume', action='store_true',
+        help='Resume all weights from checkpoint (WM + actor/critic)'
     )
     dreamer_parser.add_argument(
         '--train_steps', type=int, default=config.train.max_train_steps,
@@ -138,7 +148,8 @@ Examples:
     elif args.mode == 'bootstrap':
         _run_training(args, mode='bootstrap')
     elif args.mode == 'dreamer':
-        _run_training(args, mode='dreamer', checkpoint_path=args.checkpoint)
+        reset_ac = getattr(args, 'reset_ac', False)
+        _run_training(args, mode='dreamer', checkpoint_path=args.checkpoint, reset_ac=reset_ac)
     elif args.mode == 'deploy':
         print("Deploy mode not yet implemented")
     else:
