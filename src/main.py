@@ -5,11 +5,39 @@ import multiprocessing as mp
 import subprocess
 import atexit
 import os
+import yaml
 from datetime import datetime
 
 from .config import config
 from .trainer import train_world_model
 from .environment import collect_experiences
+
+
+def load_env_config(config_path):
+    """Load YAML config and apply overrides to global config."""
+    with open(config_path, 'r') as f:
+        overrides = yaml.safe_load(f)
+
+    # Apply nested overrides
+    if 'environment' in overrides:
+        for key, value in overrides['environment'].items():
+            if hasattr(config.environment, key):
+                setattr(config.environment, key, value)
+
+    if 'models' in overrides:
+        for key, value in overrides['models'].items():
+            if hasattr(config.models, key):
+                setattr(config.models, key, value)
+
+    if 'train' in overrides:
+        for key, value in overrides['train'].items():
+            if hasattr(config.train, key):
+                setattr(config.train, key, value)
+
+    print(f"Loaded config: {config_path}")
+    print(f"  Environment: {config.environment.environment_name}")
+    print(f"  Actions: {config.environment.n_actions}, Observations: {config.environment.n_observations}")
+    print(f"  d_hidden: {config.models.d_hidden}")
 
 _tensorboard_process = None
 
@@ -33,13 +61,18 @@ def _run_training(args, mode, checkpoint_path=None, reset_ac=False):
     if hasattr(args, 'debug_memory') and args.debug_memory:
         config.general.debug_memory = True
 
-    # Set steps based on mode
-    if mode == 'bootstrap':
+    # CLI args override config (if provided)
+    if mode == 'bootstrap' and hasattr(args, 'steps') and args.steps:
         config.train.max_train_steps = args.steps
-    elif hasattr(args, 'train_steps') and args.train_steps:
+    else:
+        # Use bootstrap_steps from config for bootstrap mode
+        if mode == 'bootstrap':
+            config.train.max_train_steps = config.train.bootstrap_steps
+
+    if hasattr(args, 'train_steps') and args.train_steps:
         config.train.max_train_steps = args.train_steps
 
-    if mode == 'train' and hasattr(args, 'warmup_steps') and args.warmup_steps is not None:
+    if hasattr(args, 'warmup_steps') and args.warmup_steps is not None:
         config.train.actor_warmup_steps = args.warmup_steps
 
     # Generate unique run ID for this session
@@ -98,26 +131,29 @@ Examples:
 
     # Train subparser (backward compatible unified training)
     train_parser = subparsers.add_parser('train', help='Full training with warmup')
+    train_parser.add_argument('--config', type=str, help='Path to env config YAML (e.g., env_configs/cartpole.yaml)')
     train_parser.add_argument(
-        '--train_steps', type=int, default=config.train.max_train_steps,
-        help=f'Number of training steps (default: {config.train.max_train_steps})'
+        '--train_steps', type=int,
+        help='Number of training steps (overrides config)'
     )
     train_parser.add_argument(
-        '--warmup_steps', type=int, default=config.train.actor_warmup_steps,
-        help=f'WM-only warmup steps before actor-critic (default: {config.train.actor_warmup_steps})'
+        '--warmup_steps', type=int,
+        help='WM-only warmup steps before actor-critic (overrides config)'
     )
     train_parser.add_argument('--debug_memory', action='store_true', help='Enable memory profiling')
 
     # Bootstrap subparser (WM-only training)
     bootstrap_parser = subparsers.add_parser('bootstrap', help='WM-only training with random actions')
+    bootstrap_parser.add_argument('--config', type=str, help='Path to env config YAML (e.g., env_configs/cartpole.yaml)')
     bootstrap_parser.add_argument(
-        '--steps', type=int, default=config.train.bootstrap_steps,
-        help=f'Number of bootstrap training steps (default: {config.train.bootstrap_steps})'
+        '--steps', type=int,
+        help='Number of bootstrap training steps (overrides config)'
     )
     bootstrap_parser.add_argument('--debug_memory', action='store_true', help='Enable memory profiling')
 
     # Dreamer subparser (full AC training from checkpoint)
     dreamer_parser = subparsers.add_parser('dreamer', help='Full AC training from checkpoint')
+    dreamer_parser.add_argument('--config', type=str, help='Path to env config YAML (e.g., env_configs/cartpole.yaml)')
     dreamer_parser.add_argument(
         '--checkpoint', type=str, required=True,
         help='Path to checkpoint file'
@@ -142,6 +178,10 @@ Examples:
     deploy_parser = subparsers.add_parser('deploy', help='Deploy trained model for inference')
 
     args = parser.parse_args()
+
+    # Load env config if provided (before any mode-specific logic)
+    if hasattr(args, 'config') and args.config:
+        load_env_config(args.config)
 
     if args.mode == 'train':
         _run_training(args, mode='train')

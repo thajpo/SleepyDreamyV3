@@ -1,0 +1,17 @@
+# LunarLander-v3: Standard benchmark
+# 8D observation, 4 actions, physics-based dynamics
+
+environment:
+  environment_name: LunarLander-v3
+  n_actions: 4
+  n_observations: 8
+
+models:
+  d_hidden: 256  # Larger model for more complex env
+
+train:
+  batch_size: 8
+  max_train_steps: 100000
+  bootstrap_steps: 50000
+  actor_warmup_steps: 1000
+  actor_entropy_coef: 0.01
