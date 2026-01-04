@@ -245,10 +245,25 @@ class WorldModelTrainer:
             # --- PROFILE: Forward pass ---
             t0 = time.perf_counter()
 
-            for t_step in range(
-                self.pixels.shape[1]
-            ):  # shape[1] is time dimension in (1, T, C, H, W)
-                # Extract time step with batch dimension: (1, T, C, H, W) -> (1, C, H, W)
+            # Phase 2: Batch encode all timesteps at once (single encoder forward pass)
+            B, T = self.pixels.shape[:2]
+            pixels_flat = self.pixels.view(
+                B * T, *self.pixels.shape[2:]
+            )  # (B*T, C, H, W)
+            states_flat = self.states.view(B * T, self.states.shape[-1])  # (B*T, n_obs)
+            all_posterior_logits = self.encoder(
+                {
+                    "pixels": pixels_flat,
+                    "state": states_flat,
+                }
+            )  # (B*T, d_hidden, categories)
+            # Reshape back to (B, T, d_hidden, categories)
+            all_posterior_logits = all_posterior_logits.view(
+                B, T, *all_posterior_logits.shape[1:]
+            )
+
+            for t_step in range(T):
+                # Extract time step - now just indexing, no encoder call
                 obs_t = {
                     "pixels": self.pixels[:, t_step],
                     "state": self.states[:, t_step],
@@ -257,7 +272,8 @@ class WorldModelTrainer:
                 reward_t = self.rewards[:, t_step]
                 terminated_t = self.terminated[:, t_step]
 
-                posterior_logits = self.encoder(obs_t)  # This is z_t
+                # Use pre-computed encoder output
+                posterior_logits = all_posterior_logits[:, t_step]
                 posterior_dist = dist.Categorical(logits=posterior_logits)
 
                 (
@@ -421,9 +437,9 @@ class WorldModelTrainer:
                 total_t = t_data_acc + t_forward_acc + t_backward_acc
                 if total_t > 0:
                     print(
-                        f"[PROFILE] data: {t_data_acc/total_t*100:5.1f}% | "
-                        f"fwd: {t_forward_acc/total_t*100:5.1f}% | "
-                        f"bwd: {t_backward_acc/total_t*100:5.1f}% | "
+                        f"[PROFILE] data: {t_data_acc / total_t * 100:5.1f}% | "
+                        f"fwd: {t_forward_acc / total_t * 100:5.1f}% | "
+                        f"bwd: {t_backward_acc / total_t * 100:5.1f}% | "
                         f"total: {total_t:.2f}s/{profile_interval} steps"
                     )
                 t_data_acc, t_forward_acc, t_backward_acc = 0.0, 0.0, 0.0
@@ -835,6 +851,9 @@ class WorldModelTrainer:
             beta_dyn = config.train.beta_dyn
             beta_rep = config.train.beta_rep
 
+            # Convert tensor loss components to CPU floats (single sync for all 8 components)
+            wm_components_cpu = {k: v.item() for k, v in wm_loss_components.items()}
+
             # Per-step totals
             wm_per_step = total_wm_loss.item() * norm
             self.writer.add_scalar("loss/world_model/total_per_step", wm_per_step, step)
@@ -846,12 +865,12 @@ class WorldModelTrainer:
             )
 
             # Raw component values (per-step, unscaled)
-            pixel = wm_loss_components["prediction_pixel"] * norm
-            vector = wm_loss_components["prediction_vector"] * norm
-            reward = wm_loss_components["prediction_reward"] * norm
-            cont = wm_loss_components["prediction_continue"] * norm
-            dyn = wm_loss_components["dynamics"] * norm
-            rep = wm_loss_components["representation"] * norm
+            pixel = wm_components_cpu["prediction_pixel"] * norm
+            vector = wm_components_cpu["prediction_vector"] * norm
+            reward = wm_components_cpu["prediction_reward"] * norm
+            cont = wm_components_cpu["prediction_continue"] * norm
+            dyn = wm_components_cpu["dynamics"] * norm
+            rep = wm_components_cpu["representation"] * norm
 
             # Prediction sub-components (unscaled, for debugging)
             self.writer.add_scalar("loss/wm_components/pixel", pixel, step)
@@ -874,12 +893,12 @@ class WorldModelTrainer:
             # Raw KL divergences (before free bits clipping)
             self.writer.add_scalar(
                 "debug/kl_dynamics_raw",
-                wm_loss_components["kl_dynamics_raw"] * norm,
+                wm_components_cpu["kl_dynamics_raw"] * norm,
                 step,
             )
             self.writer.add_scalar(
                 "debug/kl_representation_raw",
-                wm_loss_components["kl_representation_raw"] * norm,
+                wm_components_cpu["kl_representation_raw"] * norm,
                 step,
             )
         else:
@@ -895,39 +914,54 @@ class WorldModelTrainer:
             )
 
         # Dreamed trajectory statistics (debugging metrics)
+        # Batch stats computation and sync once to reduce GPU stalls
         if dreamed_rewards_list:
             all_dreamed_rewards = torch.cat(dreamed_rewards_list, dim=0)
+            reward_stats = torch.stack(
+                [
+                    all_dreamed_rewards.mean(),
+                    all_dreamed_rewards.std(),
+                    all_dreamed_rewards.min(),
+                    all_dreamed_rewards.max(),
+                ]
+            ).cpu()  # Single sync for all 4 stats
             self.writer.add_scalar(
-                "debug/dream/reward/mean", all_dreamed_rewards.mean().item(), step
+                "debug/dream/reward/mean", reward_stats[0].item(), step
             )
             self.writer.add_scalar(
-                "debug/dream/reward/std", all_dreamed_rewards.std().item(), step
+                "debug/dream/reward/std", reward_stats[1].item(), step
             )
             self.writer.add_scalar(
-                "debug/dream/reward/min", all_dreamed_rewards.min().item(), step
+                "debug/dream/reward/min", reward_stats[2].item(), step
             )
             self.writer.add_scalar(
-                "debug/dream/reward/max", all_dreamed_rewards.max().item(), step
+                "debug/dream/reward/max", reward_stats[3].item(), step
             )
 
         if dreamed_values_list:
             all_dreamed_values = torch.cat(dreamed_values_list, dim=0)
+            value_stats = torch.stack(
+                [
+                    all_dreamed_values.mean(),
+                    all_dreamed_values.std(),
+                ]
+            ).cpu()  # Single sync for both stats
             self.writer.add_scalar(
-                "debug/dream/value/mean", all_dreamed_values.mean().item(), step
+                "debug/dream/value/mean", value_stats[0].item(), step
             )
-            self.writer.add_scalar(
-                "debug/dream/value/std", all_dreamed_values.std().item(), step
-            )
+            self.writer.add_scalar("debug/dream/value/std", value_stats[1].item(), step)
 
         # Actor entropy (important for monitoring exploration)
         if actor_entropy_list:
-            all_entropy = torch.stack(
-                actor_entropy_list
-            )  # stack scalars into 1D tensor
-            self.writer.add_scalar(
-                "actor/entropy/mean", all_entropy.mean().item(), step
-            )
-            self.writer.add_scalar("actor/entropy/std", all_entropy.std().item(), step)
+            all_entropy = torch.stack(actor_entropy_list)
+            entropy_stats = torch.stack(
+                [
+                    all_entropy.mean(),
+                    all_entropy.std(),
+                ]
+            ).cpu()  # Single sync for both stats
+            self.writer.add_scalar("actor/entropy/mean", entropy_stats[0].item(), step)
+            self.writer.add_scalar("actor/entropy/std", entropy_stats[1].item(), step)
 
         # Learning rates
         self.writer.add_scalar(
