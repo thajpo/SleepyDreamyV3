@@ -9,10 +9,11 @@ class ObservationEncoder(nn.Module):
         mlp_config,
         cnn_config,
         d_hidden,
+        n_observations,
     ):
         super().__init__()
         self.MLP = ThreeLayerMLP(
-            d_in=8, d_hidden=d_hidden, d_out=d_hidden
+            d_in=n_observations, d_hidden=d_hidden, d_out=d_hidden
         )
         self.CNN = ObservationCNNEncoder(
             target_size=cnn_config.target_size,
