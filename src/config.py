@@ -83,6 +83,10 @@ class TrainConfig(BaseModel):
     normalize_advantages: bool = True  # Normalize advantages to stabilize training
     actor_warmup_steps: int = 1000  # Bootstrap: WM-only training, random actions in collector
     bootstrap_steps: int = 50000  # Default steps for bootstrap mode
+    num_collectors: int = 1  # Number of parallel environment collectors
+    # Replay buffer settings
+    replay_buffer_size: int = 1000  # Max episodes stored in replay buffer
+    min_buffer_episodes: int = 64   # Wait for this many episodes before training starts
 
 
 class Config(BaseModel):
