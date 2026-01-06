@@ -1,11 +1,18 @@
 import gymnasium as gym
 import numpy as np
+import os
 from gymnasium.wrappers import AddRenderObservation
 import h5py
 import torch
 import torch.nn.functional as F
 from queue import Empty
 import cv2
+from torch.profiler import (
+    ProfilerActivity,
+    profile,
+    schedule,
+    tensorboard_trace_handler,
+)
 
 from .config import config
 from .trainer_utils import initialize_actor, initialize_world_model
@@ -24,7 +31,7 @@ def create_env_with_vision(env_name):
     )
     return env
 
-def collect_experiences(data_queue, model_queue, config, stop_event):
+def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=None):
     """
     Continuously collects experiences from the environment and puts them on a queue.
 
@@ -43,6 +50,28 @@ def collect_experiences(data_queue, model_queue, config, stop_event):
     world_model = None
 
     episode_count = 0
+    profiler = None
+    profile_chunk_steps = 200
+    if getattr(config.general, "profile", False) and log_dir:
+        profile_dir = os.path.join(log_dir, "profiler", f"collector_{os.getpid()}")
+        os.makedirs(profile_dir, exist_ok=True)
+        activities = [ProfilerActivity.CPU]
+        if torch.cuda.is_available():
+            activities.append(ProfilerActivity.CUDA)
+        trace_handler = tensorboard_trace_handler(profile_dir)
+        profiler = profile(
+            activities=activities,
+            schedule=schedule(wait=0, warmup=0, active=profile_chunk_steps, repeat=0),
+            on_trace_ready=trace_handler,
+            record_shapes=True,
+            with_stack=True,
+            profile_memory=True,
+        )
+        profiler.__enter__()
+        print(
+            "Collector profiler enabled for full run; saving a trace every "
+            f"{profile_chunk_steps} steps. Traces: {profile_dir}"
+        )
 
     while not stop_event.is_set():
         # Check for model updates from trainer
@@ -124,6 +153,9 @@ def collect_experiences(data_queue, model_queue, config, stop_event):
             episode_rewards.append(reward)
             episode_terminated.append(terminated)
 
+            if profiler:
+                profiler.step()
+
             if terminated or truncated:
                 break
 
@@ -138,6 +170,8 @@ def collect_experiences(data_queue, model_queue, config, stop_event):
 
             data_queue.put((pixels_np, vec_obs_np, actions_np, rewards_np, terminated_np))
 
+    if profiler:
+        profiler.__exit__(None, None, None)
     # Cleanup
     env.close()
     print("Experience collector: Stopped gracefully.")

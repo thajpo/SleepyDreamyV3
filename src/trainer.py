@@ -3,12 +3,20 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.distributions as dist
 import torch.nn.functional as F
+from collections import deque
 from queue import Full, Empty
 from torch.utils.tensorboard import SummaryWriter
+from torch.profiler import (
+    ProfilerActivity,
+    profile,
+    schedule,
+    tensorboard_trace_handler,
+)
 import os
 import time
 
 from .config import config
+from .replay_buffer import EpisodeReplayBuffer
 from .trainer_utils import (
     symlog,
     symexp,
@@ -34,6 +42,7 @@ class WorldModelTrainer:
         mode="train",
         reset_ac=False,
     ):
+        self.config = config  # Store config for use in methods
         self.device = torch.device(config.general.device)
         self.model_update_frequency = 10  # fix later
         self.n_dream_steps = config.train.num_dream_steps
@@ -51,17 +60,25 @@ class WorldModelTrainer:
         )
         self.B = symexp(beta_range)
 
-        self.actor = initialize_actor(self.device)
-        self.critic = initialize_critic(self.device)
+        self.actor = initialize_actor(self.device, config)
+        self.critic = initialize_critic(self.device, config)
         self.encoder, self.world_model = initialize_world_model(
-            self.device, batch_size=config.train.batch_size
+            self.device, config, batch_size=config.train.batch_size
         )
 
-        # JIT compile models for faster execution
-        self.encoder = torch.compile(self.encoder)
-        self.world_model = torch.compile(self.world_model)
-        self.actor = torch.compile(self.actor)
-        self.critic = torch.compile(self.critic)
+        self.compile_models = getattr(config.general, "compile_models", False)
+        if self.compile_models:
+            if hasattr(torch, "compile"):
+                try:
+                    self.encoder = torch.compile(self.encoder)
+                    self.world_model = torch.compile(self.world_model)
+                    self.actor = torch.compile(self.actor)
+                    self.critic = torch.compile(self.critic)
+                    print("torch.compile enabled for trainer models.")
+                except Exception as exc:
+                    print(f"torch.compile failed ({exc}); running uncompiled.")
+            else:
+                print("torch.compile not available; running uncompiled.")
 
         self.wm_params = list(self.encoder.parameters()) + list(
             self.world_model.parameters()
@@ -90,11 +107,28 @@ class WorldModelTrainer:
         self.n_actions = config.environment.n_actions
         self.steps_per_weight_sync = config.train.steps_per_weight_sync
         self.batch_size = config.train.batch_size
+        self.profile_enabled = getattr(config.general, "profile", False)
+
+        # Replay buffer: background thread drains queue, sample() returns instantly
+        self.replay_buffer = EpisodeReplayBuffer(
+            data_queue=data_queue,
+            max_episodes=config.train.replay_buffer_size,
+            min_episodes=config.train.batch_size
+            * 2,  # Wait for 2 batches worth before starting
+            sequence_length=config.train.sequence_length,
+        )
+        self.replay_buffer.start()
+        print(f"Replay buffer started (max={config.train.replay_buffer_size} episodes)")
 
         # Initialize TensorBoard writer with the provided log directory
         self.writer = SummaryWriter(log_dir=log_dir)
         self.log_dir = log_dir
         print(f"TensorBoard logging to: {log_dir}")
+        self.log_every = 25
+        self.image_log_every = 250
+
+        # Episode length tracking for convergence monitoring
+        self._recent_episode_lengths = deque(maxlen=100)
 
         # Checkpointing
         self.checkpoint_dir = os.path.join(log_dir, "checkpoints")
@@ -134,65 +168,92 @@ class WorldModelTrainer:
             else:
                 print("Dreamer mode: Resuming all weights from checkpoint")
 
-    def get_data_from_queue(self):
-        """Collect batch_size sequences from queue, truncate to min length, stack into batch."""
-        try:
-            batch_pixels = []
-            batch_pixels_original = []
-            batch_states = []
-            batch_actions = []
-            batch_rewards = []
-            batch_terminated = []
+    def get_data_from_buffer(self):
+        """Sample batch from replay buffer (non-blocking after initial fill)."""
+        # Sample returns list of (pixels, states, actions, rewards, terminated) tuples
+        # Each already has fixed sequence_length from buffer's _sample_subsequence
+        batch = self.replay_buffer.sample(self.batch_size)
 
-            # Collect batch_size sequences
-            for _ in range(self.batch_size):
-                pixels, states, actions, rewards, terminated = self.data_queue.get()
-                # Convert pixels from (T, H, W, C) to (T, C, H, W)
-                pixels_tensor = torch.from_numpy(pixels).float().permute(0, 3, 1, 2)
-                batch_pixels_original.append(pixels_tensor)  # Keep original resolution
+        batch_pixels = []
+        batch_pixels_original = []
+        batch_states = []
+        batch_actions = []
+        batch_rewards = []
+        batch_terminated = []
+        target_size = self.config.models.encoder.cnn.target_size
+        all_pixels_match_target = True
+
+        for pixels, states, actions, rewards, terminated in batch:
+            self._recent_episode_lengths.append(len(pixels))  # Track episode length
+            # Convert pixels from (T, H, W, C) to (T, C, H, W)
+            pixels_tensor = torch.from_numpy(pixels).permute(0, 3, 1, 2)
+            batch_pixels_original.append(pixels_tensor)  # Keep original resolution
+            if pixels_tensor.shape[-2:] == target_size:
+                pixels_resized = pixels_tensor
+            else:
+                all_pixels_match_target = False
                 pixels_resized = resize_pixels_to_target(
-                    pixels_tensor, config.models.encoder.cnn.target_size
+                    pixels_tensor.float(), target_size
                 )
-                batch_pixels.append(pixels_resized)
-                batch_states.append(torch.from_numpy(states))
-                batch_actions.append(torch.from_numpy(actions))
-                batch_rewards.append(torch.from_numpy(rewards))
-                batch_terminated.append(torch.from_numpy(terminated))
+            batch_pixels.append(pixels_resized)
+            batch_states.append(torch.from_numpy(states))
+            batch_actions.append(torch.from_numpy(actions))
+            batch_rewards.append(torch.from_numpy(rewards))
+            batch_terminated.append(torch.from_numpy(terminated))
 
-            # Find minimum sequence length and truncate all to match
-            min_len = min(p.shape[0] for p in batch_pixels)
-            batch_pixels = [p[:min_len] for p in batch_pixels]
-            batch_pixels_original = [p[:min_len] for p in batch_pixels_original]
-            batch_states = [s[:min_len] for s in batch_states]
-            batch_actions = [a[:min_len] for a in batch_actions]
-            batch_rewards = [r[:min_len] for r in batch_rewards]
-            batch_terminated = [t[:min_len] for t in batch_terminated]
+        if not all_pixels_match_target:
+            batch_pixels = [p.float() for p in batch_pixels]
 
-            # Stack into batch tensors: (B, T, ...)
-            self.pixels = torch.stack(batch_pixels).to(self.device)  # (B, T, C, H, W)
-            self.pixels_original = torch.stack(batch_pixels_original).to(
-                self.device
-            )  # Original res
-            self.states = symlog(
-                torch.stack(batch_states).to(self.device)
-            )  # (B, T, state_dim)
-            self.actions = torch.stack(batch_actions).to(
-                self.device
-            )  # (B, T, n_actions)
-            self.rewards = torch.stack(batch_rewards).to(self.device)  # (B, T)
-            self.terminated = torch.stack(batch_terminated).to(self.device)  # (B, T)
-        except Empty:
-            pass
+        # Stack into batch tensors: (B, T, ...)
+        # Note: All sequences are same length now (buffer handles this)
+        self.pixels = torch.stack(batch_pixels).to(self.device)  # (B, T, C, H, W)
+        if self.pixels.dtype != torch.float32:
+            self.pixels = self.pixels.float()
+        self.pixels_original = torch.stack(batch_pixels_original).to(
+            self.device
+        )  # Original res
+        if self.pixels_original.dtype != torch.float32:
+            self.pixels_original = self.pixels_original.float()
+        self.states = symlog(
+            torch.stack(batch_states).to(self.device)
+        )  # (B, T, state_dim)
+        self.actions = torch.stack(batch_actions).to(self.device)  # (B, T, n_actions)
+        self.rewards = torch.stack(batch_rewards).to(self.device)  # (B, T)
+        self.terminated = torch.stack(batch_terminated).to(self.device)  # (B, T)
 
     def train_models(self):
         # === PROFILING: Coarse timing ===
         profile_interval = 50
         t_data_acc, t_forward_acc, t_backward_acc = 0.0, 0.0, 0.0
+        profiler = None
+        profile_chunk_steps = 200
+        if self.profile_enabled:
+            profile_dir = os.path.join(self.log_dir, "profiler", "trainer")
+            os.makedirs(profile_dir, exist_ok=True)
+            activities = [ProfilerActivity.CPU]
+            if torch.cuda.is_available():
+                activities.append(ProfilerActivity.CUDA)
+            trace_handler = tensorboard_trace_handler(profile_dir)
+            profiler = profile(
+                activities=activities,
+                schedule=schedule(
+                    wait=0, warmup=0, active=profile_chunk_steps, repeat=0
+                ),
+                on_trace_ready=trace_handler,
+                record_shapes=True,
+                with_stack=True,
+                profile_memory=True,
+            )
+            profiler.__enter__()
+            print(
+                "Profiler enabled for full run; saving a trace every "
+                f"{profile_chunk_steps} steps. Traces: {profile_dir}"
+            )
 
         while self.train_step < self.max_train_steps:
             # --- PROFILE: Data loading ---
             t0 = time.perf_counter()
-            self.get_data_from_queue()  # Collects batch_size sequences
+            self.get_data_from_buffer()  # Sample from replay buffer (non-blocking)
             torch.cuda.synchronize()
             t_data_acc += time.perf_counter() - t0
 
@@ -274,7 +335,10 @@ class WorldModelTrainer:
 
                 # Use pre-computed encoder output
                 posterior_logits = all_posterior_logits[:, t_step]
-                posterior_dist = dist.Categorical(logits=posterior_logits)
+                # posterior_dist = dist.Categorical(logits=posterior_logits)
+                posterior_dist = dist.Categorical(
+                    logits=posterior_logits, validate_args=False
+                )
 
                 (
                     obs_reconstruction,
@@ -369,12 +433,31 @@ class WorldModelTrainer:
                     # Decode dreamed states for visualization (every 50 steps)
                     if self.train_step % 50 == 0:
                         with torch.no_grad():
-                            dreamed_obs = self.world_model.decoder(
-                                dreamed_recurrent_states
-                            )
-                            last_dreamed_pixels = torch.sigmoid(
-                                dreamed_obs["pixels"]
-                            ).detach()
+                            try:
+                                # dreamed_recurrent_states: (n_dream_steps, batch, d_hidden)
+                                n_steps, batch_sz = dreamed_recurrent_states.shape[:2]
+                                # Flatten to (n_steps * batch, features) for decoder
+                                states_flat = dreamed_recurrent_states.view(
+                                    n_steps * batch_sz, -1
+                                )
+                                dreamed_obs = self.world_model.decoder(states_flat)
+                                # Decoder flattens to (n_steps * batch, C, H, W), reshape back
+                                pixels_flat = dreamed_obs[
+                                    "pixels"
+                                ]  # (n_steps * batch, C, H, W)
+                                C, H, W = pixels_flat.shape[1:]
+                                last_dreamed_pixels = torch.sigmoid(
+                                    pixels_flat.view(n_steps, batch_sz, C, H, W)
+                                ).detach()
+                                with open("/tmp/claude/dream_debug.log", "a") as f:
+                                    f.write(
+                                        f"DECODER step={self.train_step}: shape={last_dreamed_pixels.shape}\n"
+                                    )
+                            except Exception as e:
+                                with open("/tmp/claude/dream_debug.log", "a") as f:
+                                    f.write(
+                                        f"DECODER step={self.train_step}: EXCEPTION: {e}\n"
+                                    )
 
                 # Accumulate losses
                 if total_wm_loss is None:
@@ -444,6 +527,7 @@ class WorldModelTrainer:
                     )
                 t_data_acc, t_forward_acc, t_backward_acc = 0.0, 0.0, 0.0
 
+            log_step = self.train_step
             self.train_step += 1
 
             # Log metrics to TensorBoard
@@ -462,6 +546,7 @@ class WorldModelTrainer:
                 last_reconstruction_pixels,
                 last_posterior_probs,
                 last_dreamed_pixels,
+                log_step,
             )
 
             # Send models to collector (skip in bootstrap mode - keep random actions)
@@ -499,6 +584,14 @@ class WorldModelTrainer:
                 self.writer.add_scalar(
                     "training/steps_per_sec", steps_per_sec, self.train_step
                 )
+                # Log avg episode length for convergence tracking
+                if self._recent_episode_lengths:
+                    avg_ep_len = sum(self._recent_episode_lengths) / len(
+                        self._recent_episode_lengths
+                    )
+                    self.writer.add_scalar(
+                        "metrics/avg_episode_length", avg_ep_len, self.train_step
+                    )
                 self.last_log_time = time.time()
                 self.steps_since_log = 0
 
@@ -509,6 +602,12 @@ class WorldModelTrainer:
                 else:
                     self.save_checkpoint()
 
+            if profiler:
+                profiler.step()
+
+        if profiler:
+            profiler.__exit__(None, None, None)
+
         # Final save
         if self.mode == "bootstrap":
             self.save_wm_only_checkpoint(final=True)
@@ -517,22 +616,27 @@ class WorldModelTrainer:
             self.save_checkpoint(final=True)
             print(f"Training complete. Final checkpoint saved to {self.checkpoint_dir}")
 
-        # Close TensorBoard writer
+        # Cleanup
+        self.replay_buffer.stop()
         self.writer.close()
+
+    def _get_model(self, model):
+        """Get underlying model (handles both compiled and non-compiled)."""
+        return getattr(model, "_orig_mod", model)
 
     def save_checkpoint(self, final=False):
         """Save all model checkpoints."""
         suffix = "final" if final else f"step_{self.train_step}"
         checkpoint = {
             "step": self.train_step,
-            "encoder": self.encoder._orig_mod.state_dict(),
+            "encoder": self._get_model(self.encoder).state_dict(),
             "world_model": {
                 k: v
-                for k, v in self.world_model._orig_mod.state_dict().items()
+                for k, v in self._get_model(self.world_model).state_dict().items()
                 if k not in ("h_prev", "z_prev")
             },
-            "actor": self.actor._orig_mod.state_dict(),
-            "critic": self.critic._orig_mod.state_dict(),
+            "actor": self._get_model(self.actor).state_dict(),
+            "critic": self._get_model(self.critic).state_dict(),
             "wm_optimizer": self.wm_optimizer.state_dict(),
             "actor_optimizer": self.actor_optimizer.state_dict(),
             "critic_optimizer": self.critic_optimizer.state_dict(),
@@ -546,10 +650,10 @@ class WorldModelTrainer:
         suffix = "final" if final else f"step_{self.train_step}"
         checkpoint = {
             "step": self.train_step,
-            "encoder": self.encoder._orig_mod.state_dict(),
+            "encoder": self._get_model(self.encoder).state_dict(),
             "world_model": {
                 k: v
-                for k, v in self.world_model._orig_mod.state_dict().items()
+                for k, v in self._get_model(self.world_model).state_dict().items()
                 if k not in ("h_prev", "z_prev")
             },
             "wm_optimizer": self.wm_optimizer.state_dict(),
@@ -573,8 +677,8 @@ class WorldModelTrainer:
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
 
         # Load encoder and world_model (always present)
-        self.encoder._orig_mod.load_state_dict(checkpoint["encoder"])
-        self.world_model._orig_mod.load_state_dict(
+        self._get_model(self.encoder).load_state_dict(checkpoint["encoder"])
+        self._get_model(self.world_model).load_state_dict(
             checkpoint["world_model"], strict=False
         )
 
@@ -597,8 +701,8 @@ class WorldModelTrainer:
             return "wm_only"
         else:
             # Full checkpoint with --resume: load everything
-            self.actor._orig_mod.load_state_dict(checkpoint["actor"])
-            self.critic._orig_mod.load_state_dict(checkpoint["critic"])
+            self._get_model(self.actor).load_state_dict(checkpoint["actor"])
+            self._get_model(self.critic).load_state_dict(checkpoint["critic"])
 
             if "actor_optimizer" in checkpoint:
                 self.actor_optimizer.load_state_dict(checkpoint["actor_optimizer"])
@@ -638,7 +742,10 @@ class WorldModelTrainer:
         if self.normalize_advantages and advantage.numel() > 1:
             advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
 
-        action_dist = torch.distributions.Categorical(logits=dreamed_actions_logits)
+        # action_dist = torch.distributions.Categorical(logits=dreamed_actions_logits)
+        action_dist = torch.distributions.Categorical(
+            logits=dreamed_actions_logits, validate_args=False
+        )
         entropy = action_dist.entropy().mean()
         log_probs = action_dist.log_prob(dreamed_actions_sampled)
 
@@ -668,7 +775,10 @@ class WorldModelTrainer:
             action_logits = self.actor(dream_h.detach())
             dreamed_actions_logits.append(action_logits)
 
-            action_dist = torch.distributions.Categorical(logits=action_logits)
+            # action_dist = torch.distributions.Categorical(logits=action_logits)
+            action_dist = torch.distributions.Categorical(
+                logits=action_logits, validate_args=False
+            )
             action_sample = action_dist.sample()
             dreamed_actions_sampled.append(action_sample)
             action_onehot = F.one_hot(action_sample, num_classes=self.n_actions).float()
@@ -679,7 +789,10 @@ class WorldModelTrainer:
             )
 
             # 2. Sample z from the prior
-            dream_prior_dist = dist.Categorical(logits=dream_prior_logits)
+            # dream_prior_dist = dist.Categorical(logits=dream_prior_logits)
+            dream_prior_dist = dist.Categorical(
+                logits=dream_prior_logits, validate_args=False
+            )
             dream_z_sample_indices = dream_prior_dist.sample()
             dream_z_sample = F.one_hot(
                 dream_z_sample_indices, num_classes=self.d_hidden // 16
@@ -749,9 +862,9 @@ class WorldModelTrainer:
         pixel_target = obs_t["pixels"]
         obs_target = obs_t["state"]
         obs_target = symlog(obs_target)  # loss in symlog space
-        beta_dyn = config.train.beta_dyn
-        beta_rep = config.train.beta_rep
-        beta_pred = config.train.beta_pred
+        beta_dyn = self.config.train.beta_dyn
+        beta_rep = self.config.train.beta_rep
+        beta_pred = self.config.train.beta_pred
 
         # There are three loss terms:
         # 1. Prediction loss: -ln p(x|z,h) - ln(p(r|z,h)) + ln(p(c|z,h))
@@ -787,18 +900,33 @@ class WorldModelTrainer:
         # Log-likelihoods. Torch accepts logits
 
         # The "free bits" technique provides a minimum budget for the KL divergence.
-        prior_dist = dist.Categorical(logits=prior_logits)
+        # prior_dist = dist.Categorical(logits=prior_logits)
         free_bits = 1.0
-        l_dyn_raw = dist.kl_divergence(
-            dist.Categorical(logits=posterior_dist.logits.detach()),
-            prior_dist,
-        ).mean()
-        l_dyn = torch.max(torch.tensor(free_bits, device=self.device), l_dyn_raw)
+        # l_dyn_raw = dist.kl_divergence(
+        #     dist.Categorical(logits=posterior_dist.logits.detach()),
+        #     prior_dist,
+        # ).mean()
+        # l_rep_raw = dist.kl_divergence(
+        #     posterior_dist,
+        #     dist.Categorical(logits=prior_dist.logits.detach()),
+        # ).mean()
+        # Manual categorical KL to avoid distribution overhead.
+        posterior_logits_detached = posterior_dist.logits.detach()
+        log_posterior_detached = F.log_softmax(posterior_logits_detached, dim=-1)
+        log_prior = F.log_softmax(prior_logits, dim=-1)
+        posterior_probs_detached = log_posterior_detached.exp()
+        l_dyn_raw = (
+            posterior_probs_detached * (log_posterior_detached - log_prior)
+        ).sum(dim=-1).mean()
 
-        l_rep_raw = dist.kl_divergence(
-            posterior_dist,
-            dist.Categorical(logits=prior_dist.logits.detach()),
-        ).mean()
+        log_posterior = F.log_softmax(posterior_dist.logits, dim=-1)
+        log_prior_detached = F.log_softmax(prior_logits.detach(), dim=-1)
+        posterior_probs = log_posterior.exp()
+        l_rep_raw = (
+            posterior_probs * (log_posterior - log_prior_detached)
+        ).sum(dim=-1).mean()
+
+        l_dyn = torch.max(torch.tensor(free_bits, device=self.device), l_dyn_raw)
         l_rep = torch.max(torch.tensor(free_bits, device=self.device), l_rep_raw)
 
         total_loss = beta_pred * l_pred + beta_dyn * l_dyn + beta_rep * l_rep
@@ -832,9 +960,15 @@ class WorldModelTrainer:
         last_reconstruction_pixels=None,
         last_posterior_probs=None,
         last_dreamed_pixels=None,
+        step=None,
     ):
         """Log metrics to TensorBoard."""
-        step = self.train_step
+        if step is None:
+            step = self.train_step
+        log_scalars = step % self.log_every == 0
+        log_images = step % self.image_log_every == 0
+        if not (log_scalars or log_images):
+            return
 
         # Safety check - should not happen due to assertions, but just in case
         if (
@@ -844,145 +978,155 @@ class WorldModelTrainer:
         ):
             return
 
-        # All losses normalized to per-step for fair comparison
-        if sequence_length > 0:
-            norm = 1.0 / sequence_length
-            beta_pred = config.train.beta_pred
-            beta_dyn = config.train.beta_dyn
-            beta_rep = config.train.beta_rep
+        if log_scalars:
+            # All losses normalized to per-step for fair comparison
+            if sequence_length > 0:
+                norm = 1.0 / sequence_length
+                beta_pred = self.config.train.beta_pred
+                beta_dyn = self.config.train.beta_dyn
+                beta_rep = self.config.train.beta_rep
 
-            # Convert tensor loss components to CPU floats (single sync for all 8 components)
-            wm_components_cpu = {k: v.item() for k, v in wm_loss_components.items()}
+                # Convert tensor loss components to CPU floats (single sync for all 8 components)
+                wm_components_cpu = {k: v.item() for k, v in wm_loss_components.items()}
 
-            # Per-step totals
-            wm_per_step = total_wm_loss.item() * norm
-            self.writer.add_scalar("loss/world_model/total_per_step", wm_per_step, step)
+                # Per-step totals
+                wm_per_step = total_wm_loss.item() * norm
+                self.writer.add_scalar(
+                    "loss/world_model/total_per_step", wm_per_step, step
+                )
+                self.writer.add_scalar(
+                    "loss/actor/total_per_step", total_actor_loss.item() * norm, step
+                )
+                self.writer.add_scalar(
+                    "loss/critic/total_per_step", total_critic_loss.item() * norm, step
+                )
+
+                # Raw component values (per-step, unscaled)
+                pixel = wm_components_cpu["prediction_pixel"] * norm
+                vector = wm_components_cpu["prediction_vector"] * norm
+                reward = wm_components_cpu["prediction_reward"] * norm
+                cont = wm_components_cpu["prediction_continue"] * norm
+                dyn = wm_components_cpu["dynamics"] * norm
+                rep = wm_components_cpu["representation"] * norm
+
+                # Prediction sub-components (unscaled, for debugging)
+                self.writer.add_scalar("loss/wm_components/pixel", pixel, step)
+                self.writer.add_scalar("loss/wm_components/vector", vector, step)
+                self.writer.add_scalar("loss/wm_components/reward", reward, step)
+                self.writer.add_scalar("loss/wm_components/continue", cont, step)
+                self.writer.add_scalar("loss/wm_components/dynamics", dyn, step)
+                self.writer.add_scalar("loss/wm_components/representation", rep, step)
+
+                # Scaled contributions to total (these should sum to total_per_step)
+                pred_total = pixel + vector + reward + cont
+                self.writer.add_scalar(
+                    "loss/wm_scaled/prediction", beta_pred * pred_total, step
+                )
+                self.writer.add_scalar("loss/wm_scaled/dynamics", beta_dyn * dyn, step)
+                self.writer.add_scalar(
+                    "loss/wm_scaled/representation", beta_rep * rep, step
+                )
+
+                # Raw KL divergences (before free bits clipping)
+                self.writer.add_scalar(
+                    "debug/kl_dynamics_raw",
+                    wm_components_cpu["kl_dynamics_raw"] * norm,
+                    step,
+                )
+                self.writer.add_scalar(
+                    "debug/kl_representation_raw",
+                    wm_components_cpu["kl_representation_raw"] * norm,
+                    step,
+                )
+            else:
+                # Fallback if no sequence
+                self.writer.add_scalar(
+                    "loss/world_model/total_per_step", total_wm_loss.item(), step
+                )
+                self.writer.add_scalar(
+                    "loss/actor/total_per_step", total_actor_loss.item(), step
+                )
+                self.writer.add_scalar(
+                    "loss/critic/total_per_step", total_critic_loss.item(), step
+                )
+
+            # Dreamed trajectory statistics (debugging metrics)
+            # Batch stats computation and sync once to reduce GPU stalls
+            if dreamed_rewards_list:
+                all_dreamed_rewards = torch.cat(dreamed_rewards_list, dim=0)
+                reward_stats = torch.stack(
+                    [
+                        all_dreamed_rewards.mean(),
+                        all_dreamed_rewards.std(),
+                        all_dreamed_rewards.min(),
+                        all_dreamed_rewards.max(),
+                    ]
+                ).cpu()  # Single sync for all 4 stats
+                self.writer.add_scalar(
+                    "debug/dream/reward/mean", reward_stats[0].item(), step
+                )
+                self.writer.add_scalar(
+                    "debug/dream/reward/std", reward_stats[1].item(), step
+                )
+                self.writer.add_scalar(
+                    "debug/dream/reward/min", reward_stats[2].item(), step
+                )
+                self.writer.add_scalar(
+                    "debug/dream/reward/max", reward_stats[3].item(), step
+                )
+
+            if dreamed_values_list:
+                all_dreamed_values = torch.cat(dreamed_values_list, dim=0)
+                value_stats = torch.stack(
+                    [
+                        all_dreamed_values.mean(),
+                        all_dreamed_values.std(),
+                    ]
+                ).cpu()  # Single sync for both stats
+                self.writer.add_scalar(
+                    "debug/dream/value/mean", value_stats[0].item(), step
+                )
+                self.writer.add_scalar(
+                    "debug/dream/value/std", value_stats[1].item(), step
+                )
+
+            # Actor entropy (important for monitoring exploration)
+            if actor_entropy_list:
+                all_entropy = torch.stack(actor_entropy_list)
+                entropy_stats = torch.stack(
+                    [
+                        all_entropy.mean(),
+                        all_entropy.std(),
+                    ]
+                ).cpu()  # Single sync for both stats
+                self.writer.add_scalar(
+                    "actor/entropy/mean", entropy_stats[0].item(), step
+                )
+                self.writer.add_scalar(
+                    "actor/entropy/std", entropy_stats[1].item(), step
+                )
+
+            # Learning rates
             self.writer.add_scalar(
-                "loss/actor/total_per_step", total_actor_loss.item() * norm, step
-            )
-            self.writer.add_scalar(
-                "loss/critic/total_per_step", total_critic_loss.item() * norm, step
-            )
-
-            # Raw component values (per-step, unscaled)
-            pixel = wm_components_cpu["prediction_pixel"] * norm
-            vector = wm_components_cpu["prediction_vector"] * norm
-            reward = wm_components_cpu["prediction_reward"] * norm
-            cont = wm_components_cpu["prediction_continue"] * norm
-            dyn = wm_components_cpu["dynamics"] * norm
-            rep = wm_components_cpu["representation"] * norm
-
-            # Prediction sub-components (unscaled, for debugging)
-            self.writer.add_scalar("loss/wm_components/pixel", pixel, step)
-            self.writer.add_scalar("loss/wm_components/vector", vector, step)
-            self.writer.add_scalar("loss/wm_components/reward", reward, step)
-            self.writer.add_scalar("loss/wm_components/continue", cont, step)
-            self.writer.add_scalar("loss/wm_components/dynamics", dyn, step)
-            self.writer.add_scalar("loss/wm_components/representation", rep, step)
-
-            # Scaled contributions to total (these should sum to total_per_step)
-            pred_total = pixel + vector + reward + cont
-            self.writer.add_scalar(
-                "loss/wm_scaled/prediction", beta_pred * pred_total, step
-            )
-            self.writer.add_scalar("loss/wm_scaled/dynamics", beta_dyn * dyn, step)
-            self.writer.add_scalar(
-                "loss/wm_scaled/representation", beta_rep * rep, step
-            )
-
-            # Raw KL divergences (before free bits clipping)
-            self.writer.add_scalar(
-                "debug/kl_dynamics_raw",
-                wm_components_cpu["kl_dynamics_raw"] * norm,
+                "training/learning_rate/world_model",
+                self.wm_optimizer.param_groups[0]["lr"],
                 step,
             )
             self.writer.add_scalar(
-                "debug/kl_representation_raw",
-                wm_components_cpu["kl_representation_raw"] * norm,
+                "training/learning_rate/actor",
+                self.actor_optimizer.param_groups[0]["lr"],
                 step,
             )
-        else:
-            # Fallback if no sequence
             self.writer.add_scalar(
-                "loss/world_model/total_per_step", total_wm_loss.item(), step
-            )
-            self.writer.add_scalar(
-                "loss/actor/total_per_step", total_actor_loss.item(), step
-            )
-            self.writer.add_scalar(
-                "loss/critic/total_per_step", total_critic_loss.item(), step
+                "training/learning_rate/critic",
+                self.critic_optimizer.param_groups[0]["lr"],
+                step,
             )
 
-        # Dreamed trajectory statistics (debugging metrics)
-        # Batch stats computation and sync once to reduce GPU stalls
-        if dreamed_rewards_list:
-            all_dreamed_rewards = torch.cat(dreamed_rewards_list, dim=0)
-            reward_stats = torch.stack(
-                [
-                    all_dreamed_rewards.mean(),
-                    all_dreamed_rewards.std(),
-                    all_dreamed_rewards.min(),
-                    all_dreamed_rewards.max(),
-                ]
-            ).cpu()  # Single sync for all 4 stats
-            self.writer.add_scalar(
-                "debug/dream/reward/mean", reward_stats[0].item(), step
-            )
-            self.writer.add_scalar(
-                "debug/dream/reward/std", reward_stats[1].item(), step
-            )
-            self.writer.add_scalar(
-                "debug/dream/reward/min", reward_stats[2].item(), step
-            )
-            self.writer.add_scalar(
-                "debug/dream/reward/max", reward_stats[3].item(), step
-            )
-
-        if dreamed_values_list:
-            all_dreamed_values = torch.cat(dreamed_values_list, dim=0)
-            value_stats = torch.stack(
-                [
-                    all_dreamed_values.mean(),
-                    all_dreamed_values.std(),
-                ]
-            ).cpu()  # Single sync for both stats
-            self.writer.add_scalar(
-                "debug/dream/value/mean", value_stats[0].item(), step
-            )
-            self.writer.add_scalar("debug/dream/value/std", value_stats[1].item(), step)
-
-        # Actor entropy (important for monitoring exploration)
-        if actor_entropy_list:
-            all_entropy = torch.stack(actor_entropy_list)
-            entropy_stats = torch.stack(
-                [
-                    all_entropy.mean(),
-                    all_entropy.std(),
-                ]
-            ).cpu()  # Single sync for both stats
-            self.writer.add_scalar("actor/entropy/mean", entropy_stats[0].item(), step)
-            self.writer.add_scalar("actor/entropy/std", entropy_stats[1].item(), step)
-
-        # Learning rates
-        self.writer.add_scalar(
-            "training/learning_rate/world_model",
-            self.wm_optimizer.param_groups[0]["lr"],
-            step,
-        )
-        self.writer.add_scalar(
-            "training/learning_rate/actor",
-            self.actor_optimizer.param_groups[0]["lr"],
-            step,
-        )
-        self.writer.add_scalar(
-            "training/learning_rate/critic",
-            self.critic_optimizer.param_groups[0]["lr"],
-            step,
-        )
-
-        # Visualizations every 50 steps (show first sample only)
+        # Visualizations every 250 steps (show first sample only)
         if (
-            step % 50 == 0
+            # step % 50 == 0
+            log_images
             and last_obs_pixels is not None
             and last_reconstruction_pixels is not None
         ):
@@ -1019,14 +1163,18 @@ class WorldModelTrainer:
                 self.writer.add_images("images/latent_activations", latent_img, step)
 
             # 4. Dream rollout video (imagined future frames)
+            with open("/tmp/claude/dream_debug.log", "a") as f:
+                f.write(
+                    f"LOG_METRICS step={step}, last_dreamed_pixels is None: {last_dreamed_pixels is None}\n"
+                )
             if last_dreamed_pixels is not None:
                 # Shape: (n_dream_steps, batch, C, H, W) -> take first batch
                 dream_frames = last_dreamed_pixels[:, 0]  # (n_steps, C, H, W)
                 # Resize to match actual size if needed
-                if dream_frames.shape[2:] != actual.shape[2:]:
+                if dream_frames.shape[2:] != actual.shape[1:]:
                     dream_frames = F.interpolate(
                         dream_frames,
-                        size=actual.shape[2:],
+                        size=actual.shape[1:],
                         mode="bilinear",
                         align_corners=False,
                     )
@@ -1050,18 +1198,19 @@ class WorldModelTrainer:
         self.writer.flush()
 
     def send_models_to_collector(self, training_step):
-        # Use _orig_mod to get state_dict without torch.compile prefix
         # Exclude h_prev/z_prev buffers as they have batch-size-dependent shapes
+        wm = self._get_model(self.world_model)
+        actor = self._get_model(self.actor)
+        encoder = self._get_model(self.encoder)
+
         wm_state = {
             k: v.cpu()
-            for k, v in self.world_model._orig_mod.state_dict().items()
+            for k, v in wm.state_dict().items()
             if k not in ("h_prev", "z_prev")
         }
         models_to_send = {
-            "actor": {k: v.cpu() for k, v in self.actor._orig_mod.state_dict().items()},
-            "encoder": {
-                k: v.cpu() for k, v in self.encoder._orig_mod.state_dict().items()
-            },
+            "actor": {k: v.cpu() for k, v in actor.state_dict().items()},
+            "encoder": {k: v.cpu() for k, v in encoder.state_dict().items()},
             "world_model": wm_state,
         }
         try:

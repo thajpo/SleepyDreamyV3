@@ -21,6 +21,8 @@ class GeneralConfig(BaseModel):
     world_model_path: str = "world_model.pt"
     train_world_model: bool = True
     env_bootstrapping_samples: str = "bootstrap_trajectorires.h5"
+    profile: bool = False
+    compile_models: bool = False
 
 
 class EnvironmentConfig(BaseModel):
