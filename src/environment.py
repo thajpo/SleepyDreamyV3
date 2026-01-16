@@ -1,6 +1,7 @@
 import gymnasium as gym
 import numpy as np
 import os
+import time
 from gymnasium.wrappers import AddRenderObservation
 import h5py
 import torch
@@ -23,12 +24,15 @@ def resize_image(img, target_size=(64, 64)):
     return cv2.resize(img, target_size, interpolation=cv2.INTER_AREA)
 
 
-def create_env_with_vision(env_name):
-    base_env = gym.make(env_name, render_mode="rgb_array")
-
-    env = AddRenderObservation(
-        base_env, render_only=False, render_key="pixels", obs_key="state"
-    )
+def create_env_with_vision(env_name, use_pixels=True):
+    if use_pixels:
+        base_env = gym.make(env_name, render_mode="rgb_array")
+        env = AddRenderObservation(
+            base_env, render_only=False, render_key="pixels", obs_key="state"
+        )
+    else:
+        # State-only mode: no rendering overhead
+        env = gym.make(env_name)
     return env
 
 def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=None):
@@ -39,7 +43,8 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
     Switches to learned policy when trainer sends first model update.
     Stops when stop_event is set by the trainer.
     """
-    env = create_env_with_vision(config.environment.environment_name)
+    use_pixels = config.general.use_pixels
+    env = create_env_with_vision(config.environment.environment_name, use_pixels=use_pixels)
     device = "cpu"
     n_actions = config.environment.n_actions
 
@@ -117,14 +122,20 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
                 action_np = env.action_space.sample()
                 action_onehot_np = np.eye(n_actions, dtype=np.float32)[action_np]
             else:
-                # Learned policy path - resize for encoder
-                resized_for_encoder = resize_image(obs['pixels'], target_size=(64, 64))
-                pixel_obs_t = torch.from_numpy(resized_for_encoder).to(device).float().permute(2, 0, 1).unsqueeze(0)
-                vec_obs_t = torch.from_numpy(obs['state']).to(device).float().unsqueeze(0)
-                current_obs_dict = {"pixels": pixel_obs_t, "state": vec_obs_t}
+                # Learned policy path
+                if use_pixels:
+                    # Pixel mode: resize and prepare dict input
+                    resized_for_encoder = resize_image(obs['pixels'], target_size=(64, 64))
+                    pixel_obs_t = torch.from_numpy(resized_for_encoder).to(device).float().permute(2, 0, 1).unsqueeze(0)
+                    vec_obs_t = torch.from_numpy(obs['state']).to(device).float().unsqueeze(0)
+                    encoder_input = {"pixels": pixel_obs_t, "state": vec_obs_t}
+                else:
+                    # State-only mode: encoder takes state tensor directly
+                    vec_obs_t = torch.from_numpy(obs).to(device).float().unsqueeze(0)
+                    encoder_input = vec_obs_t
 
                 with torch.no_grad():
-                    posterior_logits = encoder(current_obs_dict)
+                    posterior_logits = encoder(encoder_input)
                     posterior_dist = torch.distributions.Categorical(logits=posterior_logits)
                     z_indices = posterior_dist.sample()
                     z_onehot = F.one_hot(z_indices, num_classes=config.models.d_hidden // 16).float()
@@ -145,10 +156,16 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
             # Execute action
             obs, reward, terminated, truncated, info = env.step(action_np)
 
-            # Resize pixels immediately (400x600 -> 64x64) to reduce memory/queue overhead
-            resized_pixels = resize_image(obs["pixels"], target_size=(64, 64))
-            episode_pixels.append(resized_pixels)
-            episode_vec_obs.append(obs["state"])
+            # Store observations
+            if use_pixels:
+                # Resize pixels immediately (400x600 -> 64x64) to reduce memory/queue overhead
+                resized_pixels = resize_image(obs["pixels"], target_size=(64, 64))
+                episode_pixels.append(resized_pixels)
+                episode_vec_obs.append(obs["state"])
+            else:
+                # State-only mode: obs is the state array directly
+                episode_vec_obs.append(obs)
+
             episode_actions.append(action_onehot_np)
             episode_rewards.append(reward)
             episode_terminated.append(terminated)
@@ -162,13 +179,23 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
         # Only send complete episodes (not interrupted mid-episode by stop signal)
         if not stop_event.is_set() or (terminated or truncated):
             # Package and send episode
-            pixels_np = np.array(episode_pixels, dtype=np.uint8)
+            if use_pixels:
+                pixels_np = np.array(episode_pixels, dtype=np.uint8)
+            else:
+                pixels_np = None  # State-only mode: no pixels
             vec_obs_np = np.array(episode_vec_obs, dtype=np.float32)
             actions_np = np.array(episode_actions, dtype=np.float32)
             rewards_np = np.array(episode_rewards, dtype=np.float32)
             terminated_np = np.array(episode_terminated, dtype=bool)
 
-            data_queue.put((pixels_np, vec_obs_np, actions_np, rewards_np, terminated_np))
+            episode_length = len(vec_obs_np)
+            data_queue.put((pixels_np, vec_obs_np, actions_np, rewards_np, terminated_np, episode_length))
+
+            # Throttle if queue is getting full (backpressure)
+            # This prevents wasteful over-collection in fast envs (e.g., state-only)
+            queue_fill_ratio = data_queue.qsize() / data_queue._maxsize if data_queue._maxsize else 0
+            if queue_fill_ratio > 0.8:
+                time.sleep(0.05)  # Brief pause to let trainer catch up
 
     if profiler:
         profiler.__exit__(None, None, None)

@@ -23,6 +23,11 @@ def load_env_config(config_path):
         overrides = yaml.safe_load(f)
 
     # Apply nested overrides
+    if "general" in overrides:
+        for key, value in overrides["general"].items():
+            if hasattr(config.general, key):
+                setattr(config.general, key, value)
+
     if "environment" in overrides:
         for key, value in overrides["environment"].items():
             if hasattr(config.environment, key):
@@ -44,6 +49,7 @@ def load_env_config(config_path):
         f"  Actions: {config.environment.n_actions}, Observations: {config.environment.n_observations}"
     )
     print(f"  d_hidden: {config.models.d_hidden}")
+    print(f"  use_pixels: {config.general.use_pixels}")
 
 
 _tensorboard_process = None

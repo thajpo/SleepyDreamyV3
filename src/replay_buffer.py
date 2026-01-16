@@ -45,6 +45,7 @@ class EpisodeReplayBuffer:
         self._thread = None
         self._episodes_added = 0
         self._total_steps = 0  # For tracking average episode length
+        self._recent_ep_lengths = deque(maxlen=100)  # Track recent episode lengths
         self._max_sequence_length = 256  # Cap for adaptive growth
 
     def start(self):
@@ -67,7 +68,10 @@ class EpisodeReplayBuffer:
                 with self.lock:
                     self.buffer.append(episode)
                     self._episodes_added += 1
-                    self._total_steps += len(episode[0])  # episode[0] is pixels array
+                    # Episode length is now passed as 6th element, fallback to states length
+                    ep_len = episode[5] if len(episode) > 5 else len(episode[1])
+                    self._total_steps += ep_len
+                    self._recent_ep_lengths.append(ep_len)
                     if len(self.buffer) >= self.min_episodes and not self.ready_event.is_set():
                         self.ready_event.set()
                         print(f"Replay buffer ready: {len(self.buffer)} episodes collected", flush=True)
@@ -81,15 +85,18 @@ class EpisodeReplayBuffer:
         If episode is shorter than sequence_length, pads with zeros and
         marks as terminated.
         """
-        pixels, states, actions, rewards, terminated = episode
-        ep_len = len(pixels)
+        # Episode tuple: (pixels, states, actions, rewards, terminated, episode_length)
+        # episode_length is for tracking only, not needed for subsequence sampling
+        pixels, states, actions, rewards, terminated = episode[:5]
+        # Use states for length - pixels may be None in state-only mode
+        ep_len = len(states)
         seq_len = self.sequence_length
 
         if ep_len >= seq_len:
             # Sample random start point
             start = random.randint(0, ep_len - seq_len)
             return (
-                pixels[start:start + seq_len],
+                pixels[start:start + seq_len] if pixels is not None else None,
                 states[start:start + seq_len],
                 actions[start:start + seq_len],
                 rewards[start:start + seq_len],
@@ -99,15 +106,20 @@ class EpisodeReplayBuffer:
             # Pad short episode
             pad_len = seq_len - ep_len
 
-            # Create padding arrays
-            pixels_pad = np.zeros((pad_len,) + pixels.shape[1:], dtype=pixels.dtype)
+            # Create padding arrays (pixels may be None in state-only mode)
+            if pixels is not None:
+                pixels_pad = np.zeros((pad_len,) + pixels.shape[1:], dtype=pixels.dtype)
+                pixels_out = np.concatenate([pixels, pixels_pad], axis=0)
+            else:
+                pixels_out = None
+
             states_pad = np.zeros((pad_len,) + states.shape[1:], dtype=states.dtype)
             actions_pad = np.zeros((pad_len,) + actions.shape[1:], dtype=actions.dtype)
             rewards_pad = np.zeros(pad_len, dtype=rewards.dtype)
             terminated_pad = np.ones(pad_len, dtype=terminated.dtype)  # Mark padded as terminated
 
             return (
-                np.concatenate([pixels, pixels_pad], axis=0),
+                pixels_out,
                 np.concatenate([states, states_pad], axis=0),
                 np.concatenate([actions, actions_pad], axis=0),
                 np.concatenate([rewards, rewards_pad], axis=0),
@@ -163,6 +175,14 @@ class EpisodeReplayBuffer:
             if self._episodes_added == 0:
                 return 0
             return self._total_steps / self._episodes_added
+
+    @property
+    def recent_avg_episode_length(self):
+        """Average length of recent 100 episodes (for tracking learning progress)."""
+        with self.lock:
+            if not self._recent_ep_lengths:
+                return 0
+            return sum(self._recent_ep_lengths) / len(self._recent_ep_lengths)
 
     def maybe_increase_sequence_length(self, threshold=0.8, increment=8):
         """

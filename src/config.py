@@ -23,6 +23,7 @@ class GeneralConfig(BaseModel):
     env_bootstrapping_samples: str = "bootstrap_trajectorires.h5"
     profile: bool = False
     compile_models: bool = False
+    use_pixels: bool = True  # Set False for state-only training (e.g., CartPole)
 
 
 class EnvironmentConfig(BaseModel):

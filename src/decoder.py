@@ -138,3 +138,24 @@ class ObservationMLPDecoder(nn.Module):
     def forward(self, x):
         x = self.mlp(x)
         return x
+
+
+class StateOnlyDecoder(nn.Module):
+    """
+    Decoder for state-vector-only reconstruction (no pixels).
+    Used for simple environments like CartPole where state is sufficient.
+    """
+
+    def __init__(
+        self,
+        d_in,
+        d_hidden,
+        n_observations,
+    ):
+        super().__init__()
+        self.MLP = ThreeLayerMLP(
+            d_in=d_in, d_hidden=d_hidden, d_out=n_observations
+        )
+
+    def forward(self, decoder_in):
+        return {"state": self.MLP(decoder_in)}

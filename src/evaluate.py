@@ -15,6 +15,11 @@ def load_env_config(config_path):
     with open(config_path, 'r') as f:
         overrides = yaml.safe_load(f)
 
+    if 'general' in overrides:
+        for key, value in overrides['general'].items():
+            if hasattr(config.general, key):
+                setattr(config.general, key, value)
+
     if 'environment' in overrides:
         for key, value in overrides['environment'].items():
             if hasattr(config.environment, key):

@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .decoder import ObservationDecoder
+from .decoder import ObservationDecoder, StateOnlyDecoder
 
 
 class RSSMWorldModel(nn.Module):
@@ -20,6 +20,7 @@ class RSSMWorldModel(nn.Module):
         batch_size,
         b_start,
         b_end,
+        use_pixels=True,
     ):
         super().__init__()
         self.d_hidden = models_config.d_hidden
@@ -64,14 +65,21 @@ class RSSMWorldModel(nn.Module):
         nn.init.zeros_(self.reward_predictor.weight)  # Reward is initalized to zero
         self.continue_predictor = nn.Linear(h_z_dim, 1)
 
-        # Decoder. Outputs distribution of mean predictions for pixel/vetor observations
-        self.decoder = ObservationDecoder(
-            mlp_config=models_config.encoder.mlp,
-            cnn_config=models_config.encoder.cnn,
-            env_config=env_config,
-            gru_config=models_config.rnn,
-            d_hidden=models_config.d_hidden,
-        )
+        # Decoder. Outputs distribution of mean predictions for pixel/vector observations
+        if use_pixels:
+            self.decoder = ObservationDecoder(
+                mlp_config=models_config.encoder.mlp,
+                cnn_config=models_config.encoder.cnn,
+                env_config=env_config,
+                gru_config=models_config.rnn,
+                d_hidden=models_config.d_hidden,
+            )
+        else:
+            self.decoder = StateOnlyDecoder(
+                d_in=h_z_dim,
+                d_hidden=models_config.d_hidden,
+                n_observations=env_config.n_observations,
+            )
 
     def step_dynamics(self, z_embed, action, h_prev):
         """

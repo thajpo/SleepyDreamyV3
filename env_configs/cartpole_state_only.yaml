@@ -1,0 +1,21 @@
+# CartPole state-only training (no pixels)
+# Uses state vector directly - faster and sufficient for simple envs
+
+general:
+  use_pixels: false
+
+environment:
+  environment_name: CartPole-v1
+  n_actions: 2
+  n_observations: 4
+
+models:
+  d_hidden: 256
+
+train:
+  batch_size: 16
+  sequence_length: 25
+  max_train_steps: 30000
+  bootstrap_steps: 5000
+  actor_warmup_steps: 5000
+  num_collectors: 1

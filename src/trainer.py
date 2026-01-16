@@ -44,6 +44,7 @@ class WorldModelTrainer:
     ):
         self.config = config  # Store config for use in methods
         self.device = torch.device(config.general.device)
+        self.use_pixels = config.general.use_pixels
         self.model_update_frequency = 10  # fix later
         self.n_dream_steps = config.train.num_dream_steps
         self.gamma = config.train.gamma
@@ -124,11 +125,10 @@ class WorldModelTrainer:
         self.writer = SummaryWriter(log_dir=log_dir)
         self.log_dir = log_dir
         print(f"TensorBoard logging to: {log_dir}")
-        self.log_every = 25
-        self.image_log_every = 250
+        self.log_every = 250
+        self.image_log_every = 2500
 
         # Episode length tracking for convergence monitoring
-        self._recent_episode_lengths = deque(maxlen=100)
 
         # Checkpointing
         self.checkpoint_dir = os.path.join(log_dir, "checkpoints")
@@ -180,40 +180,36 @@ class WorldModelTrainer:
         batch_actions = []
         batch_rewards = []
         batch_terminated = []
-        target_size = self.config.models.encoder.cnn.target_size
-        all_pixels_match_target = True
 
         for pixels, states, actions, rewards, terminated in batch:
-            self._recent_episode_lengths.append(len(pixels))  # Track episode length
-            # Convert pixels from (T, H, W, C) to (T, C, H, W)
-            pixels_tensor = torch.from_numpy(pixels).permute(0, 3, 1, 2)
-            batch_pixels_original.append(pixels_tensor)  # Keep original resolution
-            if pixels_tensor.shape[-2:] == target_size:
-                pixels_resized = pixels_tensor
-            else:
-                all_pixels_match_target = False
-                pixels_resized = resize_pixels_to_target(
-                    pixels_tensor.float(), target_size
-                )
-            batch_pixels.append(pixels_resized)
+
+            if self.use_pixels and pixels is not None:
+                target_size = self.config.models.encoder.cnn.target_size
+                # Convert pixels from (T, H, W, C) to (T, C, H, W)
+                pixels_tensor = torch.from_numpy(pixels).permute(0, 3, 1, 2)
+                batch_pixels_original.append(pixels_tensor)  # Keep original resolution
+                if pixels_tensor.shape[-2:] == target_size:
+                    pixels_resized = pixels_tensor
+                else:
+                    pixels_resized = resize_pixels_to_target(
+                        pixels_tensor.float(), target_size
+                    )
+                batch_pixels.append(pixels_resized)
+
             batch_states.append(torch.from_numpy(states))
             batch_actions.append(torch.from_numpy(actions))
             batch_rewards.append(torch.from_numpy(rewards))
             batch_terminated.append(torch.from_numpy(terminated))
 
-        if not all_pixels_match_target:
-            batch_pixels = [p.float() for p in batch_pixels]
-
         # Stack into batch tensors: (B, T, ...)
         # Note: All sequences are same length now (buffer handles this)
-        self.pixels = torch.stack(batch_pixels).to(self.device)  # (B, T, C, H, W)
-        if self.pixels.dtype != torch.float32:
-            self.pixels = self.pixels.float()
-        self.pixels_original = torch.stack(batch_pixels_original).to(
-            self.device
-        )  # Original res
-        if self.pixels_original.dtype != torch.float32:
-            self.pixels_original = self.pixels_original.float()
+        if self.use_pixels and batch_pixels:
+            self.pixels = torch.stack(batch_pixels).to(self.device).float()  # (B, T, C, H, W)
+            self.pixels_original = torch.stack(batch_pixels_original).to(self.device).float()
+        else:
+            self.pixels = None
+            self.pixels_original = None
+
         self.states = symlog(
             torch.stack(batch_states).to(self.device)
         )  # (B, T, state_dim)
@@ -258,12 +254,12 @@ class WorldModelTrainer:
             t_data_acc += time.perf_counter() - t0
 
             # Skip if no data was retrieved
-            if not hasattr(self, "pixels") or self.pixels.shape[1] == 0:
+            if not hasattr(self, "states") or self.states.shape[1] == 0:
                 print(f"Trainer: No data was retrieved at step {self.train_step}.")
                 continue
 
             # Reset hidden states per trajectory - match actual input batch size
-            actual_batch_size = self.pixels.shape[0]
+            actual_batch_size = self.states.shape[0]
             h_dim = self.world_model.h_prev.shape[1]
             self.world_model.h_prev = torch.zeros(
                 actual_batch_size, h_dim, device=self.device
@@ -307,17 +303,16 @@ class WorldModelTrainer:
             t0 = time.perf_counter()
 
             # Phase 2: Batch encode all timesteps at once (single encoder forward pass)
-            B, T = self.pixels.shape[:2]
-            pixels_flat = self.pixels.view(
-                B * T, *self.pixels.shape[2:]
-            )  # (B*T, C, H, W)
+            B, T = self.states.shape[:2]
             states_flat = self.states.view(B * T, self.states.shape[-1])  # (B*T, n_obs)
-            all_posterior_logits = self.encoder(
-                {
-                    "pixels": pixels_flat,
-                    "state": states_flat,
-                }
-            )  # (B*T, d_hidden, categories)
+
+            if self.use_pixels and self.pixels is not None:
+                pixels_flat = self.pixels.view(B * T, *self.pixels.shape[2:])  # (B*T, C, H, W)
+                encoder_input = {"pixels": pixels_flat, "state": states_flat}
+            else:
+                encoder_input = states_flat  # State-only mode
+
+            all_posterior_logits = self.encoder(encoder_input)  # (B*T, d_hidden, categories)
             # Reshape back to (B, T, d_hidden, categories)
             all_posterior_logits = all_posterior_logits.view(
                 B, T, *all_posterior_logits.shape[1:]
@@ -325,10 +320,13 @@ class WorldModelTrainer:
 
             for t_step in range(T):
                 # Extract time step - now just indexing, no encoder call
-                obs_t = {
-                    "pixels": self.pixels[:, t_step],
-                    "state": self.states[:, t_step],
-                }
+                if self.use_pixels and self.pixels is not None:
+                    obs_t = {
+                        "pixels": self.pixels[:, t_step],
+                        "state": self.states[:, t_step],
+                    }
+                else:
+                    obs_t = {"state": self.states[:, t_step]}  # State-only mode
                 action_t = self.actions[:, t_step]
                 reward_t = self.rewards[:, t_step]
                 terminated_t = self.terminated[:, t_step]
@@ -367,11 +365,14 @@ class WorldModelTrainer:
                     )
 
                 # Store visualization data
-                last_obs_pixels = obs_t["pixels"]
-                last_obs_pixels_original = self.pixels_original[
-                    :, t_step
-                ]  # Original resolution
-                last_reconstruction_pixels = obs_reconstruction["pixels"]
+                if self.use_pixels and "pixels" in obs_t:
+                    last_obs_pixels = obs_t["pixels"]
+                    last_obs_pixels_original = self.pixels_original[:, t_step]
+                    last_reconstruction_pixels = obs_reconstruction.get("pixels")
+                else:
+                    last_obs_pixels = None
+                    last_obs_pixels_original = None
+                    last_reconstruction_pixels = None
                 last_posterior_probs = (
                     posterior_dist.probs.detach()
                 )  # (batch, d_hidden, d_hidden/16)
@@ -506,7 +507,7 @@ class WorldModelTrainer:
                 self.wm_optimizer.step()
                 # Log warmup progress (per-step loss)
                 if self.train_step % 100 == 0:
-                    seq_len = self.pixels.shape[1] if hasattr(self, "pixels") else 1
+                    seq_len = self.states.shape[1] if hasattr(self, "states") else 1
                     print(
                         f"Warmup {self.train_step}/{self.actor_warmup_steps} | WM Loss/step: {total_wm_loss.item() / seq_len:.4f}"
                     )
@@ -531,7 +532,7 @@ class WorldModelTrainer:
             self.train_step += 1
 
             # Log metrics to TensorBoard
-            sequence_length = self.pixels.shape[1] if hasattr(self, "pixels") else 0
+            sequence_length = self.states.shape[1] if hasattr(self, "states") else 0
             self.log_metrics(
                 total_wm_loss,
                 total_actor_loss,
@@ -584,11 +585,9 @@ class WorldModelTrainer:
                 self.writer.add_scalar(
                     "training/steps_per_sec", steps_per_sec, self.train_step
                 )
-                # Log avg episode length for convergence tracking
-                if self._recent_episode_lengths:
-                    avg_ep_len = sum(self._recent_episode_lengths) / len(
-                        self._recent_episode_lengths
-                    )
+                # Log avg episode length for convergence tracking (from real episodes)
+                avg_ep_len = self.replay_buffer.recent_avg_episode_length
+                if avg_ep_len > 0:
                     self.writer.add_scalar(
                         "metrics/avg_episode_length", avg_ep_len, self.train_step
                     )
@@ -853,32 +852,30 @@ class WorldModelTrainer:
         posterior_dist,
         prior_logits,
     ):
-        # Observation pixels are bernoulli, while observation vectors are gaussian
-        pixel_probs = obs_reconstruction["pixels"]
-        obs_pred = symlog(
-            obs_reconstruction["state"]
-        )  # Apply symlog only to state vector
-
-        pixel_target = obs_t["pixels"]
-        obs_target = obs_t["state"]
-        obs_target = symlog(obs_target)  # loss in symlog space
+        # Observation vectors use symlog squared loss
+        obs_pred = symlog(obs_reconstruction["state"])
+        obs_target = symlog(obs_t["state"])  # loss in symlog space
         beta_dyn = self.config.train.beta_dyn
         beta_rep = self.config.train.beta_rep
         beta_pred = self.config.train.beta_pred
 
         # There are three loss terms:
         # 1. Prediction loss: -ln p(x|z,h) - ln(p(r|z,h)) + ln(p(c|z,h))
-        # a. dynamics represetnation
+        # a. dynamics representation
         # -ln p(x|z,h) is trained with symlog squared loss
         pred_loss_vector = 1 / 2 * (obs_pred - obs_target) ** 2
         pred_loss_vector = pred_loss_vector.mean()
 
-        bce_with_logits_loss_fn = nn.BCEWithLogitsLoss()
-        # The decoder outputs logits, and the target should be in [0,1]
-        # Target pixels are already resized to target_size when loading data
-        pred_loss_pixel = bce_with_logits_loss_fn(
-            input=pixel_probs, target=pixel_target / 255.0
-        )
+        # Pixel loss (only when using pixels)
+        if self.use_pixels and "pixels" in obs_reconstruction and "pixels" in obs_t:
+            pixel_probs = obs_reconstruction["pixels"]
+            pixel_target = obs_t["pixels"]
+            bce_with_logits_loss_fn = nn.BCEWithLogitsLoss()
+            pred_loss_pixel = bce_with_logits_loss_fn(
+                input=pixel_probs, target=pixel_target / 255.0
+            )
+        else:
+            pred_loss_pixel = torch.tensor(0.0, device=self.device)
 
         reward_target = twohot_encode(reward_t, self.B)
         # Use soft cross-entropy for soft targets (twohot encoding)
@@ -890,7 +887,7 @@ class WorldModelTrainer:
         # c. continue predictor
         # The target is 1 if we continue, 0 if we terminate.
         continue_target = (1.0 - terminated_t.float()).unsqueeze(-1)
-        pred_loss_continue = bce_with_logits_loss_fn(continue_logits, continue_target)
+        pred_loss_continue = nn.BCEWithLogitsLoss()(continue_logits, continue_target)
 
         # Prediction loss is the sum of the individual losses
         l_pred = pred_loss_pixel + pred_loss_vector + reward_loss + pred_loss_continue
@@ -926,8 +923,11 @@ class WorldModelTrainer:
             posterior_probs * (log_posterior - log_prior_detached)
         ).sum(dim=-1).mean()
 
-        l_dyn = torch.max(torch.tensor(free_bits, device=self.device), l_dyn_raw)
-        l_rep = torch.max(torch.tensor(free_bits, device=self.device), l_rep_raw)
+        # Straight-through estimator for free bits:
+        # Forward: loss = max(free_bits, raw) for reporting/scaling
+        # Backward: gradient flows through raw value (not killed by max)
+        l_dyn = l_dyn_raw + (free_bits - l_dyn_raw).clamp(min=0).detach()
+        l_rep = l_rep_raw + (free_bits - l_rep_raw).clamp(min=0).detach()
 
         total_loss = beta_pred * l_pred + beta_dyn * l_dyn + beta_rep * l_rep
 

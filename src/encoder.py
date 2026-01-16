@@ -161,3 +161,35 @@ class ThreeLayerMLP(nn.Module):
 
     def forward(self, x):
         return self.mlp(x)
+
+
+class StateOnlyEncoder(nn.Module):
+    """
+    Encoder for state-vector-only observations (no pixels).
+    Used for simple environments like CartPole where state is sufficient.
+    """
+
+    def __init__(
+        self,
+        mlp_config,
+        d_hidden,
+        n_observations,
+    ):
+        super().__init__()
+        self.MLP = ThreeLayerMLP(
+            d_in=n_observations, d_hidden=d_hidden, d_out=d_hidden
+        )
+
+        self.latents = d_hidden
+        self.latent_categories = mlp_config.latent_categories
+
+        # Output: latents * (latents // categories) logits
+        logit_out = self.latents * (self.latents // self.latent_categories)
+        self.logit_layer = nn.Linear(in_features=d_hidden, out_features=logit_out)
+
+    def forward(self, x):
+        # x is the state vector directly (not a dict)
+        out = self.MLP(x)
+        logits = self.logit_layer(out)
+        logits = logits.view(logits.shape[0], self.latents, self.latents // self.latent_categories)
+        return logits
