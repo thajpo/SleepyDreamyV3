@@ -14,6 +14,8 @@ Usage:
 
     # Multirun sweep (parallel)
     uv run python -m src.train --multirun train.actor_lr=1e-5,3e-5,1e-4
+    # Control sweep concurrency
+    SWEEP_N_JOBS=4 uv run python -m src.train --multirun train.actor_lr=1e-5,3e-5,1e-4
 
     # Resume from checkpoint
     uv run python -m src.train checkpoint=/path/to/checkpoint.pt
@@ -56,20 +58,23 @@ def run_training(cfg: DictConfig, mode: str = "train", checkpoint_path: str | No
     if checkpoint_path:
         print(f"  Checkpoint: {checkpoint_path}")
 
+    # Use explicit spawn context for CUDA compatibility
+    mp_ctx = mp.get_context("spawn")
+
     # Create queues for inter-process communication
-    data_queue = mp.Queue(maxsize=config.train.batch_size * 5)
-    model_queue = mp.Queue(maxsize=1)
-    stop_event = mp.Event()
+    data_queue = mp_ctx.Queue(maxsize=config.train.batch_size * 5)
+    model_queue = mp_ctx.Queue(maxsize=1)
+    stop_event = mp_ctx.Event()
 
     # Determine reset_ac based on mode
     reset_ac = mode == "dreamer"
 
     # Launch processes
-    experience_loop = mp.Process(
+    experience_loop = mp_ctx.Process(
         target=collect_experiences,
         args=(data_queue, model_queue, config, stop_event, log_dir),
     )
-    trainer_loop = mp.Process(
+    trainer_loop = mp_ctx.Process(
         target=train_world_model,
         args=(
             config,
@@ -86,10 +91,14 @@ def run_training(cfg: DictConfig, mode: str = "train", checkpoint_path: str | No
     trainer_loop.start()
 
     trainer_loop.join()
+    if trainer_loop.exitcode not in (0, None):
+        print(f"Trainer exited with code {trainer_loop.exitcode}")
     stop_event.set()
     experience_loop.join(timeout=5.0)
     if experience_loop.is_alive():
         experience_loop.terminate()
+    if experience_loop.exitcode not in (0, None):
+        print(f"Collector exited with code {experience_loop.exitcode}")
 
     print("Training complete.")
 
@@ -97,9 +106,6 @@ def run_training(cfg: DictConfig, mode: str = "train", checkpoint_path: str | No
 @hydra.main(version_base=None, config_path="../conf", config_name="config")
 def main(cfg: DictConfig):
     """Hydra entry point."""
-    # Required for CUDA with multiprocessing
-    mp.set_start_method("spawn", force=True)
-
     # Print resolved config
     print(OmegaConf.to_yaml(cfg))
 
