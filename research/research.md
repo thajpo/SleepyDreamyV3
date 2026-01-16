@@ -200,4 +200,18 @@ Initial WM training. Expect WM to converge for cartpole. Will investigate AC lat
   l_dyn = l_dyn_raw + (free_bits - l_dyn_raw).clamp(min=0).detach()
   ```
 - **Files modified**: trainer.py (lines 926-930)
-- **Next**: Retrain state-only CartPole to verify dynamics now learns and policy improves
+
+### 01-15-26 Post-Fix Training Results
+- **Result**: Fix works! Training now learns.
+  - Before fix: stuck at 9.5 avg episode length (worse than random ~25)
+  - After fix: 60-70 avg episode length at 7500 steps
+  - KL dynamics raw: 0.84 → 0.001 (prior now matches posterior)
+- **Remaining issue**: Oscillating around 60, not converging to 500 (solved)
+  - Critic underestimating: predicts value ~14, should be ~38 for 48-step episodes
+  - Policy finds good actions, then drifts away
+- **Diagnosis**: Hyperparameter tuning needed, not a bug
+  - Actor entropy getting low (~0.26) - less exploration
+  - Dream horizon (15 steps) may be too short for CartPole (can be 500 steps)
+  - Possible fixes: increase entropy coef, lower actor LR, longer dream horizon
+- **Conclusion**: Implementation works. Solving CartPole requires tuning, which is a separate skill from debugging.
+- **Status**: Project archived. Core learning: `torch.max` kills gradients below threshold; use straight-through estimator.
