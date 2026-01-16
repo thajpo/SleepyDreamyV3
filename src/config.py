@@ -1,103 +1,384 @@
-# config.py
-from pydantic import BaseModel
-from typing import Tuple
+# config.py - Hydra-compatible configuration
+from dataclasses import dataclass, field
+from typing import List
 import torch
 
 
-def get_default_device():
+def get_default_device() -> str:
     """Checks for available hardware accelerators."""
     if torch.cuda.is_available():
-        # This works for both NVIDIA (CUDA) and AMD (ROCm)
         return "cuda"
     if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         return "mps"
     return "cpu"
 
 
-class GeneralConfig(BaseModel):
-    debug_memory: bool = False
-    device: str = get_default_device()
-    encoder_path: str = "encoder.pt"
-    world_model_path: str = "world_model.pt"
-    train_world_model: bool = True
-    env_bootstrapping_samples: str = "bootstrap_trajectorires.h5"
+@dataclass
+class GeneralConfig:
+    device: str = "auto"  # auto, cuda, mps, cpu
+    use_pixels: bool = False
     profile: bool = False
     compile_models: bool = False
-    use_pixels: bool = True  # Set False for state-only training (e.g., CartPole)
+    debug_memory: bool = False
+
+    def resolve_device(self) -> str:
+        """Resolve 'auto' to actual device."""
+        if self.device == "auto":
+            return get_default_device()
+        return self.device
 
 
-class EnvironmentConfig(BaseModel):
-    environment_name: str = "LunarLander-v3"
-    n_actions: int = 4
-    n_observations: int = 8
+@dataclass
+class EnvironmentConfig:
+    name: str = "CartPole-v1"
+    n_actions: int = 2
+    n_observations: int = 4
 
 
-class CNNEncoderConfig(BaseModel):
+@dataclass
+class CNNEncoderConfig:
     stride: int = 2
-    activation: str = "sigmoid"
-    target_size: Tuple[int, int] = (64, 64)
     kernel_size: int = 2
     padding: int = 0
-    input_channels: int = 3  # RGB
-    num_layers: int = 4  # number of convolutional layers
-    final_feature_size: int = 4  # output is final_feature_size x final_feature_size
+    input_channels: int = 3
+    num_layers: int = 4
+    final_feature_size: int = 4
+    target_size: List[int] = field(default_factory=lambda: [64, 64])
 
 
-class MLPEncoderConfig(BaseModel):
+@dataclass
+class MLPEncoderConfig:
     hidden_dim_ratio: int = 8
     n_layers: int = 3
-    latent_categories: int = 16  # Number of categories per latent variable
+    latent_categories: int = 16
 
 
-class GRUConfig(BaseModel):
+@dataclass
+class EncoderConfig:
+    cnn: CNNEncoderConfig = field(default_factory=CNNEncoderConfig)
+    mlp: MLPEncoderConfig = field(default_factory=MLPEncoderConfig)
+
+
+@dataclass
+class RNNConfig:
     n_blocks: int = 4
 
 
-class EncoderConfig(BaseModel):
-    cnn: CNNEncoderConfig = CNNEncoderConfig()
-    mlp: MLPEncoderConfig = MLPEncoderConfig()
+@dataclass
+class ModelsConfig:
+    d_hidden: int = 64
+    encoder: EncoderConfig = field(default_factory=EncoderConfig)
+    rnn: RNNConfig = field(default_factory=RNNConfig)
 
 
-class ModelsConfig(BaseModel):
-    d_hidden: int = 256
-    encoder: EncoderConfig = EncoderConfig()
-    rnn: GRUConfig = GRUConfig()
-
-
-class TrainConfig(BaseModel):
+@dataclass
+class TrainConfig:
+    # Core settings
+    max_steps: int = 30000
+    batch_size: int = 32
     sequence_length: int = 25
-    max_train_steps: int = 100000
-    num_dream_steps: int = 15
+
+    # Learning rates
+    wm_lr: float = 1e-4
+    actor_lr: float = 1e-4
+    critic_lr: float = 1e-4
+    weight_decay: float = 1e-6
+
+    # RL settings
     gamma: float = 0.99
     lam: float = 0.95
-    wm_lr: float = 1e-4
-    critic_lr: float = 1e-4
-    actor_lr: float = 1e-4
-    weight_decay: float = 1e-6
-    batch_size: int = 8
-    steps_per_weight_sync: int = 5
+    num_dream_steps: int = 15
+    actor_entropy_coef: float = 1e-3
+    normalize_advantages: bool = True
+
+    # Loss coefficients
     beta_dyn: float = 0.99
     beta_rep: float = 0.99
     beta_pred: float = 0.99
-    b_start: int = -20
-    b_end: int = 21
-    # Actor training stabilization
-    actor_entropy_coef: float = 1e-3  # Entropy regularization coefficient
-    normalize_advantages: bool = True  # Normalize advantages to stabilize training
-    actor_warmup_steps: int = 1000  # Bootstrap: WM-only training, random actions in collector
-    bootstrap_steps: int = 50000  # Default steps for bootstrap mode
-    num_collectors: int = 1  # Number of parallel environment collectors
-    # Replay buffer settings
-    replay_buffer_size: int = 1000  # Max episodes stored in replay buffer
-    min_buffer_episodes: int = 64   # Wait for this many episodes before training starts
+
+    # Reward bins
+    b_start: int = -5
+    b_end: int = 6
+
+    # Training phases
+    bootstrap_steps: int = 5000
+    actor_warmup_steps: int = 5000
+
+    # Data collection
+    num_collectors: int = 1
+    replay_buffer_size: int = 1000
+    min_buffer_episodes: int = 64
+    steps_per_weight_sync: int = 5
 
 
-class Config(BaseModel):
-    general: GeneralConfig = GeneralConfig()
-    environment: EnvironmentConfig = EnvironmentConfig()
-    models: ModelsConfig = ModelsConfig()
-    train: TrainConfig = TrainConfig()
+@dataclass
+class Config:
+    general: GeneralConfig = field(default_factory=GeneralConfig)
+    environment: EnvironmentConfig = field(default_factory=EnvironmentConfig)
+    models: ModelsConfig = field(default_factory=ModelsConfig)
+    train: TrainConfig = field(default_factory=TrainConfig)
 
 
-# Default configuration instance
+# For backward compatibility with code expecting config.models.encoder.cnn.target_size as tuple
+class ConfigAdapter:
+    """Adapter to make Hydra config work with existing code."""
+
+    def __init__(self, cfg):
+        self._cfg = cfg
+
+    @property
+    def general(self):
+        return GeneralAdapter(self._cfg.general)
+
+    @property
+    def environment(self):
+        return EnvironmentAdapter(self._cfg.environment)
+
+    @property
+    def models(self):
+        return ModelsAdapter(self._cfg.models)
+
+    @property
+    def train(self):
+        return TrainAdapter(self._cfg.train)
+
+
+class GeneralAdapter:
+    def __init__(self, cfg):
+        self._cfg = cfg
+
+    @property
+    def device(self):
+        if self._cfg.device == "auto":
+            return get_default_device()
+        return self._cfg.device
+
+    @property
+    def use_pixels(self):
+        return self._cfg.use_pixels
+
+    @property
+    def profile(self):
+        return self._cfg.profile
+
+    @property
+    def compile_models(self):
+        return self._cfg.compile_models
+
+    @property
+    def debug_memory(self):
+        return self._cfg.debug_memory
+
+
+class EnvironmentAdapter:
+    def __init__(self, cfg):
+        self._cfg = cfg
+
+    @property
+    def environment_name(self):
+        return self._cfg.name
+
+    @property
+    def n_actions(self):
+        return self._cfg.n_actions
+
+    @property
+    def n_observations(self):
+        return self._cfg.n_observations
+
+
+class CNNAdapter:
+    def __init__(self, cfg):
+        self._cfg = cfg
+
+    @property
+    def stride(self):
+        return self._cfg.stride
+
+    @property
+    def kernel_size(self):
+        return self._cfg.kernel_size
+
+    @property
+    def padding(self):
+        return self._cfg.padding
+
+    @property
+    def input_channels(self):
+        return self._cfg.input_channels
+
+    @property
+    def num_layers(self):
+        return self._cfg.num_layers
+
+    @property
+    def final_feature_size(self):
+        return self._cfg.final_feature_size
+
+    @property
+    def target_size(self):
+        # Return as tuple for backward compatibility
+        return tuple(self._cfg.target_size)
+
+
+class MLPAdapter:
+    def __init__(self, cfg):
+        self._cfg = cfg
+
+    @property
+    def hidden_dim_ratio(self):
+        return self._cfg.hidden_dim_ratio
+
+    @property
+    def n_layers(self):
+        return self._cfg.n_layers
+
+    @property
+    def latent_categories(self):
+        return self._cfg.latent_categories
+
+
+class EncoderAdapter:
+    def __init__(self, cfg):
+        self._cfg = cfg
+
+    @property
+    def cnn(self):
+        return CNNAdapter(self._cfg.cnn)
+
+    @property
+    def mlp(self):
+        return MLPAdapter(self._cfg.mlp)
+
+
+class RNNAdapter:
+    def __init__(self, cfg):
+        self._cfg = cfg
+
+    @property
+    def n_blocks(self):
+        return self._cfg.n_blocks
+
+
+class ModelsAdapter:
+    def __init__(self, cfg):
+        self._cfg = cfg
+
+    @property
+    def d_hidden(self):
+        return self._cfg.d_hidden
+
+    @property
+    def encoder(self):
+        return EncoderAdapter(self._cfg.encoder)
+
+    @property
+    def rnn(self):
+        return RNNAdapter(self._cfg.rnn)
+
+
+class TrainAdapter:
+    def __init__(self, cfg):
+        self._cfg = cfg
+
+    @property
+    def max_train_steps(self):
+        return self._cfg.max_steps
+
+    @property
+    def batch_size(self):
+        return self._cfg.batch_size
+
+    @property
+    def sequence_length(self):
+        return self._cfg.sequence_length
+
+    @property
+    def wm_lr(self):
+        return self._cfg.wm_lr
+
+    @property
+    def actor_lr(self):
+        return self._cfg.actor_lr
+
+    @property
+    def critic_lr(self):
+        return self._cfg.critic_lr
+
+    @property
+    def weight_decay(self):
+        return self._cfg.weight_decay
+
+    @property
+    def gamma(self):
+        return self._cfg.gamma
+
+    @property
+    def lam(self):
+        return self._cfg.lam
+
+    @property
+    def num_dream_steps(self):
+        return self._cfg.num_dream_steps
+
+    @property
+    def actor_entropy_coef(self):
+        return self._cfg.actor_entropy_coef
+
+    @property
+    def normalize_advantages(self):
+        return self._cfg.normalize_advantages
+
+    @property
+    def beta_dyn(self):
+        return self._cfg.beta_dyn
+
+    @property
+    def beta_rep(self):
+        return self._cfg.beta_rep
+
+    @property
+    def beta_pred(self):
+        return self._cfg.beta_pred
+
+    @property
+    def b_start(self):
+        return self._cfg.b_start
+
+    @property
+    def b_end(self):
+        return self._cfg.b_end
+
+    @property
+    def bootstrap_steps(self):
+        return self._cfg.bootstrap_steps
+
+    @property
+    def actor_warmup_steps(self):
+        return self._cfg.actor_warmup_steps
+
+    @property
+    def num_collectors(self):
+        return self._cfg.num_collectors
+
+    @property
+    def replay_buffer_size(self):
+        return self._cfg.replay_buffer_size
+
+    @property
+    def min_buffer_episodes(self):
+        return self._cfg.min_buffer_episodes
+
+    @property
+    def steps_per_weight_sync(self):
+        return self._cfg.steps_per_weight_sync
+
+
+def adapt_config(cfg) -> ConfigAdapter:
+    """Wrap Hydra config with adapter for backward compatibility."""
+    return ConfigAdapter(cfg)
+
+
+# Default config instance for backward compatibility with old code
+# This is used by modules that import `from .config import config`
 config = Config()

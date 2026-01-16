@@ -1,0 +1,8 @@
+# Actor-Critic parameter sweep
+# Usage: python -m src.train --multirun +sweep=ac_params
+
+hydra:
+  sweeper:
+    params:
+      train.actor_lr: 1e-5,3e-5,1e-4
+      train.actor_entropy_coef: 1e-3,5e-3,1e-2,3e-2

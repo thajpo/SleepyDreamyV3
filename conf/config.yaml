@@ -1,0 +1,89 @@
+# DreamerV3 Default Configuration
+# Override with: python -m src.train +env=cartpole_state_only
+# Sweep with: python -m src.train --multirun train.actor_lr=1e-5,3e-5,1e-4
+
+defaults:
+  - _self_
+  - env: cartpole_state_only  # default environment
+
+# General settings
+general:
+  device: auto  # auto, cuda, mps, cpu
+  use_pixels: false
+  profile: false
+  compile_models: false
+  debug_memory: false
+
+# Environment (overridden by env/*.yaml)
+environment:
+  name: CartPole-v1
+  n_actions: 2
+  n_observations: 4
+
+# Model architecture
+models:
+  d_hidden: 64
+  encoder:
+    cnn:
+      stride: 2
+      kernel_size: 2
+      padding: 0
+      input_channels: 3
+      num_layers: 4
+      final_feature_size: 4
+      target_size: [64, 64]
+    mlp:
+      hidden_dim_ratio: 8
+      n_layers: 3
+      latent_categories: 16
+  rnn:
+    n_blocks: 4
+
+# Training hyperparameters
+train:
+  # Core settings
+  max_steps: 30000
+  batch_size: 32
+  sequence_length: 25
+
+  # Learning rates
+  wm_lr: 1e-4
+  actor_lr: 1e-4
+  critic_lr: 1e-4
+  weight_decay: 1e-6
+
+  # RL settings
+  gamma: 0.99
+  lam: 0.95
+  num_dream_steps: 15
+  actor_entropy_coef: 1e-3
+  normalize_advantages: true
+
+  # Loss coefficients
+  beta_dyn: 0.99
+  beta_rep: 0.99
+  beta_pred: 0.99
+
+  # Reward bins (symexp range)
+  b_start: -5
+  b_end: 6
+
+  # Training phases
+  bootstrap_steps: 5000
+  actor_warmup_steps: 5000
+
+  # Data collection
+  num_collectors: 1
+  replay_buffer_size: 1000
+  min_buffer_episodes: 64
+  steps_per_weight_sync: 5
+
+# Hydra settings
+hydra:
+  run:
+    dir: runs/${now:%m-%d_%H%M%S}
+  sweep:
+    dir: runs/sweeps/${now:%m-%d_%H%M}
+    subdir: ${hydra.job.override_dirname}
+  job:
+    chdir: false  # Don't change working directory

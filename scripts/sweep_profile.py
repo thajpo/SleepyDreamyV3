@@ -6,11 +6,14 @@ Profiles GPU memory usage during training to determine how many concurrent
 sweeps can safely run on your hardware.
 
 Usage:
-    python scripts/sweep_profile.py                    # Profile default config
-    python scripts/sweep_profile.py --batch_size 32    # Override batch size
-    python scripts/sweep_profile.py --d_hidden 128     # Override hidden dim
-    python scripts/sweep_profile.py --sweep            # Profile multiple configs
-    python scripts/sweep_profile.py --safety_margin 0.15  # 15% safety margin
+    # Profile a specific config
+    uv run python scripts/sweep_profile.py --config env_configs/cartpole_state_only.yaml
+
+    # Profile multiple state-only configs for comparison
+    uv run python scripts/sweep_profile.py --sweep
+
+    # Custom safety margin (default 10%)
+    uv run python scripts/sweep_profile.py --config env_configs/cartpole.yaml --safety_margin 0.15
 
 The script profiles:
 - Model parameter memory
@@ -26,13 +29,15 @@ import sys
 import os
 
 # Add project root to path for imports
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, PROJECT_ROOT)
 
+import yaml
 import torch
 import torch.nn.functional as F
 from torch.distributions import Categorical
 
-from src.config import Config, get_default_device
+from src.config import config
 from src.trainer_utils import (
     initialize_actor,
     initialize_critic,
@@ -42,11 +47,39 @@ from src.trainer_utils import (
 )
 
 
-def bytes_to_mb(b: int) -> float:
+def load_env_config(config_path: str):
+    """Load YAML config and apply overrides to global config (same as main.py)."""
+    with open(config_path, "r") as f:
+        overrides = yaml.safe_load(f)
+
+    if "general" in overrides:
+        for key, value in overrides["general"].items():
+            if hasattr(config.general, key):
+                setattr(config.general, key, value)
+
+    if "environment" in overrides:
+        for key, value in overrides["environment"].items():
+            if hasattr(config.environment, key):
+                setattr(config.environment, key, value)
+
+    if "models" in overrides:
+        for key, value in overrides["models"].items():
+            if hasattr(config.models, key):
+                setattr(config.models, key, value)
+
+    if "train" in overrides:
+        for key, value in overrides["train"].items():
+            if hasattr(config.train, key):
+                setattr(config.train, key, value)
+
+    return config
+
+
+def bytes_to_mb(b: float) -> float:
     return b / (1024 * 1024)
 
 
-def bytes_to_gb(b: int) -> float:
+def bytes_to_gb(b: float) -> float:
     return b / (1024 * 1024 * 1024)
 
 
@@ -91,12 +124,12 @@ def get_memory_stats() -> dict:
     }
 
 
-def create_dummy_batch(config: Config, device: torch.device) -> dict:
+def create_dummy_batch(cfg, device: torch.device) -> dict:
     """Create a dummy batch for profiling."""
-    batch_size = config.train.batch_size
-    seq_len = config.train.sequence_length
-    n_obs = config.environment.n_observations
-    n_actions = config.environment.n_actions
+    batch_size = cfg.train.batch_size
+    seq_len = cfg.train.sequence_length
+    n_obs = cfg.environment.n_observations
+    n_actions = cfg.environment.n_actions
 
     batch = {
         "state": torch.randn(batch_size, seq_len, n_obs, device=device),
@@ -108,8 +141,8 @@ def create_dummy_batch(config: Config, device: torch.device) -> dict:
         "done": torch.zeros(batch_size, seq_len, device=device),
     }
 
-    if config.general.use_pixels:
-        target_size = config.models.encoder.cnn.target_size
+    if cfg.general.use_pixels:
+        target_size = cfg.models.encoder.cnn.target_size
         batch["pixels"] = torch.randint(
             0, 256,
             (batch_size, seq_len, 3, target_size[0], target_size[1]),
@@ -120,23 +153,23 @@ def create_dummy_batch(config: Config, device: torch.device) -> dict:
     return batch
 
 
-def profile_training_step(config: Config, warmup_steps: int = 3) -> dict:
+def profile_training_step(cfg, warmup_steps: int = 3) -> dict:
     """
     Profile a single training step and measure peak memory usage.
 
     Returns dict with memory stats and parameter counts.
     """
-    device = torch.device(config.general.device)
+    device = torch.device(cfg.general.device)
 
     # Reset memory tracking
     reset_memory_stats()
 
     # Initialize models
     encoder, world_model = initialize_world_model(
-        device, config, batch_size=config.train.batch_size
+        device, cfg, batch_size=cfg.train.batch_size
     )
-    actor = initialize_actor(device, config)
-    critic = initialize_critic(device, config)
+    actor = initialize_actor(device, cfg)
+    critic = initialize_critic(device, cfg)
 
     # Count parameters
     encoder_params = count_parameters(encoder)
@@ -147,25 +180,25 @@ def profile_training_step(config: Config, warmup_steps: int = 3) -> dict:
 
     # Initialize optimizers (Adam stores 2 states per param: momentum & variance)
     wm_params = list(encoder.parameters()) + list(world_model.parameters())
-    wm_optimizer = torch.optim.Adam(wm_params, lr=config.train.wm_lr)
-    actor_optimizer = torch.optim.Adam(actor.parameters(), lr=config.train.actor_lr)
-    critic_optimizer = torch.optim.Adam(critic.parameters(), lr=config.train.critic_lr)
+    wm_optimizer = torch.optim.Adam(wm_params, lr=cfg.train.wm_lr)
+    actor_optimizer = torch.optim.Adam(actor.parameters(), lr=cfg.train.actor_lr)
+    critic_optimizer = torch.optim.Adam(critic.parameters(), lr=cfg.train.critic_lr)
 
     # Memory after model + optimizer initialization
     model_init_memory = get_memory_stats()
 
     # Create reward bins for loss computation
-    b_start = config.train.b_start
-    b_end = config.train.b_end
+    b_start = cfg.train.b_start
+    b_end = cfg.train.b_end
     B = torch.arange(b_start, b_end, device=device).float()
     B = torch.sign(B) * (torch.exp(torch.abs(B)) - 1)  # symexp
 
     # Warmup passes (for torch.compile and CUDA kernel caching)
-    batch = create_dummy_batch(config, device)
+    batch = create_dummy_batch(cfg, device)
 
     for _ in range(warmup_steps):
         # Simulate a forward pass
-        _run_forward_pass(encoder, world_model, actor, critic, batch, config, B, device)
+        _run_forward_pass(encoder, world_model, actor, critic, batch, cfg, B, device)
         reset_memory_stats()
 
     # Profile actual training step
@@ -173,7 +206,7 @@ def profile_training_step(config: Config, warmup_steps: int = 3) -> dict:
 
     # Forward pass
     loss, actor_loss, critic_loss = _run_forward_pass(
-        encoder, world_model, actor, critic, batch, config, B, device
+        encoder, world_model, actor, critic, batch, cfg, B, device
     )
     forward_memory = get_memory_stats()
 
@@ -183,7 +216,7 @@ def profile_training_step(config: Config, warmup_steps: int = 3) -> dict:
 
     # Backward pass - actor/critic
     if actor_loss is not None:
-        actor_loss.backward()
+        actor_loss.backward(retain_graph=True)
         critic_loss.backward()
 
     backward_full_memory = get_memory_stats()
@@ -203,12 +236,12 @@ def profile_training_step(config: Config, warmup_steps: int = 3) -> dict:
 
     return {
         "config": {
-            "batch_size": config.train.batch_size,
-            "d_hidden": config.models.d_hidden,
-            "seq_length": config.train.sequence_length,
-            "n_gru_blocks": config.models.rnn.n_blocks,
-            "use_pixels": config.general.use_pixels,
-            "n_dream_steps": config.train.num_dream_steps,
+            "batch_size": cfg.train.batch_size,
+            "d_hidden": cfg.models.d_hidden,
+            "seq_length": cfg.train.sequence_length,
+            "n_gru_blocks": cfg.models.rnn.n_blocks,
+            "use_pixels": cfg.general.use_pixels,
+            "n_dream_steps": cfg.train.num_dream_steps,
         },
         "params": {
             "encoder": encoder_params,
@@ -228,12 +261,12 @@ def profile_training_step(config: Config, warmup_steps: int = 3) -> dict:
     }
 
 
-def _run_forward_pass(encoder, world_model, actor, critic, batch, config, B, device):
+def _run_forward_pass(encoder, world_model, actor, critic, batch, cfg, B, device):
     """Run a forward pass simulating training."""
-    batch_size = config.train.batch_size
-    seq_len = config.train.sequence_length
-    n_actions = config.environment.n_actions
-    n_dream_steps = config.train.num_dream_steps
+    batch_size = cfg.train.batch_size
+    seq_len = cfg.train.sequence_length
+    n_actions = cfg.environment.n_actions
+    n_dream_steps = cfg.train.num_dream_steps
 
     # Reset world model hidden state
     world_model.h_prev = torch.zeros_like(world_model.h_prev)
@@ -243,7 +276,7 @@ def _run_forward_pass(encoder, world_model, actor, critic, batch, config, B, dev
 
     # Process sequence
     for t in range(seq_len):
-        if config.general.use_pixels:
+        if cfg.general.use_pixels:
             obs = {
                 "pixels": batch["pixels"][:, t],
                 "state": symlog(batch["state"][:, t]),
@@ -259,14 +292,14 @@ def _run_forward_pass(encoder, world_model, actor, critic, batch, config, B, dev
         posterior_dist = Categorical(logits=posterior_logits)
 
         # World model step
-        obs_rec, reward_logits, continue_logits, h_z, prior_logits = world_model(
+        obs_rec, reward_logits, _, h_z, prior_logits = world_model(
             posterior_dist, action
         )
 
         all_h_z.append(h_z)
 
         # Compute losses
-        if config.general.use_pixels:
+        if cfg.general.use_pixels:
             pixel_target = obs["pixels"]
             pixel_loss = F.binary_cross_entropy_with_logits(
                 obs_rec["pixels"], pixel_target, reduction="mean"
@@ -312,23 +345,28 @@ def _run_forward_pass(encoder, world_model, actor, critic, batch, config, B, dev
         dream_log_probs.append(action_dist.log_prob(action_sample))
 
         # Step world model in imagination
-        z_flat = h_z_dream[:, world_model.d_hidden * config.models.rnn.n_blocks:]
+        z_flat = h_z_dream[:, world_model.d_hidden * cfg.models.rnn.n_blocks:]
         z_embed = world_model.z_embedding(z_flat)
         h_dream, prior_logits = world_model.step_dynamics(z_embed, action_onehot, h_dream)
 
         # Sample from prior for next state
         prior_dist = Categorical(logits=prior_logits)
         z_idx = prior_dist.sample()
-        z_onehot = F.one_hot(z_idx, num_classes=config.models.d_hidden // 16).float()
+        z_onehot = F.one_hot(z_idx, num_classes=cfg.models.d_hidden // 16).float()
         z_flat_new = z_onehot.view(batch_size, -1)
         h_z_dream = torch.cat([h_dream, z_flat_new], dim=-1)
 
     # Simple actor/critic loss (not full implementation, just for memory profiling)
     if dream_values:
-        values = torch.stack([v.mean() for v in dream_values])
-        log_probs = torch.stack(dream_log_probs)
-        actor_loss = -(log_probs * values.detach()).mean()
-        critic_loss = F.mse_loss(values, torch.zeros_like(values))
+        # dream_values: list of (batch, n_bins) tensors
+        # dream_log_probs: list of (batch,) tensors
+        values_tensor = torch.stack(dream_values)  # (n_dream_steps, batch, n_bins)
+        log_probs_tensor = torch.stack(dream_log_probs)  # (n_dream_steps, batch)
+
+        # Simple loss - just use mean value for profiling purposes
+        value_mean = values_tensor.mean(dim=-1)  # (n_dream_steps, batch)
+        actor_loss = -(log_probs_tensor * value_mean.detach()).mean()
+        critic_loss = F.mse_loss(value_mean, torch.zeros_like(value_mean))
     else:
         actor_loss = None
         critic_loss = None
@@ -420,8 +458,42 @@ def print_profile_report(result: dict, gpu_info: dict, concurrent: dict):
     print("\n" + "=" * 70)
 
 
-def run_sweep_profile(configs: list[dict], safety_margin: float = 0.10):
-    """Profile multiple configurations and show comparison."""
+def reset_config_to_defaults():
+    """Reset the global config to defaults."""
+    from src.config import (
+        Config as ConfigClass,
+        GeneralConfig,
+        EnvironmentConfig,
+        ModelsConfig,
+        TrainConfig,
+    )
+    default = ConfigClass()
+
+    # Reset all fields to defaults (access model_fields from class, not instance)
+    for key in GeneralConfig.model_fields:
+        setattr(config.general, key, getattr(default.general, key))
+    for key in EnvironmentConfig.model_fields:
+        setattr(config.environment, key, getattr(default.environment, key))
+    for key in ModelsConfig.model_fields:
+        setattr(config.models, key, getattr(default.models, key))
+    for key in TrainConfig.model_fields:
+        setattr(config.train, key, getattr(default.train, key))
+
+
+def resolve_config_path(cfg_path: str) -> str | None:
+    """Resolve config path relative to project root or as absolute."""
+    # Try relative to project root first
+    full_path = os.path.join(PROJECT_ROOT, cfg_path)
+    if os.path.exists(full_path):
+        return full_path
+    # Try as-is (absolute or cwd-relative)
+    if os.path.exists(cfg_path):
+        return cfg_path
+    return None  # Not found
+
+
+def run_sweep_profile(config_files: list[str], safety_margin: float = 0.10):
+    """Profile multiple config files and show comparison."""
     gpu_info = get_gpu_info()
 
     if not gpu_info["available"]:
@@ -429,28 +501,30 @@ def run_sweep_profile(configs: list[dict], safety_margin: float = 0.10):
         return
 
     print("\n" + "=" * 70)
-    print("  MULTI-CONFIG SWEEP PROFILE")
+    print("  MULTI-CONFIG SWEEP PROFILE (CartPole State-Only)")
     print("=" * 70)
     print(f"\nGPU: {gpu_info['device_name']} ({bytes_to_gb(gpu_info['total_memory']):.1f} GB)")
     print(f"Safety Margin: {safety_margin * 100:.0f}%\n")
 
     results = []
-    for i, cfg_override in enumerate(configs):
-        # Create config with overrides
-        config = Config()
-        if "batch_size" in cfg_override:
-            config.train.batch_size = cfg_override["batch_size"]
-        if "d_hidden" in cfg_override:
-            config.models.d_hidden = cfg_override["d_hidden"]
-        if "use_pixels" in cfg_override:
-            config.general.use_pixels = cfg_override["use_pixels"]
+    for i, config_file in enumerate(config_files):
+        # Reset config to defaults before loading new file
+        reset_config_to_defaults()
 
-        print(f"Profiling config {i + 1}/{len(configs)}: "
+        config_path = resolve_config_path(config_file)
+        if config_path is None:
+            print(f"  Skipping {config_file} (not found)")
+            continue
+
+        load_env_config(config_path)
+
+        print(f"Profiling [{i + 1}/{len(config_files)}] {config_file}: "
               f"batch={config.train.batch_size}, "
               f"d_hidden={config.models.d_hidden}, "
               f"pixels={config.general.use_pixels}...")
 
         result = profile_training_step(config)
+        result["config_file"] = config_file
         concurrent = calculate_concurrent_sweeps(
             result["memory"]["peak"],
             gpu_info["total_memory"],
@@ -464,27 +538,25 @@ def run_sweep_profile(configs: list[dict], safety_margin: float = 0.10):
 
     # Print comparison table
     print(f"\n{'Configuration Comparison':─^70}")
-    print(f"{'Batch':<8} {'Hidden':<8} {'Pixels':<8} {'Params':<12} {'Peak MB':<10} {'Concurrent':<10}")
+    print(f"{'Config':<35} {'Batch':<6} {'Hidden':<7} {'Peak MB':<9} {'Concurrent':<10}")
     print("─" * 70)
 
     for r in results:
         cfg = r["config"]
-        print(f"{cfg['batch_size']:<8} "
-              f"{cfg['d_hidden']:<8} "
-              f"{str(cfg['use_pixels']):<8} "
-              f"{r['params']['total']:>10,} "
-              f"{bytes_to_mb(r['memory']['peak']):>8.1f} "
+        config_name = os.path.basename(r["config_file"])
+        print(f"{config_name:<35} "
+              f"{cfg['batch_size']:<6} "
+              f"{cfg['d_hidden']:<7} "
+              f"{bytes_to_mb(r['memory']['peak']):>7.1f} "
               f"{r['concurrent']['max_concurrent']:>8}")
 
     # Recommendation
-    best = max(results, key=lambda x: x["concurrent"]["max_concurrent"])
-    print(f"\n{'Recommendation':─^70}")
-    print(f"For maximum parallelism, use:")
-    print(f"  batch_size={best['config']['batch_size']}, "
-          f"d_hidden={best['config']['d_hidden']}, "
-          f"use_pixels={best['config']['use_pixels']}")
-    print(f"  → {best['concurrent']['max_concurrent']} concurrent sweeps")
-    print("=" * 70)
+    if results:
+        best = max(results, key=lambda x: x["concurrent"]["max_concurrent"])
+        print(f"\n{'Recommendation':─^70}")
+        print(f"For maximum parallelism, use: {os.path.basename(best['config_file'])}")
+        print(f"  → {best['concurrent']['max_concurrent']} concurrent sweeps possible")
+        print("=" * 70)
 
 
 def main():
@@ -495,20 +567,8 @@ def main():
     )
 
     parser.add_argument(
-        "--batch_size", type=int, default=None,
-        help="Override batch size (default: from config)"
-    )
-    parser.add_argument(
-        "--d_hidden", type=int, default=None,
-        help="Override hidden dimension (default: 256)"
-    )
-    parser.add_argument(
-        "--use_pixels", action="store_true", default=None,
-        help="Enable pixel observations"
-    )
-    parser.add_argument(
-        "--state_only", action="store_true",
-        help="Disable pixel observations (state-only)"
+        "--config", type=str,
+        help="Path to env config YAML (e.g., env_configs/cartpole_state_only.yaml)"
     )
     parser.add_argument(
         "--safety_margin", type=float, default=0.10,
@@ -516,7 +576,7 @@ def main():
     )
     parser.add_argument(
         "--sweep", action="store_true",
-        help="Profile multiple configurations for comparison"
+        help="Profile all CartPole state-only configs for comparison"
     )
     parser.add_argument(
         "--warmup", type=int, default=3,
@@ -533,37 +593,28 @@ def main():
         sys.exit(1)
 
     if args.sweep:
-        # Profile multiple configurations
-        configs = [
-            # Batch size variations (state-only for fast profiling)
-            {"batch_size": 8, "d_hidden": 256, "use_pixels": False},
-            {"batch_size": 16, "d_hidden": 256, "use_pixels": False},
-            {"batch_size": 32, "d_hidden": 256, "use_pixels": False},
-            {"batch_size": 64, "d_hidden": 256, "use_pixels": False},
-            # Hidden dim variations
-            {"batch_size": 16, "d_hidden": 64, "use_pixels": False},
-            {"batch_size": 16, "d_hidden": 128, "use_pixels": False},
-            {"batch_size": 16, "d_hidden": 256, "use_pixels": False},
-            # With pixels (higher memory)
-            {"batch_size": 8, "d_hidden": 256, "use_pixels": True},
-            {"batch_size": 16, "d_hidden": 256, "use_pixels": True},
+        # Profile available CartPole configs
+        config_files = [
+            "env_configs/cartpole_state_only_small.yaml",
         ]
-        run_sweep_profile(configs, args.safety_margin)
+        run_sweep_profile(config_files, args.safety_margin)
     else:
         # Single config profile
-        config = Config()
+        if args.config:
+            config_path = resolve_config_path(args.config)
+            if config_path is None:
+                print(f"ERROR: Config not found: {args.config}")
+                sys.exit(1)
+            load_env_config(config_path)
+            print(f"Loaded config: {args.config}")
+        else:
+            # Default to state-only for baseline work
+            default_config = resolve_config_path("env_configs/cartpole_state_only_small.yaml")
+            if default_config:
+                load_env_config(default_config)
+                print(f"Using default config: env_configs/cartpole_state_only_small.yaml")
 
-        # Apply overrides
-        if args.batch_size is not None:
-            config.train.batch_size = args.batch_size
-        if args.d_hidden is not None:
-            config.models.d_hidden = args.d_hidden
-        if args.use_pixels:
-            config.general.use_pixels = True
-        if args.state_only:
-            config.general.use_pixels = False
-
-        print(f"Profiling with batch_size={config.train.batch_size}, "
+        print(f"Profiling: batch={config.train.batch_size}, "
               f"d_hidden={config.models.d_hidden}, "
               f"use_pixels={config.general.use_pixels}...")
 
