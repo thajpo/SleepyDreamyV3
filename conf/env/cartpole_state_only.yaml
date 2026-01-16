@@ -1,3 +1,4 @@
+# @package _global_
 # CartPole state-only configuration
 # No pixels, small model for fast iteration
 

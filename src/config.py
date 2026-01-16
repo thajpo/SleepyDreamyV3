@@ -126,6 +126,12 @@ class ConfigAdapter:
     def __init__(self, cfg):
         self._cfg = cfg
 
+    def model_dump_json(self, indent=2):
+        """Serialize config to JSON (Pydantic-compatible interface)."""
+        import json
+        from omegaconf import OmegaConf
+        return json.dumps(OmegaConf.to_container(self._cfg), indent=indent)
+
     @property
     def general(self):
         return GeneralAdapter(self._cfg.general)
