@@ -46,6 +46,80 @@ def is_port_in_use(port: int) -> bool:
         return s.connect_ex(("localhost", port)) == 0
 
 
+def get_git_commit() -> str | None:
+    """Get current git commit hash."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
+def get_sweep_info() -> dict:
+    """
+    Extract sweep information from Hydra config.
+
+    Returns:
+        dict with keys:
+        - is_sweep: bool
+        - sweep_id: str | None (sweep directory basename, e.g., "01-17_1430")
+        - varied_params: dict (parsed overrides, e.g., {"actor_lr": "1e-4"})
+    """
+    try:
+        hydra_cfg = hydra.core.hydra_config.HydraConfig.get()
+        is_sweep = hydra_cfg.mode.name == "MULTIRUN"
+
+        if is_sweep:
+            sweep_dir = hydra_cfg.sweep.dir
+            sweep_id = os.path.basename(sweep_dir)
+            override_dirname = hydra_cfg.job.override_dirname
+
+            # Parse override_dirname to extract varied params
+            # Format: "train.actor_lr=1e-4,train.gamma=0.99"
+            varied_params = {}
+            if override_dirname:
+                for part in override_dirname.split(","):
+                    if "=" in part:
+                        key, value = part.split("=", 1)
+                        # Use short key (last part after dot)
+                        short_key = key.split(".")[-1]
+                        varied_params[short_key] = value
+
+            return {
+                "is_sweep": True,
+                "sweep_id": sweep_id,
+                "varied_params": varied_params,
+            }
+    except Exception:
+        pass
+
+    return {"is_sweep": False, "sweep_id": None, "varied_params": {}}
+
+
+def generate_run_name(log_dir: str, sweep_info: dict) -> str:
+    """
+    Generate a descriptive run name.
+
+    Format:
+    - Single run: "01-17_1430" (timestamp from Hydra)
+    - Sweep run: "lr=1e-4_gamma=0.99" (varied params only, sweep_id in tags)
+    """
+    base_name = os.path.basename(log_dir)
+
+    if sweep_info["is_sweep"] and sweep_info["varied_params"]:
+        # For sweeps, show the varied params (makes comparing runs easy)
+        return "_".join(f"{k}={v}" for k, v in sweep_info["varied_params"].items())
+
+    return base_name
+
+
 def start_mlflow_ui(mlruns_dir: str, port: int = 5000) -> subprocess.Popen | None:
     """Start MLflow UI server in background if not already running."""
     if is_port_in_use(port):
@@ -132,11 +206,27 @@ def run_training(cfg: DictConfig, mode: str = "train", checkpoint_path: str | No
                 print(f"  Resuming MLflow run: {mlflow_run_id}")
                 is_resumed_run = True
 
+        # Get sweep info and generate descriptive run name
+        sweep_info = get_sweep_info()
+        run_name = generate_run_name(log_dir, sweep_info)
+
         # Start MLflow run (resume if run_id exists)
-        run = mlflow.start_run(run_id=mlflow_run_id, run_name=os.path.basename(log_dir))
+        run = mlflow.start_run(run_id=mlflow_run_id, run_name=run_name)
         mlflow_run_id = run.info.run_id
         print(f"  MLflow run ID: {mlflow_run_id}")
         print(f"  MLflow tracking: {mlruns_dir}")
+
+        # Add useful tags for filtering/grouping
+        git_commit = get_git_commit()
+        if git_commit:
+            mlflow.set_tag("git_commit", git_commit)
+
+        if sweep_info["is_sweep"]:
+            mlflow.set_tag("sweep_id", sweep_info["sweep_id"])
+            mlflow.set_tag("run_type", "sweep")
+            print(f"  Sweep ID: {sweep_info['sweep_id']}")
+        else:
+            mlflow.set_tag("run_type", "single")
 
         # Start MLflow UI server
         start_mlflow_ui(mlruns_dir, port=5000)
