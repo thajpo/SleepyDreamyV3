@@ -260,4 +260,90 @@ Initial WM training. Expect WM to converge for cartpole. Will investigate AC lat
 - **Files modified**: trainer/core.py, trainer/losses.py
 - **Test config**: Same as best sweep run (lr=3e-5, entropy=0.001, 2.5k steps)
 - **Expected result**: Similar fast rise, stable plateau instead of decline
-- **Status**: Running
+
+### 01-17-26 Run (01-17_141742) - Return Normalization Test
+- **Config**: lr=3e-5, entropy=0.001, 10k steps (5k warmup + 5k AC)
+- **Results**:
+
+| Step | Avg Ep Len | Dream Value | KL Rep | Actor Loss | Critic Loss | WM Reward |
+|------|------------|-------------|--------|------------|-------------|-----------|
+| 5500 | ~80 (peak) | ~5 | 0.0025 | 0.20 | 0.46 | 0.630 |
+| 6500 | ~55 | ~10 | 0.0015 | 0.18 | 0.44 | 0.635 |
+| 7500 | ~47 (trough) | ~14 | 0.0015 | 0.17 | 0.43 | 0.645 |
+| 8250 | 49.6 | 16.45 | 0.0001 | 0.166 | 0.426 | 0.651 |
+| 10000 | ~50 | ~17 | ~0 | 0.14 | 0.41 | 0.67 |
+
+- **Observations**:
+  1. **Peak-then-collapse**: Episode length peaked at ~80 (step 5500), then collapsed to ~50
+  2. **Delusional dreaming**: Dream value tripled (5→17) while episode length dropped 40%
+  3. **KL rep → 0**: Collapsed from 0.0025 to 0.0001 (suspicious - too low)
+  4. **WM reward loss rising**: 0.63 → 0.67 (WM struggling with new states)
+
+- **Root Cause Analysis**: WM-Actor lag
+  - During warmup (0-5k): WM learned "random policy dynamics" (short episodes)
+  - AC kicks in (5k-6.5k): Policy improves fast, episodes 25→80
+  - Collapse (6.5k+): AC outran WM, dreams became unreliable
+  - Actor/Critic loss plateaued (can't learn from stale WM predictions)
+
+### 01-17-26 DreamerV3 Implementation Audit
+- **Discovery**: Our implementation deviated from DreamerV3 paper defaults
+
+| Parameter | Ours | DreamerV3 | Impact |
+|-----------|------|-----------|--------|
+| βrep | **0.99** | **0.1** | 10x too high → KL collapse |
+| βdyn | 0.99 | 1.0 | Minor |
+| βpred | 0.99 | 1.0 | Minor |
+| unimix | **Missing** | **1%** | Categorical collapse risk |
+| γ | 0.99 | 0.997 | Ours more myopic |
+| η (entropy) | 1e-3 | 3e-4 | Ours 3x higher |
+| H (horizon) | 15 | 15 | Match |
+| free nats | 1 | 1 | Match |
+
+- **Critical Issues**:
+  1. **βrep = 0.99 should be 0.1**: Representation loss 10x too high → pushes posterior toward prior too aggressively → latent collapse → KL rep → 0
+  2. **Unimix missing**: 1% uniform mixture prevents categorical collapse by maintaining gradient flow
+
+- **Fixes Implemented**:
+  ```python
+  # conf/config.yaml
+  beta_dyn: 1.0
+  beta_rep: 0.1  # was 0.99
+  beta_pred: 1.0
+
+  # src/trainer/math_utils.py - new function
+  def unimix_logits(logits, unimix_ratio=0.01):
+      probs = F.softmax(logits, dim=-1)
+      uniform = torch.ones_like(probs) / num_classes
+      probs_mixed = (1 - unimix_ratio) * probs + unimix_ratio * uniform
+      return torch.log(probs_mixed + 1e-8)
+
+  # Applied to: posterior, prior (dreams), prior (KL computation)
+  ```
+
+- **Additional Fix**: On-demand collection
+  - Problem: Collector generated 1M+ episodes while trainer only used ~10k
+  - Fix: Collector waits when queue >80% full instead of brief sleep
+  - Benefit: Reduces CPU waste without starving GPU
+
+### 01-17-26 WM-Actor Lag Analysis (Theoretical)
+- **Core Problem**: Actor-critic learns faster from dreams than WM adapts to new state distribution
+- **Timeline**:
+  1. Warmup: WM learns random policy dynamics
+  2. AC starts: Exploits WM, improves fast, reaches new states
+  3. Lag: WM still has "random world" model, predictions become stale
+  4. Collapse: AC learns wrong things from bad dreams
+
+- **Detection Signals** (for future adaptive training):
+  - Episode length drop (works for dense rewards)
+  - WM loss spike on recent data (works for sparse rewards too)
+  - KL divergence spike (model surprise)
+
+- **Potential Interventions** (not yet implemented):
+  | Approach | Description |
+  |----------|-------------|
+  | WM update ratio | Train WM 2-4x per AC update |
+  | AC throttling | Update AC every N steps |
+  | Surprise trigger | Boost WM when recent loss spikes |
+  | Asymmetric LR | WM 1e-4, Actor 3e-5 |
+
+- **Next Steps**: Test with βrep=0.1 and unimix fixes before adding adaptive mechanisms
