@@ -1,7 +1,7 @@
 [project]
 name = "sleepydreamyv3"
 version = "0.1.0"
-description = "Add your description here"
+description = "PyTorch implementation of DreamerV3 - model-based reinforcement learning with learned world models"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [

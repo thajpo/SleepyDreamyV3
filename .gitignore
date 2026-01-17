@@ -5,12 +5,24 @@ build/
 dist/
 wheels/
 *.egg-info
+.pytest_cache/
+.ruff_cache/
 
 # Virtual environments
-.venv
+.venv/
+
+# IDE/Editor
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+
+# Project-specific
 DreamerPaper.pdf
 *.h5
 *.pt
 
-# TensorBoard logs
+# TensorBoard logs and Hydra outputs
 runs/
+outputs/

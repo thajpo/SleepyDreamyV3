@@ -71,6 +71,7 @@ def evaluate(checkpoint_path, config_path, num_episodes=10, device="cuda"):
                 pixel_obs_t = torch.from_numpy(obs["pixels"]).to(device).float()
                 pixel_obs_t = pixel_obs_t.permute(2, 0, 1).unsqueeze(0)
                 vec_obs_t = torch.from_numpy(obs["state"]).to(device).float().unsqueeze(0)
+                vec_obs_t = symlog(vec_obs_t)
                 current_obs = {"pixels": pixel_obs_t, "state": vec_obs_t}
             else:
                 vec_obs_t = torch.from_numpy(obs).to(device).float().unsqueeze(0)
