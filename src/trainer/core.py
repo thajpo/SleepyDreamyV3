@@ -4,15 +4,16 @@ import torch.optim as optim
 import torch.distributions as dist
 import torch.nn.functional as F
 from queue import Full
-from torch.utils.tensorboard import SummaryWriter
+import mlflow
 import os
 import time
 
 from ..replay_buffer import EpisodeReplayBuffer
-from .math_utils import symlog, symexp, twohot_encode, resize_pixels_to_target
+from .math_utils import symlog, symexp, twohot_encode, resize_pixels_to_target, unimix_logits
 from .model_init import initialize_actor, initialize_critic, initialize_world_model
 from .profiling import ProfilerManager, TimingAccumulator
 from .losses import compute_actor_critic_losses
+from .mlflow_logger import MLflowLogger
 
 
 class WorldModelTrainer:
@@ -25,6 +26,7 @@ class WorldModelTrainer:
         checkpoint_path=None,
         mode="train",
         reset_ac=False,
+        mlflow_run_id=None,
     ):
         self.config = config  # Store config for use in methods
         self.device = torch.device(config.general.device)
@@ -104,10 +106,11 @@ class WorldModelTrainer:
         self.replay_buffer.start()
         print(f"Replay buffer started (max={config.train.replay_buffer_size} episodes)")
 
-        # Initialize TensorBoard writer with the provided log directory
-        self.writer = SummaryWriter(log_dir=log_dir)
+        # Initialize MLflow logger with the provided log directory
+        self.mlflow_run_id = mlflow_run_id
+        self.logger = MLflowLogger(log_dir=log_dir, run_id=mlflow_run_id)
         self.log_dir = log_dir
-        print(f"TensorBoard logging to: {log_dir}")
+        print(f"MLflow logging to: {log_dir}")
         self.log_every = 250
         self.image_log_every = 2500
 
@@ -303,11 +306,11 @@ class WorldModelTrainer:
                 reward_t = self.rewards[:, t_step]
                 terminated_t = self.terminated[:, t_step]
 
-                # Use pre-computed encoder output
+                # Use pre-computed encoder output with unimix (DreamerV3 Section 4)
                 posterior_logits = all_posterior_logits[:, t_step]
-                # posterior_dist = dist.Categorical(logits=posterior_logits)
+                posterior_logits_mixed = unimix_logits(posterior_logits, unimix_ratio=0.01)
                 posterior_dist = dist.Categorical(
-                    logits=posterior_logits, validate_args=False
+                    logits=posterior_logits_mixed, validate_args=False
                 )
 
                 (
@@ -503,7 +506,7 @@ class WorldModelTrainer:
             log_step = self.train_step
             self.train_step += 1
 
-            # Log metrics to TensorBoard
+            # Log metrics to MLflow
             sequence_length = self.states.shape[1] if hasattr(self, "states") else 0
             self.log_metrics(
                 total_wm_loss,
@@ -554,14 +557,14 @@ class WorldModelTrainer:
                     f"Critic: {total_critic_loss.item() / seq_len:.4f}"
                 )
 
-                self.writer.add_scalar(
-                    "training/steps_per_sec", steps_per_sec, self.train_step
+                self.logger.add_scalar(
+                    "train/throughput", steps_per_sec, self.train_step
                 )
                 # Log avg episode length for convergence tracking (from real episodes)
                 avg_ep_len = self.replay_buffer.recent_avg_episode_length
                 if avg_ep_len > 0:
-                    self.writer.add_scalar(
-                        "metrics/avg_episode_length", avg_ep_len, self.train_step
+                    self.logger.add_scalar(
+                        "env/episode_length", avg_ep_len, self.train_step
                     )
                 self.last_log_time = time.time()
                 self.steps_since_log = 0
@@ -587,7 +590,7 @@ class WorldModelTrainer:
 
         # Cleanup
         self.replay_buffer.stop()
-        self.writer.close()
+        self.logger.close()
 
     def update_return_scale(self, lambda_returns, decay=0.99):
         flat = lambda_returns.detach().reshape(-1)
@@ -616,6 +619,7 @@ class WorldModelTrainer:
             "wm_optimizer": self.wm_optimizer.state_dict(),
             "actor_optimizer": self.actor_optimizer.state_dict(),
             "critic_optimizer": self.critic_optimizer.state_dict(),
+            "mlflow_run_id": self.mlflow_run_id,
         }
         path = os.path.join(self.checkpoint_dir, f"checkpoint_{suffix}.pt")
         torch.save(checkpoint, path)
@@ -634,6 +638,7 @@ class WorldModelTrainer:
             },
             "wm_optimizer": self.wm_optimizer.state_dict(),
             "checkpoint_type": "wm_only",
+            "mlflow_run_id": self.mlflow_run_id,
         }
         path = os.path.join(self.checkpoint_dir, f"wm_checkpoint_{suffix}.pt")
         torch.save(checkpoint, path)
@@ -723,10 +728,10 @@ class WorldModelTrainer:
                 dream_z_embed, action_onehot, dream_h
             )
 
-            # 2. Sample z from the prior
-            # dream_prior_dist = dist.Categorical(logits=dream_prior_logits)
+            # 2. Sample z from the prior with unimix (DreamerV3 Section 4)
+            dream_prior_logits_mixed = unimix_logits(dream_prior_logits, unimix_ratio=0.01)
             dream_prior_dist = dist.Categorical(
-                logits=dream_prior_logits, validate_args=False
+                logits=dream_prior_logits_mixed, validate_args=False
             )
             dream_z_sample_indices = dream_prior_dist.sample()
             dream_z_sample = F.one_hot(
@@ -844,9 +849,11 @@ class WorldModelTrainer:
         #     dist.Categorical(logits=prior_dist.logits.detach()),
         # ).mean()
         # Manual categorical KL to avoid distribution overhead.
+        # Apply unimix to prior_logits for consistency (posterior already has unimix)
+        prior_logits_mixed = unimix_logits(prior_logits, unimix_ratio=0.01)
         posterior_logits_detached = posterior_dist.logits.detach()
         log_posterior_detached = F.log_softmax(posterior_logits_detached, dim=-1)
-        log_prior = F.log_softmax(prior_logits, dim=-1)
+        log_prior = F.log_softmax(prior_logits_mixed, dim=-1)
         posterior_probs_detached = log_posterior_detached.exp()
         l_dyn_raw = (
             (posterior_probs_detached * (log_posterior_detached - log_prior))
@@ -855,7 +862,7 @@ class WorldModelTrainer:
         )
 
         log_posterior = F.log_softmax(posterior_dist.logits, dim=-1)
-        log_prior_detached = F.log_softmax(prior_logits.detach(), dim=-1)
+        log_prior_detached = F.log_softmax(prior_logits_mixed.detach(), dim=-1)
         posterior_probs = log_posterior.exp()
         l_rep_raw = (
             (posterior_probs * (log_posterior - log_prior_detached)).sum(dim=-1).mean()
@@ -900,7 +907,18 @@ class WorldModelTrainer:
         last_dreamed_pixels=None,
         step=None,
     ):
-        """Log metrics to TensorBoard."""
+        """Log metrics to MLflow.
+
+        Metric naming convention:
+        - loss/{model}/total: Top-level loss per model (wm, actor, critic)
+        - wm/{component}/loss: World model sub-component losses
+        - wm/rssm/*: RSSM-specific metrics (KL divergences)
+        - dream/{source}/*: Imagined trajectory stats from world model rollouts
+        - actor/*: Actor network metrics
+        - train/*: Training infrastructure metrics
+        - env/*: Environment interaction metrics
+        - viz/*: Visualization artifacts
+        """
         if step is None:
             step = self.train_step
         log_scalars = step % self.log_every == 0
@@ -927,68 +945,61 @@ class WorldModelTrainer:
                 # Convert tensor loss components to CPU floats (single sync for all 8 components)
                 wm_components_cpu = {k: v.item() for k, v in wm_loss_components.items()}
 
-                # Per-step totals
+                # Per-step totals for each model
                 wm_per_step = total_wm_loss.item() * norm
-                self.writer.add_scalar(
-                    "loss/world_model/total_per_step", wm_per_step, step
+                self.logger.add_scalar("loss/wm/total", wm_per_step, step)
+                self.logger.add_scalar(
+                    "loss/actor/total", total_actor_loss.item() * norm, step
                 )
-                self.writer.add_scalar(
-                    "loss/actor/total_per_step", total_actor_loss.item() * norm, step
-                )
-                self.writer.add_scalar(
-                    "loss/critic/total_per_step", total_critic_loss.item() * norm, step
+                self.logger.add_scalar(
+                    "loss/critic/total", total_critic_loss.item() * norm, step
                 )
 
                 # Raw component values (per-step, unscaled)
                 pixel = wm_components_cpu["prediction_pixel"] * norm
-                vector = wm_components_cpu["prediction_vector"] * norm
+                state = wm_components_cpu["prediction_vector"] * norm
                 reward = wm_components_cpu["prediction_reward"] * norm
                 cont = wm_components_cpu["prediction_continue"] * norm
                 dyn = wm_components_cpu["dynamics"] * norm
                 rep = wm_components_cpu["representation"] * norm
 
-                # Prediction sub-components (unscaled, for debugging)
-                self.writer.add_scalar("loss/wm_components/pixel", pixel, step)
-                self.writer.add_scalar("loss/wm_components/vector", vector, step)
-                self.writer.add_scalar("loss/wm_components/reward", reward, step)
-                self.writer.add_scalar("loss/wm_components/continue", cont, step)
-                self.writer.add_scalar("loss/wm_components/dynamics", dyn, step)
-                self.writer.add_scalar("loss/wm_components/representation", rep, step)
+                # World model sub-component losses (grouped by module)
+                # Decoder losses (reconstruction)
+                self.logger.add_scalar("wm/decoder/pixel_loss", pixel, step)
+                self.logger.add_scalar("wm/decoder/state_loss", state, step)
+                # Predictor head losses
+                self.logger.add_scalar("wm/reward_head/loss", reward, step)
+                self.logger.add_scalar("wm/continue_head/loss", cont, step)
+                # RSSM KL losses (after free bits)
+                self.logger.add_scalar("wm/rssm/kl_dynamics", dyn, step)
+                self.logger.add_scalar("wm/rssm/kl_representation", rep, step)
 
-                # Scaled contributions to total (these should sum to total_per_step)
-                pred_total = pixel + vector + reward + cont
-                self.writer.add_scalar(
-                    "loss/wm_scaled/prediction", beta_pred * pred_total, step
+                # Scaled contributions to total (these should sum to loss/wm/total)
+                pred_total = pixel + state + reward + cont
+                self.logger.add_scalar(
+                    "wm/scaled/prediction", beta_pred * pred_total, step
                 )
-                self.writer.add_scalar("loss/wm_scaled/dynamics", beta_dyn * dyn, step)
-                self.writer.add_scalar(
-                    "loss/wm_scaled/representation", beta_rep * rep, step
-                )
+                self.logger.add_scalar("wm/scaled/dynamics", beta_dyn * dyn, step)
+                self.logger.add_scalar("wm/scaled/representation", beta_rep * rep, step)
 
-                # Raw KL divergences (before free bits clipping)
-                self.writer.add_scalar(
-                    "debug/kl_dynamics_raw",
+                # Raw KL divergences (before free bits clipping, for debugging)
+                self.logger.add_scalar(
+                    "wm/rssm/kl_dynamics_raw",
                     wm_components_cpu["kl_dynamics_raw"] * norm,
                     step,
                 )
-                self.writer.add_scalar(
-                    "debug/kl_representation_raw",
+                self.logger.add_scalar(
+                    "wm/rssm/kl_representation_raw",
                     wm_components_cpu["kl_representation_raw"] * norm,
                     step,
                 )
             else:
                 # Fallback if no sequence
-                self.writer.add_scalar(
-                    "loss/world_model/total_per_step", total_wm_loss.item(), step
-                )
-                self.writer.add_scalar(
-                    "loss/actor/total_per_step", total_actor_loss.item(), step
-                )
-                self.writer.add_scalar(
-                    "loss/critic/total_per_step", total_critic_loss.item(), step
-                )
+                self.logger.add_scalar("loss/wm/total", total_wm_loss.item(), step)
+                self.logger.add_scalar("loss/actor/total", total_actor_loss.item(), step)
+                self.logger.add_scalar("loss/critic/total", total_critic_loss.item(), step)
 
-            # Dreamed trajectory statistics (debugging metrics)
+            # Dreamed trajectory statistics (from world model imagination rollouts)
             # Batch stats computation and sync once to reduce GPU stalls
             if dreamed_rewards_list:
                 all_dreamed_rewards = torch.cat(dreamed_rewards_list, dim=0)
@@ -1000,17 +1011,18 @@ class WorldModelTrainer:
                         all_dreamed_rewards.max(),
                     ]
                 ).cpu()  # Single sync for all 4 stats
-                self.writer.add_scalar(
-                    "debug/dream/reward/mean", reward_stats[0].item(), step
+                # Rewards predicted by WM reward head during imagination
+                self.logger.add_scalar(
+                    "dream/wm_reward/mean", reward_stats[0].item(), step
                 )
-                self.writer.add_scalar(
-                    "debug/dream/reward/std", reward_stats[1].item(), step
+                self.logger.add_scalar(
+                    "dream/wm_reward/std", reward_stats[1].item(), step
                 )
-                self.writer.add_scalar(
-                    "debug/dream/reward/min", reward_stats[2].item(), step
+                self.logger.add_scalar(
+                    "dream/wm_reward/min", reward_stats[2].item(), step
                 )
-                self.writer.add_scalar(
-                    "debug/dream/reward/max", reward_stats[3].item(), step
+                self.logger.add_scalar(
+                    "dream/wm_reward/max", reward_stats[3].item(), step
                 )
 
             if dreamed_values_list:
@@ -1021,11 +1033,12 @@ class WorldModelTrainer:
                         all_dreamed_values.std(),
                     ]
                 ).cpu()  # Single sync for both stats
-                self.writer.add_scalar(
-                    "debug/dream/value/mean", value_stats[0].item(), step
+                # Values from critic during imagination
+                self.logger.add_scalar(
+                    "dream/critic_value/mean", value_stats[0].item(), step
                 )
-                self.writer.add_scalar(
-                    "debug/dream/value/std", value_stats[1].item(), step
+                self.logger.add_scalar(
+                    "dream/critic_value/std", value_stats[1].item(), step
                 )
 
             # Actor entropy (important for monitoring exploration)
@@ -1037,26 +1050,26 @@ class WorldModelTrainer:
                         all_entropy.std(),
                     ]
                 ).cpu()  # Single sync for both stats
-                self.writer.add_scalar(
+                self.logger.add_scalar(
                     "actor/entropy/mean", entropy_stats[0].item(), step
                 )
-                self.writer.add_scalar(
+                self.logger.add_scalar(
                     "actor/entropy/std", entropy_stats[1].item(), step
                 )
 
             # Learning rates
-            self.writer.add_scalar(
-                "training/learning_rate/world_model",
+            self.logger.add_scalar(
+                "train/lr/wm",
                 self.wm_optimizer.param_groups[0]["lr"],
                 step,
             )
-            self.writer.add_scalar(
-                "training/learning_rate/actor",
+            self.logger.add_scalar(
+                "train/lr/actor",
                 self.actor_optimizer.param_groups[0]["lr"],
                 step,
             )
-            self.writer.add_scalar(
-                "training/learning_rate/critic",
+            self.logger.add_scalar(
+                "train/lr/critic",
                 self.critic_optimizer.param_groups[0]["lr"],
                 step,
             )
@@ -1082,29 +1095,25 @@ class WorldModelTrainer:
                     align_corners=False,
                 ).squeeze(0)
 
-            # 1. Actual vs Reconstruction side by side
+            # 1. Actual vs Reconstruction side by side (decoder output quality)
             comparison = torch.cat([actual, recon], dim=2)  # concat on width
-            self.writer.add_image("images/actual_vs_reconstruction", comparison, step)
+            self.logger.add_image("viz/decoder/reconstruction", comparison, step)
 
-            # 2. Reconstruction error heatmap (absolute diff, averaged over RGB)
+            # 2. Reconstruction error heatmap (decoder error visualization)
             error = torch.abs(actual - recon).mean(dim=0, keepdim=True)  # (1, H, W)
             error_norm = error / (error.max() + 1e-8)
             error_heatmap = error_norm.repeat(3, 1, 1)  # grayscale to RGB
-            self.writer.add_image("images/reconstruction_error", error_heatmap, step)
+            self.logger.add_image("viz/decoder/error", error_heatmap, step)
 
-            # 3. Latent activation heatmap
+            # 3. Latent activation heatmap (encoder posterior distribution)
             if last_posterior_probs is not None:
                 # Shape: (batch, d_hidden, categories) -> take first batch, make 2D
                 latent_probs = last_posterior_probs[0]  # (512, 32)
                 # Normalize and add batch/channel dims for add_images
                 latent_img = latent_probs.unsqueeze(0).unsqueeze(0)  # (1, 1, 512, 32)
-                self.writer.add_images("images/latent_activations", latent_img, step)
+                self.logger.add_images("viz/encoder/latent_posterior", latent_img, step)
 
-            # 4. Dream rollout video (imagined future frames)
-            with open("/tmp/claude/dream_debug.log", "a") as f:
-                f.write(
-                    f"LOG_METRICS step={step}, last_dreamed_pixels is None: {last_dreamed_pixels is None}\n"
-                )
+            # 4. Dream rollout video (WM imagination/planning visualization)
             if last_dreamed_pixels is not None:
                 # Shape: (n_dream_steps, batch, C, H, W) -> take first batch
                 dream_frames = last_dreamed_pixels[:, 0]  # (n_steps, C, H, W)
@@ -1118,22 +1127,20 @@ class WorldModelTrainer:
                     )
                 # Add video: shape (N, T, C, H, W) - batch, time, channels, height, width
                 video = dream_frames.unsqueeze(0)  # (1, n_steps, C, H, W)
-                self.writer.add_video("video/dream_rollout", video, step, fps=4)
+                self.logger.add_video("viz/wm/dream_video", video, step, fps=4)
                 # Also add strip image for quick glance
                 n_show = min(5, dream_frames.shape[0])
                 dream_strip = torch.cat([dream_frames[i] for i in range(n_show)], dim=2)
-                self.writer.add_images(
-                    "images/dream_rollout", dream_strip.unsqueeze(0), step
-                )
+                self.logger.add_images("viz/wm/dream_strip", dream_strip.unsqueeze(0), step)
 
-            # 5. Original resolution image (larger, easier to see)
+            # 5. Original resolution image (environment frame)
             if last_obs_pixels_original is not None:
                 original = (last_obs_pixels_original[0] / 255.0).clamp(
                     0, 1
                 )  # First sample only
-                self.writer.add_image("images/original_resolution", original, step)
+                self.logger.add_image("viz/env/frame", original, step)
 
-        self.writer.flush()
+        self.logger.flush()
 
     def send_models_to_collector(self, training_step):
         # Exclude h_prev/z_prev buffers as they have batch-size-dependent shapes
@@ -1169,8 +1176,14 @@ def train_world_model(
     checkpoint_path=None,
     mode="train",
     reset_ac=False,
+    mlflow_run_id=None,
 ):
+    # Set MLflow tracking URI for this child process
+    if mlflow_run_id:
+        mlruns_dir = os.path.join(os.path.dirname(log_dir), "mlruns")
+        mlflow.set_tracking_uri(f"file://{mlruns_dir}")
+
     trainer = WorldModelTrainer(
-        config, data_queue, model_queue, log_dir, checkpoint_path, mode, reset_ac
+        config, data_queue, model_queue, log_dir, checkpoint_path, mode, reset_ac, mlflow_run_id
     )
     trainer.train_models()

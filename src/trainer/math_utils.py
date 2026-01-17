@@ -28,6 +28,30 @@ def symexp(x):
     return torch.sign(x) * (torch.exp(torch.abs(x)) - 1)
 
 
+def unimix_logits(logits, unimix_ratio=0.01):
+    """
+    Apply unimix to categorical logits (DreamerV3 Section 4).
+
+    Mixes the categorical distribution with a uniform distribution to prevent
+    deterministic collapse and maintain gradient flow.
+
+    Formula: probs_mixed = (1 - unimix_ratio) * softmax(logits) + unimix_ratio * uniform
+
+    Args:
+        logits: Categorical logits of any shape (..., num_classes)
+        unimix_ratio: Fraction of uniform distribution to mix in (default: 0.01 = 1%)
+
+    Returns:
+        Mixed logits (converted back from mixed probabilities)
+    """
+    probs = F.softmax(logits, dim=-1)
+    num_classes = logits.shape[-1]
+    uniform = torch.ones_like(probs) / num_classes
+    probs_mixed = (1 - unimix_ratio) * probs + unimix_ratio * uniform
+    # Convert back to logits (add small epsilon for numerical stability)
+    return torch.log(probs_mixed + 1e-8)
+
+
 def twohot_encode(x, B):
     """
     Two-hot encoding for continuous values into discrete bins.

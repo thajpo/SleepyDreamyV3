@@ -157,11 +157,13 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
             episode_length = len(vec_obs_np)
             data_queue.put((pixels_np, vec_obs_np, actions_np, rewards_np, terminated_np, episode_length))
 
-            # Throttle if queue is getting full (backpressure)
-            # This prevents wasteful over-collection in fast envs (e.g., state-only)
-            queue_fill_ratio = data_queue.qsize() / data_queue._maxsize if data_queue._maxsize else 0
-            if queue_fill_ratio > 0.8:
-                time.sleep(0.05)  # Brief pause to let trainer catch up
+            # On-demand collection: wait if queue is sufficiently full
+            # This prevents wasteful over-collection in fast envs (e.g., state-only CartPole)
+            while not stop_event.is_set():
+                queue_fill_ratio = data_queue.qsize() / data_queue._maxsize if data_queue._maxsize else 0
+                if queue_fill_ratio < 0.8:
+                    break  # Queue has room, collect more
+                time.sleep(0.1)  # Wait for trainer to drain queue
 
     profiler.__exit__(None, None, None)
     # Cleanup

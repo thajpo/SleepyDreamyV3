@@ -60,10 +60,10 @@ train:
   actor_entropy_coef: 1e-3
   normalize_advantages: true
 
-  # Loss coefficients
-  beta_dyn: 0.99
-  beta_rep: 0.99
-  beta_pred: 0.99
+  # Loss coefficients (DreamerV3 paper: βpred=1, βdyn=1, βrep=0.1)
+  beta_dyn: 1.0
+  beta_rep: 0.1
+  beta_pred: 1.0
 
   # Reward bins (symexp range)
   b_start: -5

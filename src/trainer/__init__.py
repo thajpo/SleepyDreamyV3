@@ -1,6 +1,6 @@
 """Trainer package for DreamerV3 world model training."""
 
-from .math_utils import symlog, symexp, twohot_encode, resize_pixels_to_target
+from .math_utils import symlog, symexp, twohot_encode, resize_pixels_to_target, unimix_logits
 from .model_init import initialize_actor, initialize_critic, initialize_world_model
 from .profiling import ProfilerManager, TimingAccumulator
 from .losses import compute_wm_loss, compute_actor_critic_losses
@@ -18,6 +18,7 @@ __all__ = [
     "symexp",
     "twohot_encode",
     "resize_pixels_to_target",
+    "unimix_logits",
     # model_init
     "initialize_actor",
     "initialize_critic",
