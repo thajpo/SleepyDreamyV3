@@ -22,6 +22,9 @@ Usage:
 
     # Dreamer mode (AC training with fixed WM)
     uv run python -m src.train mode=dreamer checkpoint=/path/to/wm.pt
+
+    # Dry run (smoke test - no MLflow, no checkpoints, temp directory)
+    uv run python -m src.train general.dry_run=true train.max_steps=100
 """
 
 import os
@@ -30,6 +33,7 @@ import os
 os.environ.setdefault("HSA_OVERRIDE_GFX_VERSION", "11.0.0")
 
 import hydra
+import mlflow
 from omegaconf import DictConfig, OmegaConf
 import multiprocessing as mp
 
@@ -38,13 +42,42 @@ from .trainer import train_world_model
 from .environment import collect_experiences
 
 
+def flatten_config(cfg: DictConfig, parent_key: str = "", sep: str = ".") -> dict:
+    """
+    Flatten a nested OmegaConf config to a flat dict with dot notation keys.
+
+    Example: {"train": {"lr": 0.001}} -> {"train.lr": 0.001}
+    """
+    items = {}
+    for key, value in cfg.items():
+        key_str = str(key)
+        new_key = f"{parent_key}{sep}{key_str}" if parent_key else key_str
+        if isinstance(value, DictConfig):
+            items.update(flatten_config(value, new_key, sep))
+        else:
+            # Convert to basic Python types for MLflow
+            if hasattr(value, "item"):  # numpy/torch scalar
+                value = value.item()
+            items[new_key] = value
+    return items
+
+
 def run_training(cfg: DictConfig, mode: str = "train", checkpoint_path: str | None = None):
     """Run training with the given configuration."""
+    import tempfile
+
     # Adapt Hydra config for backward compatibility
     config = adapt_config(cfg)
 
-    # Get output directory from Hydra
-    log_dir = hydra.core.hydra_config.HydraConfig.get().runtime.output_dir
+    # Check for dry_run mode (smoke tests - no MLflow, no checkpoints)
+    dry_run = cfg.get("general", {}).get("dry_run", False)
+
+    # Get output directory from Hydra (or temp dir for dry_run)
+    if dry_run:
+        log_dir = tempfile.mkdtemp(prefix="dreamer_dry_")
+        print(f"DRY RUN MODE - no MLflow, no checkpoints, temp dir: {log_dir}")
+    else:
+        log_dir = hydra.core.hydra_config.HydraConfig.get().runtime.output_dir
 
     print(f"Training Configuration:")
     print(f"  Environment: {config.environment.environment_name}")
@@ -58,49 +91,88 @@ def run_training(cfg: DictConfig, mode: str = "train", checkpoint_path: str | No
     if checkpoint_path:
         print(f"  Checkpoint: {checkpoint_path}")
 
-    # Use explicit spawn context for CUDA compatibility
-    mp_ctx = mp.get_context("spawn")
+    # Setup MLflow tracking (skip in dry_run mode)
+    mlflow_run_id = None
+    is_resumed_run = False
 
-    # Create queues for inter-process communication
-    data_queue = mp_ctx.Queue(maxsize=config.train.batch_size * 5)
-    model_queue = mp_ctx.Queue(maxsize=1)
-    stop_event = mp_ctx.Event()
+    if not dry_run:
+        mlruns_dir = os.path.join(os.path.dirname(log_dir), "mlruns")
+        mlflow.set_tracking_uri(f"file://{mlruns_dir}")
+        mlflow.set_experiment(f"DreamerV3-{config.environment.environment_name}")
 
-    # Determine reset_ac based on mode
-    reset_ac = mode == "dreamer"
+        # Check for existing run_id from checkpoint for resume support
+        if checkpoint_path:
+            import torch
+            ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+            mlflow_run_id = ckpt.get("mlflow_run_id")
+            if mlflow_run_id:
+                print(f"  Resuming MLflow run: {mlflow_run_id}")
+                is_resumed_run = True
 
-    # Launch processes
-    experience_loop = mp_ctx.Process(
-        target=collect_experiences,
-        args=(data_queue, model_queue, config, stop_event, log_dir),
-    )
-    trainer_loop = mp_ctx.Process(
-        target=train_world_model,
-        args=(
-            config,
-            data_queue,
-            model_queue,
-            log_dir,
-            checkpoint_path,
-            mode,
-            reset_ac,
-        ),
-    )
+        # Start MLflow run (resume if run_id exists)
+        run = mlflow.start_run(run_id=mlflow_run_id, run_name=os.path.basename(log_dir))
+        mlflow_run_id = run.info.run_id
+        print(f"  MLflow run ID: {mlflow_run_id}")
+        print(f"  MLflow tracking: {mlruns_dir}")
 
-    experience_loop.start()
-    trainer_loop.start()
+    # Log flattened config as parameters (only on new runs, skip in dry_run)
+    if not dry_run and not is_resumed_run:
+        flat_params = flatten_config(cfg)
+        # MLflow has a 500 param limit, truncate long values
+        for k, v in flat_params.items():
+            if isinstance(v, str) and len(v) > 250:
+                flat_params[k] = v[:250] + "..."
+        mlflow.log_params(flat_params)
 
-    trainer_loop.join()
-    if trainer_loop.exitcode not in (0, None):
-        print(f"Trainer exited with code {trainer_loop.exitcode}")
-    stop_event.set()
-    experience_loop.join(timeout=5.0)
-    if experience_loop.is_alive():
-        experience_loop.terminate()
-    if experience_loop.exitcode not in (0, None):
-        print(f"Collector exited with code {experience_loop.exitcode}")
+    try:
+        # Use explicit spawn context for CUDA compatibility
+        mp_ctx = mp.get_context("spawn")
 
-    print("Training complete.")
+        # Create queues for inter-process communication
+        data_queue = mp_ctx.Queue(maxsize=config.train.batch_size * 5)
+        model_queue = mp_ctx.Queue(maxsize=1)
+        stop_event = mp_ctx.Event()
+
+        # Determine reset_ac based on mode
+        reset_ac = mode == "dreamer"
+
+        # Launch processes
+        experience_loop = mp_ctx.Process(
+            target=collect_experiences,
+            args=(data_queue, model_queue, config, stop_event, log_dir),
+        )
+        trainer_loop = mp_ctx.Process(
+            target=train_world_model,
+            args=(
+                config,
+                data_queue,
+                model_queue,
+                log_dir,
+                checkpoint_path,
+                mode,
+                reset_ac,
+                mlflow_run_id,  # Pass MLflow run ID to trainer (None in dry_run)
+                dry_run,
+            ),
+        )
+
+        experience_loop.start()
+        trainer_loop.start()
+
+        trainer_loop.join()
+        if trainer_loop.exitcode not in (0, None):
+            print(f"Trainer exited with code {trainer_loop.exitcode}")
+        stop_event.set()
+        experience_loop.join(timeout=5.0)
+        if experience_loop.is_alive():
+            experience_loop.terminate()
+        if experience_loop.exitcode not in (0, None):
+            print(f"Collector exited with code {experience_loop.exitcode}")
+
+        print("Training complete.")
+    finally:
+        if not dry_run:
+            mlflow.end_run()
 
 
 @hydra.main(version_base=None, config_path="../conf", config_name="config")

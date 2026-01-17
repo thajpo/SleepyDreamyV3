@@ -27,8 +27,10 @@ class WorldModelTrainer:
         mode="train",
         reset_ac=False,
         mlflow_run_id=None,
+        dry_run=False,
     ):
         self.config = config  # Store config for use in methods
+        self.dry_run = dry_run
         self.device = torch.device(config.general.device)
         self.use_pixels = config.general.use_pixels
         self.n_dream_steps = config.train.num_dream_steps
@@ -569,8 +571,8 @@ class WorldModelTrainer:
                 self.last_log_time = time.time()
                 self.steps_since_log = 0
 
-            # Checkpoint every N steps
-            if self.train_step > 0 and self.train_step % self.checkpoint_interval == 0:
+            # Checkpoint every N steps (skip in dry_run)
+            if not self.dry_run and self.train_step > 0 and self.train_step % self.checkpoint_interval == 0:
                 if self.mode == "bootstrap":
                     self.save_wm_only_checkpoint()
                 else:
@@ -580,13 +582,16 @@ class WorldModelTrainer:
 
         profiler.__exit__(None, None, None)
 
-        # Final save
-        if self.mode == "bootstrap":
-            self.save_wm_only_checkpoint(final=True)
-            print(f"Bootstrap complete. WM checkpoint saved to {self.checkpoint_dir}")
+        # Final save (skip in dry_run)
+        if not self.dry_run:
+            if self.mode == "bootstrap":
+                self.save_wm_only_checkpoint(final=True)
+                print(f"Bootstrap complete. WM checkpoint saved to {self.checkpoint_dir}")
+            else:
+                self.save_checkpoint(final=True)
+                print(f"Training complete. Final checkpoint saved to {self.checkpoint_dir}")
         else:
-            self.save_checkpoint(final=True)
-            print(f"Training complete. Final checkpoint saved to {self.checkpoint_dir}")
+            print("DRY RUN complete - no checkpoint saved.")
 
         # Cleanup
         self.replay_buffer.stop()
@@ -1160,12 +1165,16 @@ class WorldModelTrainer:
         }
         try:
             # Clear queue to ensure collector gets the latest version
+            cleared = 0
             while not self.model_queue.empty():
                 self.model_queue.get_nowait()
+                cleared += 1
             self.model_queue.put_nowait(models_to_send)
+            print(f"Trainer: Sent models at step {training_step} (cleared {cleared} old)")
         except Full:
             print("Trainer: Model queue was full. Skipping update.")
-            pass
+        except Exception as e:
+            print(f"Trainer: Failed to send models: {type(e).__name__}: {e}")
 
 
 def train_world_model(
@@ -1177,13 +1186,14 @@ def train_world_model(
     mode="train",
     reset_ac=False,
     mlflow_run_id=None,
+    dry_run=False,
 ):
-    # Set MLflow tracking URI for this child process
-    if mlflow_run_id:
+    # Set MLflow tracking URI for this child process (skip in dry_run)
+    if mlflow_run_id and not dry_run:
         mlruns_dir = os.path.join(os.path.dirname(log_dir), "mlruns")
         mlflow.set_tracking_uri(f"file://{mlruns_dir}")
 
     trainer = WorldModelTrainer(
-        config, data_queue, model_queue, log_dir, checkpoint_path, mode, reset_ac, mlflow_run_id
+        config, data_queue, model_queue, log_dir, checkpoint_path, mode, reset_ac, mlflow_run_id, dry_run
     )
     trainer.train_models()

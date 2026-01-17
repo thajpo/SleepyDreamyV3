@@ -14,6 +14,7 @@ general:
   profile: false
   compile_models: false
   debug_memory: false
+  dry_run: false  # Skip MLflow/checkpoints for smoke tests
 
 # Environment (overridden by env/*.yaml)
 environment:

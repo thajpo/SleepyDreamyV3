@@ -9,7 +9,7 @@ A PyTorch implementation of [DreamerV3](https://arxiv.org/abs/2301.04104) - a mo
 - **State-Only & Pixel Modes**: Supports both low-dimensional state vectors and pixel observations
 - **Hydra Configuration**: Flexible configuration management with YAML files and CLI overrides
 - **Multiprocessing Architecture**: Separate collector and trainer processes for efficient GPU utilization
-- **TensorBoard Logging**: Real-time training metrics and visualizations
+- **MLflow Logging**: Real-time training metrics, visualizations, and experiment tracking
 
 ## Architecture
 
@@ -82,6 +82,9 @@ uv run python -m src.train +mode=bootstrap train.max_steps=10000
 
 # 2. Train actor-critic with frozen world model
 uv run python -m src.train +mode=dreamer +checkpoint=runs/01-17_1234/checkpoints/checkpoint_final.pt
+
+# Smoke test / dry run (no MLflow, no checkpoints, temp directory)
+uv run python -m src.train general.dry_run=true train.max_steps=100
 ```
 
 ### Hyperparameter Sweeps
@@ -103,12 +106,13 @@ uv run python -m src.evaluate --checkpoint runs/01-17_1234/checkpoints/checkpoin
 
 ### Monitoring
 
-TensorBoard starts automatically during training:
+View training metrics with MLflow UI:
 
 ```bash
-# Or start manually
-tensorboard --logdir runs/
+mlflow ui --backend-store-uri file://runs/mlruns
 ```
+
+Then open http://localhost:5000 in your browser.
 
 ## Configuration
 
