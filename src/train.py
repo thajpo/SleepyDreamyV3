@@ -12,10 +12,10 @@ Usage:
     # Use different environment config
     uv run python -m src.train +env=cartpole_vision
 
-    # Multirun sweep (parallel)
+    # Multirun sweep (sequential)
     uv run python -m src.train --multirun train.actor_lr=1e-5,3e-5,1e-4
-    # Control sweep concurrency
-    SWEEP_N_JOBS=4 uv run python -m src.train --multirun train.actor_lr=1e-5,3e-5,1e-4
+    # Or use predefined sweep config
+    uv run python -m src.train --multirun +sweep=ac_params
 
     # Resume from checkpoint
     uv run python -m src.train checkpoint=/path/to/checkpoint.pt

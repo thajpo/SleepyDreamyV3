@@ -2,47 +2,10 @@
 import argparse
 import torch
 import torch.nn.functional as F
-import yaml
-import gymnasium as gym
-from gymnasium.wrappers import AddRenderObservation
 
 from .config import config
-from .trainer_utils import initialize_actor, initialize_world_model
-
-
-def load_env_config(config_path):
-    """Load YAML config and apply overrides to global config."""
-    with open(config_path, 'r') as f:
-        overrides = yaml.safe_load(f)
-
-    if 'general' in overrides:
-        for key, value in overrides['general'].items():
-            if hasattr(config.general, key):
-                setattr(config.general, key, value)
-
-    if 'environment' in overrides:
-        for key, value in overrides['environment'].items():
-            if hasattr(config.environment, key):
-                setattr(config.environment, key, value)
-
-    if 'models' in overrides:
-        for key, value in overrides['models'].items():
-            if hasattr(config.models, key):
-                setattr(config.models, key, value)
-
-    if 'train' in overrides:
-        for key, value in overrides['train'].items():
-            if hasattr(config.train, key):
-                setattr(config.train, key, value)
-
-
-def create_env(env_name):
-    """Create environment with vision observations."""
-    base_env = gym.make(env_name, render_mode="rgb_array")
-    env = AddRenderObservation(
-        base_env, render_only=False, render_key="pixels", obs_key="state"
-    )
-    return env
+from .trainer import initialize_actor, initialize_world_model, symlog
+from .utils import load_env_config, create_env
 
 
 def evaluate(checkpoint_path, config_path, num_episodes=10, device="cuda"):
@@ -51,14 +14,17 @@ def evaluate(checkpoint_path, config_path, num_episodes=10, device="cuda"):
     if config_path:
         load_env_config(config_path)
 
+    use_pixels = config.general.use_pixels
+
     print(f"Environment: {config.environment.environment_name}")
     print(f"Actions: {config.environment.n_actions}, Observations: {config.environment.n_observations}")
     print(f"d_hidden: {config.models.d_hidden}")
+    print(f"use_pixels: {use_pixels}")
     print(f"Device: {device}")
     print()
 
     # Create environment
-    env = create_env(config.environment.environment_name)
+    env = create_env(config.environment.environment_name, use_pixels=use_pixels)
     n_actions = config.environment.n_actions
 
     # Initialize models
@@ -101,13 +67,19 @@ def evaluate(checkpoint_path, config_path, num_episodes=10, device="cuda"):
 
         while True:
             # Prepare observation
-            pixel_obs_t = torch.from_numpy(obs['pixels']).to(device).float().permute(2, 0, 1).unsqueeze(0)
-            vec_obs_t = torch.from_numpy(obs['state']).to(device).float().unsqueeze(0)
-            current_obs_dict = {"pixels": pixel_obs_t, "state": vec_obs_t}
+            if use_pixels:
+                pixel_obs_t = torch.from_numpy(obs["pixels"]).to(device).float()
+                pixel_obs_t = pixel_obs_t.permute(2, 0, 1).unsqueeze(0)
+                vec_obs_t = torch.from_numpy(obs["state"]).to(device).float().unsqueeze(0)
+                current_obs = {"pixels": pixel_obs_t, "state": vec_obs_t}
+            else:
+                vec_obs_t = torch.from_numpy(obs).to(device).float().unsqueeze(0)
+                vec_obs_t = symlog(vec_obs_t)
+                current_obs = vec_obs_t
 
             with torch.no_grad():
                 # Encode observation
-                posterior_logits = encoder(current_obs_dict)
+                posterior_logits = encoder(current_obs)
                 posterior_dist = torch.distributions.Categorical(logits=posterior_logits)
                 z_indices = posterior_dist.sample()
                 z_onehot = F.one_hot(z_indices, num_classes=config.models.d_hidden // 16).float()

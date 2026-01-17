@@ -215,3 +215,49 @@ Initial WM training. Expect WM to converge for cartpole. Will investigate AC lat
   - Possible fixes: increase entropy coef, lower actor LR, longer dream horizon
 - **Conclusion**: Implementation works. Solving CartPole requires tuning, which is a separate skill from debugging.
 - **Status**: Project archived. Core learning: `torch.max` kills gradients below threshold; use straight-through estimator.
+
+### 01-16-26 Actor-Critic Hyperparameter Sweep
+- **Setup**: 10k bootstrap WM checkpoint, dreamer mode (frozen WM), 2.5k steps per config
+- **Sweep**: actor_lr × actor_entropy_coef (3×4 = 12 configs)
+- **Results**:
+
+| LR | Entropy | Peak Ep Len | Final Ep Len | Pattern |
+|-----|---------|-------------|--------------|---------|
+| 3e-05 | 0.001 | **147.4** | 123.1 | Peak then decline |
+| 3e-05 | 0.005 | **134.4** | 110.4 | Peak then decline |
+| 3e-05 | 0.01 | 131.1 | 131.1 | Incomplete |
+| 3e-05 | 0.03 | TBD | TBD | TBD |
+| 1e-04 | 0.001 | TBD | TBD | TBD |
+| 1e-04 | 0.005 | TBD | TBD | TBD |
+| 1e-04 | 0.01 | TBD | TBD | TBD |
+| 1e-04 | 0.03 | TBD | TBD | TBD |
+| 1e-05 | 0.001 | 96.8 | 96.8 | Stable plateau |
+| 1e-05 | 0.005 | 99.6 | 99.6 | Stable plateau |
+| 1e-05 | 0.01 | 96.8 | 96.8 | Stable plateau |
+| 1e-05 | 0.03 | 95.0 | 92.7 | Stable plateau |
+
+- **Key Observations**:
+  1. **LR dominates, entropy has minimal effect**: 0.001 vs 0.03 entropy showed no meaningful difference within same LR
+  2. **Peak-then-decline pattern at high LR**: LR=3e-05 learns fast but destabilizes after peaking
+  3. **Stable but slow at low LR**: LR=1e-05 never declines but plateaus around ~97
+  4. **The decline is the problem to solve**: Best config (3e-05, 0.001) peaked at 147 but fell to 123
+
+- **Root Cause Analysis**:
+  - As returns grow (20→120), gradient magnitude grows proportionally
+  - Without return normalization, larger returns = larger actor updates = overshoot
+  - High LR amplifies this effect → policy finds good region, then overshoots out of it
+  - Low LR masks the problem (smaller steps, less overshoot) but learns too slowly
+
+- **DreamerV3 features present**: symlog, symexp, twohot, advantage normalization
+- **DreamerV3 features missing**: return normalization, critic EMA, gradient clipping (AGC)
+
+### 01-17-26 Return Normalization Implementation
+- **Hypothesis**: Return normalization will stabilize high-LR training, preventing peak-then-decline
+- **Implementation**: EMA-based return scale tracking (per DreamerV3 paper)
+  - Track 5th/95th percentile of lambda returns via EMA (decay=0.99)
+  - Normalize advantage by `max(1, S95 - S5)` - only scale down, never up
+  - `max(1, ...)` prevents noise amplification under sparse rewards
+- **Files modified**: trainer/core.py, trainer/losses.py
+- **Test config**: Same as best sweep run (lr=3e-5, entropy=0.001, 2.5k steps)
+- **Expected result**: Similar fast rise, stable plateau instead of decline
+- **Status**: Running

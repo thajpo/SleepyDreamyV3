@@ -3,32 +3,16 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.distributions as dist
 import torch.nn.functional as F
-from collections import deque
-from queue import Full, Empty
+from queue import Full
 from torch.utils.tensorboard import SummaryWriter
-from torch.profiler import (
-    ProfilerActivity,
-    profile,
-    schedule,
-    tensorboard_trace_handler,
-)
 import os
 import time
 
-from .config import config
-from .replay_buffer import EpisodeReplayBuffer
-from .trainer_utils import (
-    symlog,
-    symexp,
-    twohot_encode,
-    initialize_actor,
-    initialize_critic,
-    initialize_world_model,
-    resize_pixels_to_target,
-)
-from .encoder import ObservationEncoder, ThreeLayerMLP
-from .world_model import RSSMWorldModel
-from datetime import datetime
+from ..replay_buffer import EpisodeReplayBuffer
+from .math_utils import symlog, symexp, twohot_encode, resize_pixels_to_target
+from .model_init import initialize_actor, initialize_critic, initialize_world_model
+from .profiling import ProfilerManager, TimingAccumulator
+from .losses import compute_actor_critic_losses
 
 
 class WorldModelTrainer:
@@ -45,12 +29,10 @@ class WorldModelTrainer:
         self.config = config  # Store config for use in methods
         self.device = torch.device(config.general.device)
         self.use_pixels = config.general.use_pixels
-        self.model_update_frequency = 10  # fix later
         self.n_dream_steps = config.train.num_dream_steps
         self.gamma = config.train.gamma
         self.lam = config.train.lam
         self.actor_entropy_coef = config.train.actor_entropy_coef
-        self.normalize_advantages = config.train.normalize_advantages
         self.actor_warmup_steps = config.train.actor_warmup_steps
         b_start = config.train.b_start
         b_end = config.train.b_end
@@ -60,6 +42,7 @@ class WorldModelTrainer:
             device=self.device,
         )
         self.B = symexp(beta_range)
+        self.S = 0.0
 
         self.actor = initialize_actor(self.device, config)
         self.critic = initialize_critic(self.device, config)
@@ -182,7 +165,6 @@ class WorldModelTrainer:
         batch_terminated = []
 
         for pixels, states, actions, rewards, terminated in batch:
-
             if self.use_pixels and pixels is not None:
                 target_size = self.config.models.encoder.cnn.target_size
                 # Convert pixels from (T, H, W, C) to (T, C, H, W)
@@ -204,8 +186,12 @@ class WorldModelTrainer:
         # Stack into batch tensors: (B, T, ...)
         # Note: All sequences are same length now (buffer handles this)
         if self.use_pixels and batch_pixels:
-            self.pixels = torch.stack(batch_pixels).to(self.device).float()  # (B, T, C, H, W)
-            self.pixels_original = torch.stack(batch_pixels_original).to(self.device).float()
+            self.pixels = (
+                torch.stack(batch_pixels).to(self.device).float()
+            )  # (B, T, C, H, W)
+            self.pixels_original = (
+                torch.stack(batch_pixels_original).to(self.device).float()
+            )
         else:
             self.pixels = None
             self.pixels_original = None
@@ -218,40 +204,22 @@ class WorldModelTrainer:
         self.terminated = torch.stack(batch_terminated).to(self.device)  # (B, T)
 
     def train_models(self):
-        # === PROFILING: Coarse timing ===
-        profile_interval = 50
-        t_data_acc, t_forward_acc, t_backward_acc = 0.0, 0.0, 0.0
-        profiler = None
-        profile_chunk_steps = 200
-        if self.profile_enabled:
-            profile_dir = os.path.join(self.log_dir, "profiler", "trainer")
-            os.makedirs(profile_dir, exist_ok=True)
-            activities = [ProfilerActivity.CPU]
-            if torch.cuda.is_available():
-                activities.append(ProfilerActivity.CUDA)
-            trace_handler = tensorboard_trace_handler(profile_dir)
-            profiler = profile(
-                activities=activities,
-                schedule=schedule(
-                    wait=0, warmup=0, active=profile_chunk_steps, repeat=0
-                ),
-                on_trace_ready=trace_handler,
-                record_shapes=True,
-                with_stack=True,
-                profile_memory=True,
-            )
-            profiler.__enter__()
-            print(
-                "Profiler enabled for full run; saving a trace every "
-                f"{profile_chunk_steps} steps. Traces: {profile_dir}"
-            )
+        # === PROFILING: Setup profiler and timing ===
+        profiler = ProfilerManager(
+            enabled=self.profile_enabled,
+            log_dir=self.log_dir,
+            component_name="trainer",
+            chunk_steps=200,
+        )
+        profiler.__enter__()
+        timing = TimingAccumulator(print_interval=50)
 
         while self.train_step < self.max_train_steps:
             # --- PROFILE: Data loading ---
             t0 = time.perf_counter()
             self.get_data_from_buffer()  # Sample from replay buffer (non-blocking)
             torch.cuda.synchronize()
-            t_data_acc += time.perf_counter() - t0
+            timing.log_phase("data", time.perf_counter() - t0)
 
             # Skip if no data was retrieved
             if not hasattr(self, "states") or self.states.shape[1] == 0:
@@ -307,12 +275,16 @@ class WorldModelTrainer:
             states_flat = self.states.view(B * T, self.states.shape[-1])  # (B*T, n_obs)
 
             if self.use_pixels and self.pixels is not None:
-                pixels_flat = self.pixels.view(B * T, *self.pixels.shape[2:])  # (B*T, C, H, W)
+                pixels_flat = self.pixels.view(
+                    B * T, *self.pixels.shape[2:]
+                )  # (B*T, C, H, W)
                 encoder_input = {"pixels": pixels_flat, "state": states_flat}
             else:
                 encoder_input = states_flat  # State-only mode
 
-            all_posterior_logits = self.encoder(encoder_input)  # (B*T, d_hidden, categories)
+            all_posterior_logits = self.encoder(
+                encoder_input
+            )  # (B*T, d_hidden, categories)
             # Reshape back to (B, T, d_hidden, categories)
             all_posterior_logits = all_posterior_logits.view(
                 B, T, *all_posterior_logits.shape[1:]
@@ -422,12 +394,21 @@ class WorldModelTrainer:
                         self.n_dream_steps,
                     )
 
-                    actor_loss, critic_loss, entropy = self.update_actor_critic_losses(
+                    self.update_return_scale(lambda_returns)
+
+                    (
+                        actor_loss,
+                        critic_loss,
+                        entropy,
+                    ) = compute_actor_critic_losses(
                         dreamed_values_logits,
                         dreamed_values,
                         lambda_returns,
                         dreamed_actions_logits,
                         dreamed_actions_sampled,
+                        self.B,
+                        self.S,
+                        actor_entropy_coef=self.actor_entropy_coef,
                     )
                     actor_entropy_list.append(entropy.detach().cpu())
 
@@ -481,7 +462,7 @@ class WorldModelTrainer:
 
             # --- PROFILE: End forward, start backward ---
             torch.cuda.synchronize()
-            t_forward_acc += time.perf_counter() - t0
+            timing.log_phase("forward", time.perf_counter() - t0)
             t0 = time.perf_counter()
 
             # Backprop
@@ -514,19 +495,10 @@ class WorldModelTrainer:
 
             # --- PROFILE: End backward ---
             torch.cuda.synchronize()
-            t_backward_acc += time.perf_counter() - t0
+            timing.log_phase("backward", time.perf_counter() - t0)
 
             # --- PROFILE: Print summary ---
-            if (self.train_step + 1) % profile_interval == 0:
-                total_t = t_data_acc + t_forward_acc + t_backward_acc
-                if total_t > 0:
-                    print(
-                        f"[PROFILE] data: {t_data_acc / total_t * 100:5.1f}% | "
-                        f"fwd: {t_forward_acc / total_t * 100:5.1f}% | "
-                        f"bwd: {t_backward_acc / total_t * 100:5.1f}% | "
-                        f"total: {total_t:.2f}s/{profile_interval} steps"
-                    )
-                t_data_acc, t_forward_acc, t_backward_acc = 0.0, 0.0, 0.0
+            timing.maybe_print(self.train_step)
 
             log_step = self.train_step
             self.train_step += 1
@@ -601,11 +573,9 @@ class WorldModelTrainer:
                 else:
                     self.save_checkpoint()
 
-            if profiler:
-                profiler.step()
+            profiler.step()
 
-        if profiler:
-            profiler.__exit__(None, None, None)
+        profiler.__exit__(None, None, None)
 
         # Final save
         if self.mode == "bootstrap":
@@ -618,6 +588,13 @@ class WorldModelTrainer:
         # Cleanup
         self.replay_buffer.stop()
         self.writer.close()
+
+    def update_return_scale(self, lambda_returns, decay=0.99):
+        flat = lambda_returns.detach().reshape(-1)
+        range_batch = (
+            torch.quantile(flat, 0.95).item() - torch.quantile(flat, 0.05).item()
+        )
+        self.S = self.S * decay + range_batch * (1 - decay)
 
     def _get_model(self, model):
         """Get underlying model (handles both compiled and non-compiled)."""
@@ -713,47 +690,6 @@ class WorldModelTrainer:
                 f"Resumed full checkpoint from {checkpoint_path} at step {self.train_step}"
             )
             return "full"
-
-    def update_actor_critic_losses(
-        self,
-        dreamed_values_logits,
-        dreamed_values,
-        lambda_returns,
-        dreamed_actions_logits,
-        dreamed_actions_sampled,
-    ):
-        dreamed_values_logits_flat = dreamed_values_logits.view(
-            -1, dreamed_values_logits.size(-1)
-        )
-        lambda_returns_flat = lambda_returns.reshape(-1)
-        critic_targets = twohot_encode(lambda_returns_flat, self.B)
-
-        # Use soft cross-entropy for soft targets (twohot encoding)
-        # -sum(targets * log_softmax(logits))
-        critic_loss = -torch.sum(
-            critic_targets * F.log_softmax(dreamed_values_logits_flat, dim=-1), dim=-1
-        ).mean()
-
-        # Actor Loss: Policy gradient with lambda returns as advantage
-        advantage = (lambda_returns - dreamed_values).detach()
-
-        # Normalize advantages for training stability
-        if self.normalize_advantages and advantage.numel() > 1:
-            advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
-
-        # action_dist = torch.distributions.Categorical(logits=dreamed_actions_logits)
-        action_dist = torch.distributions.Categorical(
-            logits=dreamed_actions_logits, validate_args=False
-        )
-        entropy = action_dist.entropy().mean()
-        log_probs = action_dist.log_prob(dreamed_actions_sampled)
-
-        # Reinforce algorithm: log_prob * advantage + entropy bonus for exploration
-        actor_loss = (
-            -torch.mean(log_probs * advantage) - self.actor_entropy_coef * entropy
-        )
-
-        return actor_loss, critic_loss, entropy
 
     def dream_sequence(self, initial_h, initial_z_embed, num_dream_steps):
         """
@@ -913,15 +849,17 @@ class WorldModelTrainer:
         log_prior = F.log_softmax(prior_logits, dim=-1)
         posterior_probs_detached = log_posterior_detached.exp()
         l_dyn_raw = (
-            posterior_probs_detached * (log_posterior_detached - log_prior)
-        ).sum(dim=-1).mean()
+            (posterior_probs_detached * (log_posterior_detached - log_prior))
+            .sum(dim=-1)
+            .mean()
+        )
 
         log_posterior = F.log_softmax(posterior_dist.logits, dim=-1)
         log_prior_detached = F.log_softmax(prior_logits.detach(), dim=-1)
         posterior_probs = log_posterior.exp()
         l_rep_raw = (
-            posterior_probs * (log_posterior - log_prior_detached)
-        ).sum(dim=-1).mean()
+            (posterior_probs * (log_posterior - log_prior_detached)).sum(dim=-1).mean()
+        )
 
         # Straight-through estimator for free bits:
         # Forward: loss = max(free_bits, raw) for reporting/scaling

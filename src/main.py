@@ -4,52 +4,15 @@ import os
 os.environ.setdefault("HSA_OVERRIDE_GFX_VERSION", "11.0.0")
 
 import argparse
-import torch
-from torch.utils.tensorboard import SummaryWriter
 import multiprocessing as mp
 import subprocess
 import atexit
-import yaml
 from datetime import datetime
 
 from .config import config
 from .trainer import train_world_model
 from .environment import collect_experiences
-
-
-def load_env_config(config_path):
-    """Load YAML config and apply overrides to global config."""
-    with open(config_path, "r") as f:
-        overrides = yaml.safe_load(f)
-
-    # Apply nested overrides
-    if "general" in overrides:
-        for key, value in overrides["general"].items():
-            if hasattr(config.general, key):
-                setattr(config.general, key, value)
-
-    if "environment" in overrides:
-        for key, value in overrides["environment"].items():
-            if hasattr(config.environment, key):
-                setattr(config.environment, key, value)
-
-    if "models" in overrides:
-        for key, value in overrides["models"].items():
-            if hasattr(config.models, key):
-                setattr(config.models, key, value)
-
-    if "train" in overrides:
-        for key, value in overrides["train"].items():
-            if hasattr(config.train, key):
-                setattr(config.train, key, value)
-
-    print(f"Loaded config: {config_path}")
-    print(f"  Environment: {config.environment.environment_name}")
-    print(
-        f"  Actions: {config.environment.n_actions}, Observations: {config.environment.n_observations}"
-    )
-    print(f"  d_hidden: {config.models.d_hidden}")
-    print(f"  use_pixels: {config.general.use_pixels}")
+from .utils import load_env_config
 
 
 _tensorboard_process = None

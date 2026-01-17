@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from .encoder import ThreeLayerMLP
 
@@ -113,30 +112,6 @@ class ObservationCNNDecoder(nn.Module):
         x = x.view(-1, *self.first_layer_shape)
         x = self.deconv_blocks(x)  # (N, C , H, W)
 
-        return x
-
-
-class ObservationMLPDecoder(nn.Module):
-    """Reconstructs the state vector from the model's state."""
-
-    def __init__(
-        self,
-        d_in,
-        d_hidden,
-        d_out,
-    ):
-        super().__init__()
-        self.mlp = nn.Sequential(
-            nn.Linear(d_in, d_hidden),
-            nn.ReLU(),
-            nn.Linear(d_hidden, d_hidden),
-            nn.ReLU(),
-            nn.Linear(d_hidden, d_out),
-        )
-        self.d_out = d_out
-
-    def forward(self, x):
-        x = self.mlp(x)
         return x
 
 

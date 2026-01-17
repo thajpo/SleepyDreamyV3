@@ -3,44 +3,12 @@ import argparse
 import torch
 import torch.nn.functional as F
 import torch.distributions as dist
-import yaml
-import gymnasium as gym
-from gymnasium.wrappers import AddRenderObservation
 import numpy as np
 from pathlib import Path
 
 from .config import config
-from .trainer_utils import initialize_actor, initialize_world_model, symlog, resize_pixels_to_target
-
-
-def load_env_config(config_path):
-    """Load YAML config and apply overrides to global config."""
-    with open(config_path, "r") as f:
-        overrides = yaml.safe_load(f)
-
-    if "environment" in overrides:
-        for key, value in overrides["environment"].items():
-            if hasattr(config.environment, key):
-                setattr(config.environment, key, value)
-
-    if "models" in overrides:
-        for key, value in overrides["models"].items():
-            if hasattr(config.models, key):
-                setattr(config.models, key, value)
-
-    if "train" in overrides:
-        for key, value in overrides["train"].items():
-            if hasattr(config.train, key):
-                setattr(config.train, key, value)
-
-
-def create_env(env_name):
-    """Create environment with vision observations."""
-    base_env = gym.make(env_name, render_mode="rgb_array")
-    env = AddRenderObservation(
-        base_env, render_only=False, render_key="pixels", obs_key="state"
-    )
-    return env
+from .trainer import initialize_actor, initialize_world_model, symlog, resize_pixels_to_target
+from .utils import load_env_config, create_env
 
 
 def load_models(checkpoint_path, device, load_actor=False):
@@ -279,6 +247,15 @@ Examples:
     load_env_config(args.config)
     print(f"Environment: {config.environment.environment_name}")
     print(f"d_hidden: {config.models.d_hidden}")
+    use_pixels = config.general.use_pixels
+    print(f"use_pixels: {use_pixels}")
+
+    if not use_pixels:
+        print(
+            "Config has general.use_pixels = false. "
+            "Dream visualizations require pixel observations; enable pixels to generate videos."
+        )
+        return
 
     # Load models
     encoder, world_model, actor = load_models(
@@ -286,7 +263,7 @@ Examples:
     )
 
     # Create environment and get initial observation
-    env = create_env(config.environment.environment_name)
+    env = create_env(config.environment.environment_name, use_pixels=use_pixels)
     obs, info = env.reset(seed=args.seed)
     env.close()
 
