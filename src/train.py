@@ -28,6 +28,8 @@ Usage:
 """
 
 import os
+import subprocess
+import socket
 
 # Set AMD ROCm env var before any torch imports
 os.environ.setdefault("HSA_OVERRIDE_GFX_VERSION", "11.0.0")
@@ -36,6 +38,27 @@ import hydra
 import mlflow
 from omegaconf import DictConfig, OmegaConf
 import multiprocessing as mp
+
+
+def is_port_in_use(port: int) -> bool:
+    """Check if a port is already in use."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex(("localhost", port)) == 0
+
+
+def start_mlflow_ui(mlruns_dir: str, port: int = 5000) -> subprocess.Popen | None:
+    """Start MLflow UI server in background if not already running."""
+    if is_port_in_use(port):
+        print(f"  MLflow UI already running at http://localhost:{port}")
+        return None
+
+    proc = subprocess.Popen(
+        ["mlflow", "ui", "--backend-store-uri", f"file://{mlruns_dir}", "--port", str(port)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    print(f"  MLflow UI started at http://localhost:{port}")
+    return proc
 
 from .config import adapt_config
 from .trainer import train_world_model
@@ -114,6 +137,9 @@ def run_training(cfg: DictConfig, mode: str = "train", checkpoint_path: str | No
         mlflow_run_id = run.info.run_id
         print(f"  MLflow run ID: {mlflow_run_id}")
         print(f"  MLflow tracking: {mlruns_dir}")
+
+        # Start MLflow UI server
+        start_mlflow_ui(mlruns_dir, port=5000)
 
     # Log flattened config as parameters (only on new runs, skip in dry_run)
     if not dry_run and not is_resumed_run:
