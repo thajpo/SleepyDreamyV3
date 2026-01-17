@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from queue import Empty
 import cv2
 
-from .trainer import initialize_actor, initialize_world_model, ProfilerManager
+from .trainer import initialize_actor, initialize_world_model, ProfilerManager, symlog
 from .utils import create_env
 
 
@@ -93,10 +93,12 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
                     resized_for_encoder = resize_image(obs['pixels'], target_size=(64, 64))
                     pixel_obs_t = torch.from_numpy(resized_for_encoder).to(device).float().permute(2, 0, 1).unsqueeze(0)
                     vec_obs_t = torch.from_numpy(obs['state']).to(device).float().unsqueeze(0)
+                    vec_obs_t = symlog(vec_obs_t)
                     encoder_input = {"pixels": pixel_obs_t, "state": vec_obs_t}
                 else:
                     # State-only mode: encoder takes state tensor directly
                     vec_obs_t = torch.from_numpy(obs).to(device).float().unsqueeze(0)
+                    vec_obs_t = symlog(vec_obs_t)
                     encoder_input = vec_obs_t
 
                 with torch.no_grad():
