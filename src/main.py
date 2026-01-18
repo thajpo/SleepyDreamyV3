@@ -5,34 +5,12 @@ os.environ.setdefault("HSA_OVERRIDE_GFX_VERSION", "11.0.0")
 
 import argparse
 import multiprocessing as mp
-import subprocess
-import atexit
 from datetime import datetime
 
 from .config import config
 from .trainer import train_world_model
 from .environment import collect_experiences
 from .utils import load_env_config
-
-
-_tensorboard_process = None
-
-
-def start_tensorboard(logdir="runs", port=6006):
-    """Start TensorBoard in background."""
-    global _tensorboard_process
-    try:
-        _tensorboard_process = subprocess.Popen(
-            ["tensorboard", "--logdir", logdir, "--port", str(port), "--bind_all"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        print(f"TensorBoard started: http://localhost:{port}")
-        atexit.register(
-            lambda: _tensorboard_process.terminate() if _tensorboard_process else None
-        )
-    except FileNotFoundError:
-        print("TensorBoard not found. Install with: pip install tensorboard")
 
 
 def _run_training(args, mode, checkpoint_path=None, reset_ac=False):
@@ -67,7 +45,8 @@ def _run_training(args, mode, checkpoint_path=None, reset_ac=False):
     if checkpoint_path:
         print(f"Loading checkpoint: {checkpoint_path}")
 
-    start_tensorboard(logdir=log_dir)
+    print(f"Logging to: {log_dir}")
+    print("View metrics: mlflow ui --backend-store-uri file://runs/mlruns")
     print("Starting experience collection and training processes...")
 
     # Create queues for inter-process communication
@@ -211,8 +190,8 @@ Examples:
     dreamer_parser.add_argument(
         "--train_steps",
         type=int,
-        default=config.train.max_train_steps,
-        help=f"Number of training steps (default: {config.train.max_train_steps})",
+        default=config.train.max_steps,
+        help=f"Number of training steps (default: {config.train.max_steps})",
     )
     dreamer_parser.add_argument(
         "--debug_memory", action="store_true", help="Enable memory profiling"

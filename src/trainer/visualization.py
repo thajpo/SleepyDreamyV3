@@ -1,11 +1,18 @@
-"""TensorBoard visualization and logging for DreamerV3 training."""
+"""MLflow/TensorBoard visualization and logging for DreamerV3 training."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
 
+if TYPE_CHECKING:
+    from .mlflow_logger import MLflowLogger
+
 
 def log_metrics(
-    writer,
+    writer: MLflowLogger,
     step,
     total_wm_loss,
     total_actor_loss,
@@ -25,10 +32,10 @@ def log_metrics(
     last_dreamed_pixels=None,
 ):
     """
-    Log metrics to TensorBoard.
+    Log metrics to MLflow (or TensorBoard-compatible logger).
 
     Args:
-        writer: TensorBoard SummaryWriter
+        writer: MLflowLogger instance (or TensorBoard SummaryWriter)
         step: Current training step
         total_wm_loss: Total world model loss
         total_actor_loss: Total actor loss
@@ -102,7 +109,7 @@ def _log_scalar_metrics(
     actor_entropy_list,
     config,
 ):
-    """Log scalar metrics to TensorBoard."""
+    """Log scalar metrics to MLflow."""
     # All losses normalized to per-step for fair comparison
     if sequence_length > 0:
         norm = 1.0 / sequence_length
@@ -113,62 +120,55 @@ def _log_scalar_metrics(
         # Convert tensor loss components to CPU floats (single sync for all 8 components)
         wm_components_cpu = {k: v.item() for k, v in wm_loss_components.items()}
 
-        # Per-step totals
+        # Per-step totals for each model
         wm_per_step = total_wm_loss.item() * norm
-        writer.add_scalar("loss/world_model/total_per_step", wm_per_step, step)
-        writer.add_scalar(
-            "loss/actor/total_per_step", total_actor_loss.item() * norm, step
-        )
-        writer.add_scalar(
-            "loss/critic/total_per_step", total_critic_loss.item() * norm, step
-        )
+        writer.add_scalar("loss/wm/total", wm_per_step, step)
+        writer.add_scalar("loss/actor/total", total_actor_loss.item() * norm, step)
+        writer.add_scalar("loss/critic/total", total_critic_loss.item() * norm, step)
 
         # Raw component values (per-step, unscaled)
         pixel = wm_components_cpu["prediction_pixel"] * norm
-        vector = wm_components_cpu["prediction_vector"] * norm
+        state = wm_components_cpu["prediction_vector"] * norm
         reward = wm_components_cpu["prediction_reward"] * norm
         cont = wm_components_cpu["prediction_continue"] * norm
         dyn = wm_components_cpu["dynamics"] * norm
         rep = wm_components_cpu["representation"] * norm
 
-        # Prediction sub-components (unscaled, for debugging)
-        writer.add_scalar("loss/wm_components/pixel", pixel, step)
-        writer.add_scalar("loss/wm_components/vector", vector, step)
-        writer.add_scalar("loss/wm_components/reward", reward, step)
-        writer.add_scalar("loss/wm_components/continue", cont, step)
-        writer.add_scalar("loss/wm_components/dynamics", dyn, step)
-        writer.add_scalar("loss/wm_components/representation", rep, step)
+        # World model sub-component losses (grouped by module)
+        # Decoder losses (reconstruction)
+        writer.add_scalar("wm/decoder/pixel_loss", pixel, step)
+        writer.add_scalar("wm/decoder/state_loss", state, step)
+        # Predictor head losses
+        writer.add_scalar("wm/reward_head/loss", reward, step)
+        writer.add_scalar("wm/continue_head/loss", cont, step)
+        # RSSM KL losses (after free bits)
+        writer.add_scalar("wm/rssm/kl_dynamics", dyn, step)
+        writer.add_scalar("wm/rssm/kl_representation", rep, step)
 
-        # Scaled contributions to total (these should sum to total_per_step)
-        pred_total = pixel + vector + reward + cont
-        writer.add_scalar("loss/wm_scaled/prediction", beta_pred * pred_total, step)
-        writer.add_scalar("loss/wm_scaled/dynamics", beta_dyn * dyn, step)
-        writer.add_scalar("loss/wm_scaled/representation", beta_rep * rep, step)
+        # Scaled contributions to total (these should sum to loss/wm/total)
+        pred_total = pixel + state + reward + cont
+        writer.add_scalar("wm/scaled/prediction", beta_pred * pred_total, step)
+        writer.add_scalar("wm/scaled/dynamics", beta_dyn * dyn, step)
+        writer.add_scalar("wm/scaled/representation", beta_rep * rep, step)
 
-        # Raw KL divergences (before free bits clipping)
+        # Raw KL divergences (before free bits clipping, for debugging)
         writer.add_scalar(
-            "debug/kl_dynamics_raw",
+            "wm/rssm/kl_dynamics_raw",
             wm_components_cpu["kl_dynamics_raw"] * norm,
             step,
         )
         writer.add_scalar(
-            "debug/kl_representation_raw",
+            "wm/rssm/kl_representation_raw",
             wm_components_cpu["kl_representation_raw"] * norm,
             step,
         )
     else:
         # Fallback if no sequence
-        writer.add_scalar(
-            "loss/world_model/total_per_step", total_wm_loss.item(), step
-        )
-        writer.add_scalar(
-            "loss/actor/total_per_step", total_actor_loss.item(), step
-        )
-        writer.add_scalar(
-            "loss/critic/total_per_step", total_critic_loss.item(), step
-        )
+        writer.add_scalar("loss/wm/total", total_wm_loss.item(), step)
+        writer.add_scalar("loss/actor/total", total_actor_loss.item(), step)
+        writer.add_scalar("loss/critic/total", total_critic_loss.item(), step)
 
-    # Dreamed trajectory statistics (debugging metrics)
+    # Dreamed trajectory statistics (from world model imagination rollouts)
     # Batch stats computation and sync once to reduce GPU stalls
     if dreamed_rewards_list:
         all_dreamed_rewards = torch.cat(dreamed_rewards_list, dim=0)
@@ -180,10 +180,11 @@ def _log_scalar_metrics(
                 all_dreamed_rewards.max(),
             ]
         ).cpu()  # Single sync for all 4 stats
-        writer.add_scalar("debug/dream/reward/mean", reward_stats[0].item(), step)
-        writer.add_scalar("debug/dream/reward/std", reward_stats[1].item(), step)
-        writer.add_scalar("debug/dream/reward/min", reward_stats[2].item(), step)
-        writer.add_scalar("debug/dream/reward/max", reward_stats[3].item(), step)
+        # Rewards predicted by WM reward head during imagination
+        writer.add_scalar("dream/wm_reward/mean", reward_stats[0].item(), step)
+        writer.add_scalar("dream/wm_reward/std", reward_stats[1].item(), step)
+        writer.add_scalar("dream/wm_reward/min", reward_stats[2].item(), step)
+        writer.add_scalar("dream/wm_reward/max", reward_stats[3].item(), step)
 
     if dreamed_values_list:
         all_dreamed_values = torch.cat(dreamed_values_list, dim=0)
@@ -193,8 +194,9 @@ def _log_scalar_metrics(
                 all_dreamed_values.std(),
             ]
         ).cpu()  # Single sync for both stats
-        writer.add_scalar("debug/dream/value/mean", value_stats[0].item(), step)
-        writer.add_scalar("debug/dream/value/std", value_stats[1].item(), step)
+        # Values from critic during imagination
+        writer.add_scalar("dream/critic_value/mean", value_stats[0].item(), step)
+        writer.add_scalar("dream/critic_value/std", value_stats[1].item(), step)
 
     # Actor entropy (important for monitoring exploration)
     if actor_entropy_list:
@@ -218,7 +220,7 @@ def _log_image_metrics(
     last_posterior_probs,
     last_dreamed_pixels,
 ):
-    """Log image metrics to TensorBoard."""
+    """Log image metrics to MLflow."""
     if last_obs_pixels is None or last_reconstruction_pixels is None:
         return
 
@@ -235,25 +237,25 @@ def _log_image_metrics(
             align_corners=False,
         ).squeeze(0)
 
-    # 1. Actual vs Reconstruction side by side
+    # 1. Actual vs Reconstruction side by side (decoder output quality)
     comparison = torch.cat([actual, recon], dim=2)  # concat on width
-    writer.add_image("images/actual_vs_reconstruction", comparison, step)
+    writer.add_image("viz/decoder/reconstruction", comparison, step)
 
-    # 2. Reconstruction error heatmap (absolute diff, averaged over RGB)
+    # 2. Reconstruction error heatmap (decoder error visualization)
     error = torch.abs(actual - recon).mean(dim=0, keepdim=True)  # (1, H, W)
     error_norm = error / (error.max() + 1e-8)
     error_heatmap = error_norm.repeat(3, 1, 1)  # grayscale to RGB
-    writer.add_image("images/reconstruction_error", error_heatmap, step)
+    writer.add_image("viz/decoder/error", error_heatmap, step)
 
-    # 3. Latent activation heatmap
+    # 3. Latent activation heatmap (encoder posterior distribution)
     if last_posterior_probs is not None:
         # Shape: (batch, d_hidden, categories) -> take first batch, make 2D
         latent_probs = last_posterior_probs[0]  # (512, 32)
         # Normalize and add batch/channel dims for add_images
         latent_img = latent_probs.unsqueeze(0).unsqueeze(0)  # (1, 1, 512, 32)
-        writer.add_images("images/latent_activations", latent_img, step)
+        writer.add_images("viz/encoder/latent_posterior", latent_img, step)
 
-    # 4. Dream rollout video (imagined future frames)
+    # 4. Dream rollout video (WM imagination/planning visualization)
     if last_dreamed_pixels is not None:
         # Shape: (n_dream_steps, batch, C, H, W) -> take first batch
         dream_frames = last_dreamed_pixels[:, 0]  # (n_steps, C, H, W)
@@ -267,13 +269,13 @@ def _log_image_metrics(
             )
         # Add video: shape (N, T, C, H, W) - batch, time, channels, height, width
         video = dream_frames.unsqueeze(0)  # (1, n_steps, C, H, W)
-        writer.add_video("video/dream_rollout", video, step, fps=4)
+        writer.add_video("viz/wm/dream_video", video, step, fps=4)
         # Also add strip image for quick glance
         n_show = min(5, dream_frames.shape[0])
         dream_strip = torch.cat([dream_frames[i] for i in range(n_show)], dim=2)
-        writer.add_images("images/dream_rollout", dream_strip.unsqueeze(0), step)
+        writer.add_images("viz/wm/dream_strip", dream_strip.unsqueeze(0), step)
 
-    # 5. Original resolution image (larger, easier to see)
+    # 5. Original resolution image (environment frame)
     if last_obs_pixels_original is not None:
         original = (last_obs_pixels_original[0] / 255.0).clamp(0, 1)  # First sample only
-        writer.add_image("images/original_resolution", original, step)
+        writer.add_image("viz/env/frame", original, step)

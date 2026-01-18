@@ -194,7 +194,10 @@ def run_training(cfg: DictConfig, mode: str = "train", checkpoint_path: str | No
     if not dry_run:
         mlruns_dir = os.path.join(os.path.dirname(log_dir), "mlruns")
         mlflow.set_tracking_uri(f"file://{mlruns_dir}")
-        mlflow.set_experiment(f"DreamerV3-{config.environment.environment_name}")
+        exp_name = getattr(config.general, "experiment_name", None)
+        if not exp_name:
+            exp_name = f"DreamerV3-{config.environment.environment_name}"
+        mlflow.set_experiment(exp_name)
 
         # Always start fresh MLflow runs (even when loading checkpoint)
 

@@ -199,6 +199,32 @@ Initial WM training. Expect WM to converge for cartpole. Will investigate AC lat
   # Backward: gradient flows through raw
   l_dyn = l_dyn_raw + (free_bits - l_dyn_raw).clamp(min=0).detach()
   ```
+
+### 01-17-26 WM Surprise Metrics (MLflow)
+- **Goal**: Detect when the world model is "surprised" by current data, as an early warning for WM lag or distribution shift.
+- **Implementation**:
+  - Added EMA-based surprise tracking in `src/trainer/core.py` with `train.surprise_ema_beta` (default 0.99).
+  - Logs log-ratio of recent loss vs EMA for total WM loss and components.
+  - Metrics (MLflow keys):
+    - `wm.surprise.ready` (0 until EMA initialized)
+    - `wm.surprise.total_log_ratio`
+    - `wm.surprise.max_component_log_ratio`
+    - `wm.surprise.reward_log_ratio`
+    - `wm.surprise.continue_log_ratio`
+    - `wm.surprise.pixel_log_ratio`
+    - `wm.surprise.state_log_ratio`
+    - `wm.surprise.kl_dyn_log_ratio`
+    - `wm.surprise.kl_rep_log_ratio`
+- **What these might inform**:
+  - Sudden spikes in `total_log_ratio` or `max_component_log_ratio` = WM is worse on the latest batch.
+  - Reward/continue spikes can flag novelty or termination dynamics shifts even if policy reward hasn't dropped yet.
+  - KL spikes often precede dream/value instability (prior/posterior mismatch).
+- **Next steps / how to analyze**:
+  1. Correlate `wm.surprise.*` with `env/episode_length` and evaluation return for the same run.
+  2. Plot `wm.surprise.total_log_ratio` vs `loss/wm/total` to ensure it highlights *changes* not absolute scale.
+  3. Check whether spikes lead performance drops (lagged correlation).
+  4. If signal looks reliable, add a simple "WM training camp" controller:
+     - If `wm.surprise.total_log_ratio > log(1.2)` for N logs, temporarily increase WM updates or pause AC.
 - **Files modified**: trainer.py (lines 926-930)
 
 ### 01-15-26 Post-Fix Training Results

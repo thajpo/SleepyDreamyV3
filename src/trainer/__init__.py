@@ -8,6 +8,7 @@ from .dreaming import dream_sequence, calculate_lambda_returns
 from .checkpoints import save_checkpoint, save_wm_only_checkpoint, load_checkpoint
 from .visualization import log_metrics
 from .core import WorldModelTrainer, train_world_model
+from .optimizers import LaProp, adaptive_gradient_clipping
 
 __all__ = [
     # core
@@ -38,4 +39,7 @@ __all__ = [
     "load_checkpoint",
     # visualization
     "log_metrics",
+    # optimizers
+    "LaProp",
+    "adaptive_gradient_clipping",
 ]

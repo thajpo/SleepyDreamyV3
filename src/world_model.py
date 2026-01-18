@@ -25,14 +25,30 @@ class RSSMWorldModel(nn.Module):
         super().__init__()
         self.d_hidden = models_config.d_hidden
 
-        # GatedRecurrentUnit | Uses 8 blocks to make a pseudo-large network
-        self.blocks = nn.ModuleList()
+        # GatedRecurrentUnit | Uses n_blocks independent GRUs computed in parallel
         self.n_blocks = models_config.rnn.n_blocks
         gru_d_in = self.d_hidden + env_config.n_actions
+
+        # Create temporary blocks to initialize weights, then stack for batched computation
+        blocks = nn.ModuleList()
         for _ in range(self.n_blocks):
-            self.blocks.append(
-                GatedRecurrentUnit(d_in=gru_d_in, d_hidden=self.d_hidden)
-            )
+            blocks.append(GatedRecurrentUnit(d_in=gru_d_in, d_hidden=self.d_hidden))
+
+        # Stack input projection weights: (n_blocks, d_hidden, d_in)
+        self._W_ir = nn.Parameter(torch.stack([b.W_ir.weight for b in blocks]))
+        self._W_iz = nn.Parameter(torch.stack([b.W_iz.weight for b in blocks]))
+        self._W_in = nn.Parameter(torch.stack([b.W_in.weight for b in blocks]))
+        self._b_ir = nn.Parameter(torch.stack([b.W_ir.bias for b in blocks]))
+        self._b_iz = nn.Parameter(torch.stack([b.W_iz.bias for b in blocks]))
+        self._b_in = nn.Parameter(torch.stack([b.W_in.bias for b in blocks]))
+
+        # Stack hidden projection weights: (n_blocks, d_hidden, d_hidden)
+        self._W_hr = nn.Parameter(torch.stack([b.W_hr.weight for b in blocks]))
+        self._W_hz = nn.Parameter(torch.stack([b.W_hz.weight for b in blocks]))
+        self._W_hn = nn.Parameter(torch.stack([b.W_hn.weight for b in blocks]))
+        self._b_hr = nn.Parameter(torch.stack([b.W_hr.bias for b in blocks]))
+        self._b_hz = nn.Parameter(torch.stack([b.W_hz.bias for b in blocks]))
+        self._b_hn = nn.Parameter(torch.stack([b.W_hn.bias for b in blocks]))
 
         # Outputs prior distribution \hat{z} from the sequence model
         n_gru_blocks = models_config.rnn.n_blocks
@@ -47,7 +63,6 @@ class RSSMWorldModel(nn.Module):
         z_prev = torch.zeros((batch_size, self.d_hidden, int(self.d_hidden / 16)))
         self.register_buffer("z_prev", z_prev)
 
-        self.h_prev_blocks = torch.split(self.h_prev, self.d_hidden, dim=-1)
         # Linear layer to project categorical sample to embedding dimension
         self.z_embedding = nn.Linear(
             self.d_hidden * (self.d_hidden // 16), self.d_hidden
@@ -83,26 +98,44 @@ class RSSMWorldModel(nn.Module):
 
     def step_dynamics(self, z_embed, action, h_prev):
         """
-        Steps the recurrent dynamics forward one step.
+        Steps the recurrent dynamics forward one step using batched GRU computation.
+
+        All n_blocks GRUs are computed in parallel via einsum over stacked weights.
+        The input x = cat(z_embed, action) is identical for all blocks, while
+        h_prev differs per block.
 
         Args:
-            z_embed: The embedded latent state z_t.
-            action: The one-hot encoded action a_t.
-            h_prev: The previous hidden state h_{t-1}.
+            z_embed: The embedded latent state z_t. Shape: (B, d_hidden)
+            action: The one-hot encoded action a_t. Shape: (B, n_actions)
+            h_prev: The previous hidden state h_{t-1}. Shape: (B, n_blocks * d_hidden)
 
         Returns:
-            h: The new hidden state h_t.
-            prior_logits: The predicted logits for the next latent state, z_{t+1}.
+            h: The new hidden state h_t. Shape: (B, n_blocks * d_hidden)
+            prior_logits: The predicted logits for the next latent state.
         """
-        outputs = []
-        h_prev_blocks = torch.split(h_prev, self.d_hidden, dim=-1)
-        for i, block in enumerate(self.blocks):
-            h_i = block(z_embed, action, h_prev_blocks[i])
-            outputs.append(h_i)
-        h = torch.cat(outputs, dim=-1)
+        B = z_embed.shape[0]
+        x = torch.cat((z_embed, action), dim=1)  # (B, d_in)
+        h_blocks = h_prev.view(B, self.n_blocks, self.d_hidden)  # (B, n_blocks, d_hidden)
+
+        # Input projections: (B, d_in) @ (n_blocks, d_hidden, d_in).T -> (B, n_blocks, d_hidden)
+        ir = torch.einsum('bi,kji->bkj', x, self._W_ir) + self._b_ir
+        iz = torch.einsum('bi,kji->bkj', x, self._W_iz) + self._b_iz
+        in_ = torch.einsum('bi,kji->bkj', x, self._W_in) + self._b_in
+
+        # Hidden projections: (B, n_blocks, d_hidden) @ (n_blocks, d_hidden, d_hidden).T -> (B, n_blocks, d_hidden)
+        hr = torch.einsum('bki,kji->bkj', h_blocks, self._W_hr) + self._b_hr
+        hz = torch.einsum('bki,kji->bkj', h_blocks, self._W_hz) + self._b_hz
+        hn = torch.einsum('bki,kji->bkj', h_blocks, self._W_hn) + self._b_hn
+
+        # GRU equations (batched element-wise)
+        r = torch.sigmoid(ir + hr)
+        z = torch.sigmoid(iz + hz)
+        n = torch.tanh(in_ + r * hn)
+        h_new = (1 - z) * n + z * h_blocks
+
+        h = h_new.view(B, -1)  # (B, n_blocks * d_hidden)
         # Detach and clone before storing to avoid in-place modification of computation graph
         # Gradients flow through h directly, not through stored h_prev
-        # Use clone() to ensure we create a new tensor, not a view
         self.h_prev = h.detach().clone()
         prior_logits = self.dynamics_predictor(h)
         return h, prior_logits

@@ -3,7 +3,7 @@
 
 # Kill any hanging training processes
 pkill -f "python -m src.main" 2>/dev/null
-pkill -f "tensorboard" 2>/dev/null
+pkill -f "mlflow" 2>/dev/null
 sleep 1
 
 # Clear GPU memory (ROCm)
