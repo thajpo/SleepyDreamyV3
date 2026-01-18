@@ -104,11 +104,26 @@ class TrainConfig:
     bootstrap_steps: int = 5000
     actor_warmup_steps: int = 5000
 
+    # Surprise-scaled AC learning rate
+    surprise_scale_ac_lr: bool = True
+    surprise_lr_scale_k: float = 10.0
+
+    # WM focus mode (extra WM steps when surprise high)
+    surprise_wm_focus_threshold: float = 0.05
+    surprise_wm_focus_ratio: int = 4
+    surprise_wm_focus_duration: int = 20
+
+    # Checkpointing
+    checkpoint_interval: int = 5000
+
     # Data collection
     num_collectors: int = 1
     replay_buffer_size: int = 1000
     min_buffer_episodes: int = 64
     steps_per_weight_sync: int = 5
+
+    # WM surprise metrics
+    surprise_ema_beta: float = 0.99
 
 
 @dataclass
@@ -174,6 +189,10 @@ class GeneralAdapter:
     @property
     def debug_memory(self):
         return self._cfg.debug_memory
+
+    @property
+    def dry_run(self):
+        return self._cfg.dry_run
 
 
 class EnvironmentAdapter:
@@ -378,6 +397,34 @@ class TrainAdapter:
     @property
     def steps_per_weight_sync(self):
         return self._cfg.steps_per_weight_sync
+
+    @property
+    def surprise_ema_beta(self):
+        return self._cfg.surprise_ema_beta
+
+    @property
+    def surprise_scale_ac_lr(self):
+        return self._cfg.surprise_scale_ac_lr
+
+    @property
+    def surprise_lr_scale_k(self):
+        return self._cfg.surprise_lr_scale_k
+
+    @property
+    def surprise_wm_focus_threshold(self):
+        return self._cfg.surprise_wm_focus_threshold
+
+    @property
+    def surprise_wm_focus_ratio(self):
+        return self._cfg.surprise_wm_focus_ratio
+
+    @property
+    def surprise_wm_focus_duration(self):
+        return self._cfg.surprise_wm_focus_duration
+
+    @property
+    def checkpoint_interval(self):
+        return self._cfg.checkpoint_interval
 
 
 def adapt_config(cfg) -> ConfigAdapter:

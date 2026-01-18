@@ -190,21 +190,13 @@ def run_training(cfg: DictConfig, mode: str = "train", checkpoint_path: str | No
 
     # Setup MLflow tracking (skip in dry_run mode)
     mlflow_run_id = None
-    is_resumed_run = False
 
     if not dry_run:
         mlruns_dir = os.path.join(os.path.dirname(log_dir), "mlruns")
         mlflow.set_tracking_uri(f"file://{mlruns_dir}")
         mlflow.set_experiment(f"DreamerV3-{config.environment.environment_name}")
 
-        # Check for existing run_id from checkpoint for resume support
-        if checkpoint_path:
-            import torch
-            ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-            mlflow_run_id = ckpt.get("mlflow_run_id")
-            if mlflow_run_id:
-                print(f"  Resuming MLflow run: {mlflow_run_id}")
-                is_resumed_run = True
+        # Always start fresh MLflow runs (even when loading checkpoint)
 
         # Get sweep info and generate descriptive run name
         sweep_info = get_sweep_info()
@@ -231,8 +223,8 @@ def run_training(cfg: DictConfig, mode: str = "train", checkpoint_path: str | No
         # Start MLflow UI server
         start_mlflow_ui(mlruns_dir, port=5000)
 
-    # Log flattened config as parameters (only on new runs, skip in dry_run)
-    if not dry_run and not is_resumed_run:
+    # Log flattened config as parameters (skip in dry_run)
+    if not dry_run:
         flat_params = flatten_config(cfg)
         # MLflow has a 500 param limit, truncate long values
         for k, v in flat_params.items():

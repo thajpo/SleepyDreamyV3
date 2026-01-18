@@ -20,6 +20,7 @@ def save_checkpoint(
     actor_optimizer,
     critic_optimizer,
     final=False,
+    mlflow_run_id=None,
 ):
     """
     Save all model checkpoints.
@@ -35,6 +36,7 @@ def save_checkpoint(
         actor_optimizer: Actor optimizer
         critic_optimizer: Critic optimizer
         final: If True, save as final checkpoint
+        mlflow_run_id: MLflow run ID for resume support
 
     Returns:
         Path to saved checkpoint
@@ -53,6 +55,7 @@ def save_checkpoint(
         "wm_optimizer": wm_optimizer.state_dict(),
         "actor_optimizer": actor_optimizer.state_dict(),
         "critic_optimizer": critic_optimizer.state_dict(),
+        "mlflow_run_id": mlflow_run_id,
     }
     path = os.path.join(checkpoint_dir, f"checkpoint_{suffix}.pt")
     torch.save(checkpoint, path)
@@ -67,6 +70,7 @@ def save_wm_only_checkpoint(
     world_model,
     wm_optimizer,
     final=False,
+    mlflow_run_id=None,
 ):
     """
     Save WM-only checkpoint for bootstrap phase (no actor/critic).
@@ -78,6 +82,7 @@ def save_wm_only_checkpoint(
         world_model: World model network
         wm_optimizer: World model optimizer
         final: If True, save as final checkpoint
+        mlflow_run_id: MLflow run ID for resume support
 
     Returns:
         Path to saved checkpoint
@@ -93,6 +98,7 @@ def save_wm_only_checkpoint(
         },
         "wm_optimizer": wm_optimizer.state_dict(),
         "checkpoint_type": "wm_only",
+        "mlflow_run_id": mlflow_run_id,
     }
     path = os.path.join(checkpoint_dir, f"wm_checkpoint_{suffix}.pt")
     torch.save(checkpoint, path)

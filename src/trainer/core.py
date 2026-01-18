@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -115,13 +116,29 @@ class WorldModelTrainer:
         print(f"MLflow logging to: {log_dir}")
         self.log_every = 250
         self.image_log_every = 2500
+        self.surprise_ema_beta = config.train.surprise_ema_beta
+        self._wm_surprise_ema = {}
+        self._last_surprise_log_ratio = 0.0  # Raw surprise (log ratio)
+        self._smoothed_surprise = 0.0  # Smoothed surprise for LR scaling (lingers after spikes)
+        self.surprise_smooth_beta = 0.9  # How fast smoothed surprise decays (higher = slower)
+        self.surprise_scale_ac_lr = config.train.surprise_scale_ac_lr
+        self.surprise_lr_scale_k = config.train.surprise_lr_scale_k
+        self.base_actor_lr = config.train.actor_lr
+        self.base_critic_lr = config.train.critic_lr
+        self._wm_surprise_eps = 1e-8
 
-        # Episode length tracking for convergence monitoring
+        # WM focus mode: extra WM steps when surprise spikes
+        self.surprise_wm_focus_threshold = config.train.surprise_wm_focus_threshold
+        self.surprise_wm_focus_ratio = config.train.surprise_wm_focus_ratio
+        self.surprise_wm_focus_duration = config.train.surprise_wm_focus_duration
+        self._wm_focus_steps_remaining = 0  # Countdown for focus mode
+        self._wm_focus_ac_counter = 0  # Counter for AC step ratio
+        self._ac_training_started = False  # Track if we've entered AC training phase
 
         # Checkpointing
         self.checkpoint_dir = os.path.join(log_dir, "checkpoints")
         os.makedirs(self.checkpoint_dir, exist_ok=True)
-        self.checkpoint_interval = 10000
+        self.checkpoint_interval = config.train.checkpoint_interval
 
         # Save config snapshot
         config_path = os.path.join(log_dir, "config.json")
@@ -266,6 +283,7 @@ class WorldModelTrainer:
             wm_loss = torch.tensor(0.0, device=self.device)
             actor_loss = torch.tensor(0.0, device=self.device)
             critic_loss = torch.tensor(0.0, device=self.device)
+            skip_ac_this_step = True  # Default to skip if loop doesn't run
             last_obs_pixels = None
             last_obs_pixels_original = None
             last_reconstruction_pixels = None
@@ -354,8 +372,12 @@ class WorldModelTrainer:
                     posterior_dist.probs.detach()
                 )  # (batch, d_hidden, d_hidden/16)
 
-                # --- Dream Sequence for Actor-Critic (skip during warmup) ---
-                if self.train_step >= self.actor_warmup_steps:
+                # --- Dream Sequence for Actor-Critic ---
+                # Check WM focus skip BEFORE dream (uses previous step's surprise)
+                # This avoids computing dream when we'll skip AC anyway
+                skip_ac_this_step = self.should_skip_ac_for_wm_focus() if self.should_train_ac() else True
+
+                if self.should_train_ac() and not skip_ac_this_step:
                     h_prev_backup = self.world_model.h_prev.clone()
                     (
                         dreamed_recurrent_states,
@@ -449,7 +471,7 @@ class WorldModelTrainer:
                 # Accumulate losses
                 if total_wm_loss is None:
                     total_wm_loss = wm_loss
-                    if self.train_step >= self.actor_warmup_steps:
+                    if self.should_train_ac():
                         total_actor_loss = actor_loss
                         total_critic_loss = critic_loss
                     else:
@@ -461,7 +483,7 @@ class WorldModelTrainer:
                         )
                 else:
                     total_wm_loss = total_wm_loss + wm_loss  # type: ignore
-                    if self.train_step >= self.actor_warmup_steps:
+                    if self.should_train_ac():
                         total_actor_loss = total_actor_loss + actor_loss  # type: ignore
                         total_critic_loss = total_critic_loss + critic_loss  # type: ignore
 
@@ -470,6 +492,10 @@ class WorldModelTrainer:
             timing.log_phase("forward", time.perf_counter() - t0)
             t0 = time.perf_counter()
 
+            # Compute surprise BEFORE backward pass (proactive, not reactive)
+            seq_len = self.states.shape[1] if hasattr(self, "states") else 1
+            self.compute_surprise_for_batch(total_wm_loss, seq_len)
+
             # Backprop
             assert (
                 total_wm_loss is not None
@@ -477,21 +503,40 @@ class WorldModelTrainer:
                 and total_critic_loss is not None
             )
 
-            if self.train_step >= self.actor_warmup_steps:
-                # Full training: WM + critic + actor
-                # Note: retain_graph not needed since dream states are detached
-                # and each loss has an independent computation graph
-                total_wm_loss.backward()
-                total_critic_loss.backward()
-                total_actor_loss.backward()
-                self.wm_optimizer.step()
-                self.critic_optimizer.step()
-                self.actor_optimizer.step()
+            if self.should_train_ac():
+                # Use the skip decision made before dream (already decremented counters)
+                if skip_ac_this_step:
+                    # WM focus mode: only update WM this step
+                    total_wm_loss.backward()
+                    self.wm_optimizer.step()
+                else:
+                    # Full training: WM + critic + actor
+                    # Apply surprise-based lr scaling to AC optimizers (uses smoothed surprise)
+                    lr_scale = self.get_ac_lr_scale()
+                    if lr_scale < 1.0:
+                        for pg in self.actor_optimizer.param_groups:
+                            pg['lr'] = self.base_actor_lr * lr_scale
+                        for pg in self.critic_optimizer.param_groups:
+                            pg['lr'] = self.base_critic_lr * lr_scale
+
+                    total_wm_loss.backward()
+                    total_critic_loss.backward()
+                    total_actor_loss.backward()
+                    self.wm_optimizer.step()
+                    self.critic_optimizer.step()
+                    self.actor_optimizer.step()
+
+                    # Reset lr after step (for next iteration's scaling)
+                    if lr_scale < 1.0:
+                        for pg in self.actor_optimizer.param_groups:
+                            pg['lr'] = self.base_actor_lr
+                        for pg in self.critic_optimizer.param_groups:
+                            pg['lr'] = self.base_critic_lr
             else:
-                # Warmup: WM only
+                # WM only: warmup phase
                 total_wm_loss.backward()
                 self.wm_optimizer.step()
-                # Log warmup progress (per-step loss)
+                # Log warmup progress
                 if self.train_step % 100 == 0:
                     seq_len = self.states.shape[1] if hasattr(self, "states") else 1
                     print(
@@ -568,6 +613,10 @@ class WorldModelTrainer:
                     self.logger.add_scalar(
                         "env/episode_length", avg_ep_len, self.train_step
                     )
+                    # Key metric (sorted first in MLflow)
+                    self.logger.add_scalar(
+                        "_key/episode_length", avg_ep_len, self.train_step
+                    )
                 self.last_log_time = time.time()
                 self.steps_since_log = 0
 
@@ -603,6 +652,95 @@ class WorldModelTrainer:
             torch.quantile(flat, 0.95).item() - torch.quantile(flat, 0.05).item()
         )
         self.S = self.S * decay + range_batch * (1 - decay)
+
+    def _surprise_log_ratio(self, key: str, value: float) -> float | None:
+        """Return log(value / EMA) and update EMA; None if EMA not initialized."""
+        ema = self._wm_surprise_ema.get(key)
+        if ema is None:
+            self._wm_surprise_ema[key] = value
+            return None
+        log_ratio = math.log((value + self._wm_surprise_eps) / (ema + self._wm_surprise_eps))
+        self._wm_surprise_ema[key] = (
+            self.surprise_ema_beta * ema + (1.0 - self.surprise_ema_beta) * value
+        )
+        return log_ratio
+
+    def should_train_ac(self) -> bool:
+        """Check if actor-critic should be trained this step (warmup check only)."""
+        should_train = self.train_step >= self.actor_warmup_steps
+
+        # Reset focus state when first entering AC training (avoid warmup carryover)
+        if should_train and not self._ac_training_started:
+            self._ac_training_started = True
+            self._wm_focus_steps_remaining = 0
+            self._wm_focus_ac_counter = 0
+            self._smoothed_surprise = 0.0
+
+        return should_train
+
+    def compute_surprise_for_batch(self, wm_loss: torch.Tensor, seq_len: int) -> float:
+        """
+        Compute surprise from current batch's WM loss BEFORE backward pass.
+        Updates EMA, smoothed surprise, and WM focus mode. Call this right after forward pass.
+
+        Returns the raw surprise log ratio.
+        """
+        wm_per_step = wm_loss.item() / max(1, seq_len)
+
+        # Compute raw surprise (log ratio vs EMA)
+        raw_surprise = self._surprise_log_ratio("total", wm_per_step)
+        if raw_surprise is None:
+            raw_surprise = 0.0
+
+        self._last_surprise_log_ratio = raw_surprise
+
+        # Update smoothed surprise (lingers after spikes)
+        # Only positive surprise affects smoothing (WM struggling)
+        positive_surprise = max(0.0, raw_surprise)
+        # Smoothed surprise takes the max of decay and new value (ratchet up quickly, decay slowly)
+        decayed = self._smoothed_surprise * self.surprise_smooth_beta
+        self._smoothed_surprise = max(decayed, positive_surprise)
+
+        # Trigger WM focus mode if surprise exceeds threshold
+        if positive_surprise > self.surprise_wm_focus_threshold:
+            self._wm_focus_steps_remaining = self.surprise_wm_focus_duration
+            self._wm_focus_ac_counter = 0  # Reset counter
+
+        return raw_surprise
+
+    def should_skip_ac_for_wm_focus(self) -> bool:
+        """
+        Check if AC update should be skipped this step due to WM focus mode.
+        In focus mode, only update AC every N steps (ratio).
+        """
+        if self._wm_focus_steps_remaining <= 0:
+            return False
+
+        # Decrement focus countdown
+        self._wm_focus_steps_remaining -= 1
+
+        # Check if this is an AC step (every Nth step)
+        self._wm_focus_ac_counter += 1
+        if self._wm_focus_ac_counter >= self.surprise_wm_focus_ratio:
+            self._wm_focus_ac_counter = 0
+            return False  # Do AC this step
+
+        return True  # Skip AC this step
+
+    def get_ac_lr_scale(self) -> float:
+        """
+        Get AC learning rate scale based on smoothed surprise.
+
+        Returns scale factor in (0, 1]:
+        - High surprise → low scale (slower AC learning)
+        - Low/negative surprise → scale ≈ 1 (normal learning)
+
+        Uses smoothed surprise so LR reduction lingers after spikes.
+        """
+        if not self.surprise_scale_ac_lr:
+            return 1.0
+        # Use smoothed surprise (not raw) so reduction lingers
+        return 1.0 / (1.0 + self._smoothed_surprise * self.surprise_lr_scale_k)
 
     def _get_model(self, model):
         """Get underlying model (handles both compiled and non-compiled)."""
@@ -952,13 +1090,15 @@ class WorldModelTrainer:
 
                 # Per-step totals for each model
                 wm_per_step = total_wm_loss.item() * norm
+                actor_per_step = total_actor_loss.item() * norm
+                critic_per_step = total_critic_loss.item() * norm
                 self.logger.add_scalar("loss/wm/total", wm_per_step, step)
-                self.logger.add_scalar(
-                    "loss/actor/total", total_actor_loss.item() * norm, step
-                )
-                self.logger.add_scalar(
-                    "loss/critic/total", total_critic_loss.item() * norm, step
-                )
+                self.logger.add_scalar("loss/actor/total", actor_per_step, step)
+                self.logger.add_scalar("loss/critic/total", critic_per_step, step)
+                # Key metrics (sorted first in MLflow)
+                self.logger.add_scalar("_key/loss_wm", wm_per_step, step)
+                self.logger.add_scalar("_key/loss_actor", actor_per_step, step)
+                self.logger.add_scalar("_key/loss_critic", critic_per_step, step)
 
                 # Raw component values (per-step, unscaled)
                 pixel = wm_components_cpu["prediction_pixel"] * norm
@@ -967,6 +1107,90 @@ class WorldModelTrainer:
                 cont = wm_components_cpu["prediction_continue"] * norm
                 dyn = wm_components_cpu["dynamics"] * norm
                 rep = wm_components_cpu["representation"] * norm
+
+                # Surprise signals: log-ratio of recent loss vs EMA
+                # Note: "total" is computed in compute_surprise_for_batch (before backward)
+                # Only compute component surprises here to avoid double EMA update
+                surprise_inputs = {
+                    "pixel": pixel,
+                    "state": state,
+                    "reward": reward,
+                    "continue": cont,
+                    "kl_dyn": dyn,
+                    "kl_rep": rep,
+                }
+                surprise_log_ratios = {}
+                for key, value in surprise_inputs.items():
+                    log_ratio = self._surprise_log_ratio(key, float(value))
+                    if log_ratio is not None:
+                        surprise_log_ratios[key] = log_ratio
+
+                # Log total surprise (already computed in compute_surprise_for_batch)
+                self.logger.add_scalar("wm/surprise/ready", 1.0, step)
+                self.logger.add_scalar(
+                    "wm/surprise/total_log_ratio",
+                    self._last_surprise_log_ratio,
+                    step,
+                )
+                self.logger.add_scalar(
+                    "_key/surprise", self._last_surprise_log_ratio, step
+                )
+
+                # Log component surprises
+                if "reward" in surprise_log_ratios:
+                    self.logger.add_scalar(
+                        "wm/surprise/reward_log_ratio",
+                        surprise_log_ratios["reward"],
+                        step,
+                    )
+                if "continue" in surprise_log_ratios:
+                    self.logger.add_scalar(
+                        "wm/surprise/continue_log_ratio",
+                        surprise_log_ratios["continue"],
+                        step,
+                    )
+                if "pixel" in surprise_log_ratios:
+                    self.logger.add_scalar(
+                        "wm/surprise/pixel_log_ratio",
+                        surprise_log_ratios["pixel"],
+                        step,
+                    )
+                if "state" in surprise_log_ratios:
+                    self.logger.add_scalar(
+                        "wm/surprise/state_log_ratio",
+                        surprise_log_ratios["state"],
+                        step,
+                    )
+                if "kl_dyn" in surprise_log_ratios:
+                    self.logger.add_scalar(
+                        "wm/surprise/kl_dyn_log_ratio",
+                        surprise_log_ratios["kl_dyn"],
+                        step,
+                    )
+                if "kl_rep" in surprise_log_ratios:
+                    self.logger.add_scalar(
+                        "wm/surprise/kl_rep_log_ratio",
+                        surprise_log_ratios["kl_rep"],
+                        step,
+                    )
+                component_vals = list(surprise_log_ratios.values())
+                if component_vals:
+                    self.logger.add_scalar(
+                        "wm/surprise/max_component_log_ratio",
+                        max(component_vals),
+                        step,
+                    )
+
+                # Log AC learning rate scale (based on surprise)
+                if self.surprise_scale_ac_lr:
+                    lr_scale = self.get_ac_lr_scale()
+                    self.logger.add_scalar("ac/lr_scale", lr_scale, step)
+                    # delta_lr shows reduction: 0 = no change, 1 = fully scaled down
+                    self.logger.add_scalar("_key/delta_lr", 1.0 - lr_scale, step)
+                    # Log smoothed vs raw surprise for debugging
+                    self.logger.add_scalar("wm/surprise/smoothed", self._smoothed_surprise, step)
+                    # Log WM focus mode (1 = in focus, 0 = normal)
+                    self.logger.add_scalar("ac/wm_focus_active", float(self._wm_focus_steps_remaining > 0), step)
 
                 # World model sub-component losses (grouped by module)
                 # Decoder losses (reconstruction)
@@ -988,16 +1212,13 @@ class WorldModelTrainer:
                 self.logger.add_scalar("wm/scaled/representation", beta_rep * rep, step)
 
                 # Raw KL divergences (before free bits clipping, for debugging)
-                self.logger.add_scalar(
-                    "wm/rssm/kl_dynamics_raw",
-                    wm_components_cpu["kl_dynamics_raw"] * norm,
-                    step,
-                )
-                self.logger.add_scalar(
-                    "wm/rssm/kl_representation_raw",
-                    wm_components_cpu["kl_representation_raw"] * norm,
-                    step,
-                )
+                kl_dyn_raw = wm_components_cpu["kl_dynamics_raw"] * norm
+                kl_rep_raw = wm_components_cpu["kl_representation_raw"] * norm
+                self.logger.add_scalar("wm/rssm/kl_dynamics_raw", kl_dyn_raw, step)
+                self.logger.add_scalar("wm/rssm/kl_representation_raw", kl_rep_raw, step)
+                # Key metrics
+                self.logger.add_scalar("_key/kl_dyn_raw", kl_dyn_raw, step)
+                self.logger.add_scalar("_key/kl_rep_raw", kl_rep_raw, step)
             else:
                 # Fallback if no sequence
                 self.logger.add_scalar("loss/wm/total", total_wm_loss.item(), step)
@@ -1188,10 +1409,12 @@ def train_world_model(
     mlflow_run_id=None,
     dry_run=False,
 ):
-    # Set MLflow tracking URI for this child process (skip in dry_run)
+    # Set MLflow tracking URI and join existing run in this child process (skip in dry_run)
     if mlflow_run_id and not dry_run:
         mlruns_dir = os.path.join(os.path.dirname(log_dir), "mlruns")
         mlflow.set_tracking_uri(f"file://{mlruns_dir}")
+        # Join the existing run (subprocess doesn't inherit active run from parent)
+        mlflow.start_run(run_id=mlflow_run_id)
 
     trainer = WorldModelTrainer(
         config, data_queue, model_queue, log_dir, checkpoint_path, mode, reset_ac, mlflow_run_id, dry_run

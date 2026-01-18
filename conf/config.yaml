@@ -74,6 +74,15 @@ train:
   bootstrap_steps: 5000
   actor_warmup_steps: 5000
 
+  # Surprise-scaled AC learning rate
+  # When enabled, AC learning rate is scaled by 1/(1 + surprise * k)
+  # High surprise = slower AC, keeping WM and AC coupled
+  surprise_scale_ac_lr: true
+  surprise_lr_scale_k: 10.0  # sensitivity (higher = more aggressive scaling)
+
+  # Checkpointing
+  checkpoint_interval: 5000
+
   # Data collection
   num_collectors: 1
   replay_buffer_size: 1000
