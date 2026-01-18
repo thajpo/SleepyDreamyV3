@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from queue import Empty
 import cv2
 
-from .trainer import initialize_actor, initialize_world_model, ProfilerManager, symlog
+from .trainer import initialize_actor, initialize_world_model, ProfilerManager, symlog, unimix_logits
 from .utils import create_env
 
 
@@ -103,7 +103,8 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
 
                 with torch.no_grad():
                     posterior_logits = encoder(encoder_input)
-                    posterior_dist = torch.distributions.Categorical(logits=posterior_logits)
+                    posterior_logits_mixed = unimix_logits(posterior_logits, unimix_ratio=0.01)
+                    posterior_dist = torch.distributions.Categorical(logits=posterior_logits_mixed)
                     z_indices = posterior_dist.sample()
                     z_onehot = F.one_hot(z_indices, num_classes=config.models.d_hidden // 16).float()
                     z_sample = z_onehot + (posterior_dist.probs - posterior_dist.probs.detach())

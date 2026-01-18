@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .math_utils import symlog, twohot_encode
+from .math_utils import symlog, twohot_encode, unimix_logits
 
 
 def compute_wm_loss(
@@ -88,9 +88,10 @@ def compute_wm_loss(
     # The "free bits" technique provides a minimum budget for the KL divergence.
     free_bits = 1.0
     # Manual categorical KL to avoid distribution overhead.
+    prior_logits_mixed = unimix_logits(prior_logits, unimix_ratio=0.01)
     posterior_logits_detached = posterior_dist.logits.detach()
     log_posterior_detached = F.log_softmax(posterior_logits_detached, dim=-1)
-    log_prior = F.log_softmax(prior_logits, dim=-1)
+    log_prior = F.log_softmax(prior_logits_mixed, dim=-1)
     posterior_probs_detached = log_posterior_detached.exp()
     l_dyn_raw = (
         (posterior_probs_detached * (log_posterior_detached - log_prior))
@@ -99,7 +100,7 @@ def compute_wm_loss(
     )
 
     log_posterior = F.log_softmax(posterior_dist.logits, dim=-1)
-    log_prior_detached = F.log_softmax(prior_logits.detach(), dim=-1)
+    log_prior_detached = F.log_softmax(prior_logits_mixed.detach(), dim=-1)
     posterior_probs = log_posterior.exp()
     l_rep_raw = (
         (posterior_probs * (log_posterior - log_prior_detached)).sum(dim=-1).mean()

@@ -4,6 +4,8 @@ import torch
 import torch.nn.functional as F
 import torch.distributions as dist
 
+from .math_utils import unimix_logits
+
 
 def dream_sequence(
     initial_h,
@@ -60,9 +62,10 @@ def dream_sequence(
             dream_z_embed, action_onehot, dream_h
         )
 
-        # 2. Sample z from the prior
+        # 2. Sample z from the prior with unimix (DreamerV3 Section 4)
+        dream_prior_logits_mixed = unimix_logits(dream_prior_logits, unimix_ratio=0.01)
         dream_prior_dist = dist.Categorical(
-            logits=dream_prior_logits, validate_args=False
+            logits=dream_prior_logits_mixed, validate_args=False
         )
         dream_z_sample_indices = dream_prior_dist.sample()
         dream_z_sample = F.one_hot(

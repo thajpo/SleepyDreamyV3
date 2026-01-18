@@ -15,6 +15,7 @@ general:
   compile_models: false
   debug_memory: false
   dry_run: false  # Skip MLflow/checkpoints for smoke tests
+  experiment_name: null  # MLflow experiment name (null = auto from env name)
 
 # Environment (overridden by env/*.yaml)
 environment:
@@ -45,20 +46,20 @@ models:
 train:
   # Core settings
   max_steps: 30000
-  batch_size: 32
-  sequence_length: 25
+  batch_size: 16
+  sequence_length: 32
 
-  # Learning rates
-  wm_lr: 1e-4
-  actor_lr: 1e-4
-  critic_lr: 1e-4
+  # Learning rates (paper: 4e-5 with LaProp)
+  wm_lr: 4e-5
+  actor_lr: 4e-5
+  critic_lr: 4e-5
   weight_decay: 1e-6
 
   # RL settings
-  gamma: 0.99
+  gamma: 0.997  # paper: discount horizon 1/(1-γ)=333
   lam: 0.95
   num_dream_steps: 15
-  actor_entropy_coef: 1e-3
+  actor_entropy_coef: 3e-4  # paper: η=3e-4
   normalize_advantages: true
 
   # Loss coefficients (DreamerV3 paper: βpred=1, βdyn=1, βrep=0.1)
@@ -79,6 +80,20 @@ train:
   # High surprise = slower AC, keeping WM and AC coupled
   surprise_scale_ac_lr: true
   surprise_lr_scale_k: 10.0  # sensitivity (higher = more aggressive scaling)
+  surprise_ema_beta: 0.99  # EMA decay for surprise baseline
+
+  # WM focus mode (extra WM steps when surprise high)
+  surprise_wm_focus_threshold: 0.05  # surprise level to trigger focus
+  surprise_wm_focus_ratio: 4  # WM:AC update ratio during focus
+  surprise_wm_focus_duration: 20  # steps in focus mode
+  surprise_wm_focus_cooldown: 50  # steps after focus before re-entry
+
+  # Early stopping (0 to disable)
+  early_stop_ep_length: 500  # CartPole solved at 500
+
+  # Evaluation (deterministic policy)
+  eval_every: 1000  # 0 to disable
+  eval_episodes: 5
 
   # Checkpointing
   checkpoint_interval: 5000

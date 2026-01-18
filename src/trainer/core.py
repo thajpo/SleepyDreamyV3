@@ -1,7 +1,5 @@
 import math
 import torch
-import torch.nn as nn
-import torch.optim as optim
 import torch.distributions as dist
 import torch.nn.functional as F
 from queue import Full
@@ -10,11 +8,14 @@ import os
 import time
 
 from ..replay_buffer import EpisodeReplayBuffer
-from .math_utils import symlog, symexp, twohot_encode, resize_pixels_to_target, unimix_logits
+from .math_utils import symlog, symexp, resize_pixels_to_target, unimix_logits
 from .model_init import initialize_actor, initialize_critic, initialize_world_model
 from .profiling import ProfilerManager, TimingAccumulator
-from .losses import compute_actor_critic_losses
+from .losses import compute_wm_loss, compute_actor_critic_losses
+from .dreaming import dream_sequence, calculate_lambda_returns
 from .mlflow_logger import MLflowLogger
+from .optimizers import LaProp, adaptive_gradient_clipping
+from ..utils.environment import create_env
 
 
 class WorldModelTrainer:
@@ -72,17 +73,18 @@ class WorldModelTrainer:
         self.wm_params = list(self.encoder.parameters()) + list(
             self.world_model.parameters()
         )
-        self.wm_optimizer = optim.Adam(
+        # LaProp optimizer (DreamerV3): more stable than Adam for RL
+        self.wm_optimizer = LaProp(
             self.wm_params,
             lr=config.train.wm_lr,
             weight_decay=config.train.weight_decay,
         )
-        self.critic_optimizer = optim.Adam(
+        self.critic_optimizer = LaProp(
             self.critic.parameters(),
             lr=config.train.critic_lr,
             weight_decay=config.train.weight_decay,
         )
-        self.actor_optimizer = optim.Adam(
+        self.actor_optimizer = LaProp(
             self.actor.parameters(),
             lr=config.train.actor_lr,
             weight_decay=config.train.weight_decay,
@@ -135,7 +137,14 @@ class WorldModelTrainer:
         self._wm_focus_steps_remaining = 0  # Countdown for focus mode
         self._wm_focus_cooldown_remaining = 0  # Cooldown after focus (no re-entry)
         self._wm_focus_ac_counter = 0  # Counter for AC step ratio
+
+        # Deterministic evaluation
+        self.eval_every = config.train.eval_every
+        self.eval_episodes = config.train.eval_episodes
         self._ac_training_started = False  # Track if we've entered AC training phase
+
+        # Early stopping (0 to disable)
+        self.early_stop_ep_length = getattr(config.train, "early_stop_ep_length", 0)
 
         # Checkpointing
         self.checkpoint_dir = os.path.join(log_dir, "checkpoints")
@@ -344,7 +353,7 @@ class WorldModelTrainer:
                 ) = self.world_model(posterior_dist, action_t)
 
                 # Updating loss of encoder and world model
-                wm_loss, wm_loss_dict = self.update_wm_loss(
+                wm_loss, wm_loss_dict = compute_wm_loss(
                     obs_reconstruction,
                     obs_t,
                     reward_dist,
@@ -353,6 +362,10 @@ class WorldModelTrainer:
                     continue_logits,
                     posterior_dist,
                     prior_logits,
+                    self.B,
+                    self.config,
+                    self.device,
+                    use_pixels=self.use_pixels,
                 )
 
                 # Accumulate individual loss components (tensor addition, no GPU sync)
@@ -385,12 +398,16 @@ class WorldModelTrainer:
                         dreamed_recurrent_states,
                         dreamed_actions_logits,
                         dreamed_actions_sampled,
-                    ) = self.dream_sequence(
+                    ) = dream_sequence(
                         h_z_joined,
                         self.world_model.z_embedding(
                             posterior_dist.probs.view(actual_batch_size, -1)
                         ),
                         self.n_dream_steps,
+                        self.actor,
+                        self.world_model,
+                        self.n_actions,
+                        self.d_hidden,
                     )
                     self.world_model.h_prev = h_prev_backup
 
@@ -414,7 +431,7 @@ class WorldModelTrainer:
                     dreamed_values = torch.sum(dreamed_values_probs * self.B, dim=-1)
                     dreamed_values_list.append(dreamed_values.detach().cpu())
 
-                    lambda_returns = self.calculate_lambda_returns(
+                    lambda_returns = calculate_lambda_returns(
                         dreamed_rewards,
                         dreamed_values,
                         dreamed_continues,
@@ -442,7 +459,7 @@ class WorldModelTrainer:
                     actor_entropy_list.append(entropy.detach().cpu())
 
                     # Decode dreamed states for visualization (every 50 steps)
-                    if self.train_step % 50 == 0:
+                    if self.train_step % 50 == 0 and self.use_pixels:
                         with torch.no_grad():
                             try:
                                 # dreamed_recurrent_states: (n_dream_steps, batch, d_hidden)
@@ -452,23 +469,15 @@ class WorldModelTrainer:
                                     n_steps * batch_sz, -1
                                 )
                                 dreamed_obs = self.world_model.decoder(states_flat)
-                                # Decoder flattens to (n_steps * batch, C, H, W), reshape back
-                                pixels_flat = dreamed_obs[
-                                    "pixels"
-                                ]  # (n_steps * batch, C, H, W)
-                                C, H, W = pixels_flat.shape[1:]
-                                last_dreamed_pixels = torch.sigmoid(
-                                    pixels_flat.view(n_steps, batch_sz, C, H, W)
-                                ).detach()
-                                with open("/tmp/claude/dream_debug.log", "a") as f:
-                                    f.write(
-                                        f"DECODER step={self.train_step}: shape={last_dreamed_pixels.shape}\n"
-                                    )
-                            except Exception as e:
-                                with open("/tmp/claude/dream_debug.log", "a") as f:
-                                    f.write(
-                                        f"DECODER step={self.train_step}: EXCEPTION: {e}\n"
-                                    )
+                                pixels_flat = dreamed_obs.get("pixels")
+                                if pixels_flat is not None:
+                                    # Decoder flattens to (n_steps * batch, C, H, W), reshape back
+                                    C, H, W = pixels_flat.shape[1:]
+                                    last_dreamed_pixels = torch.sigmoid(
+                                        pixels_flat.view(n_steps, batch_sz, C, H, W)
+                                    ).detach()
+                            except Exception:
+                                last_dreamed_pixels = None
 
                 # Accumulate losses
                 if total_wm_loss is None:
@@ -510,6 +519,7 @@ class WorldModelTrainer:
                 if skip_ac_this_step:
                     # WM focus mode: only update WM this step
                     total_wm_loss.backward()
+                    adaptive_gradient_clipping(self.wm_params)
                     self.wm_optimizer.step()
                 else:
                     # Full training: WM + critic + actor
@@ -524,6 +534,10 @@ class WorldModelTrainer:
                     total_wm_loss.backward()
                     total_critic_loss.backward()
                     total_actor_loss.backward()
+                    # AGC: clip gradients based on param/grad norm ratio (DreamerV3)
+                    adaptive_gradient_clipping(self.wm_params)
+                    adaptive_gradient_clipping(self.critic.parameters())
+                    adaptive_gradient_clipping(self.actor.parameters())
                     self.wm_optimizer.step()
                     self.critic_optimizer.step()
                     self.actor_optimizer.step()
@@ -537,6 +551,7 @@ class WorldModelTrainer:
             else:
                 # WM only: warmup phase
                 total_wm_loss.backward()
+                adaptive_gradient_clipping(self.wm_params)
                 self.wm_optimizer.step()
                 # Log warmup progress
                 if self.train_step % 100 == 0:
@@ -619,8 +634,21 @@ class WorldModelTrainer:
                     self.logger.add_scalar(
                         "_key/episode_length", avg_ep_len, self.train_step
                     )
+                    # Early stopping check
+                    if self.early_stop_ep_length > 0 and avg_ep_len >= self.early_stop_ep_length:
+                        print(f"SOLVED! avg_ep_len={avg_ep_len:.1f} >= {self.early_stop_ep_length}")
+                        break
                 self.last_log_time = time.time()
                 self.steps_since_log = 0
+
+            if (
+                self.eval_every > 0
+                and self.eval_episodes > 0
+                and self.mode != "bootstrap"
+                and self.train_step > 0
+                and self.train_step % self.eval_every == 0
+            ):
+                self.evaluate_policy(self.eval_episodes, step=self.train_step)
 
             # Checkpoint every N steps (skip in dry_run)
             if not self.dry_run and self.train_step > 0 and self.train_step % self.checkpoint_interval == 0:
@@ -717,6 +745,97 @@ class WorldModelTrainer:
             self._wm_focus_cooldown_remaining -= 1
 
         return raw_surprise
+
+    def evaluate_policy(self, num_episodes: int, step: int) -> None:
+        """Run deterministic evaluation episodes and log summary metrics."""
+        if num_episodes <= 0:
+            return
+
+        was_training = (self.encoder.training, self.world_model.training, self.actor.training)
+        self.encoder.eval()
+        self.world_model.eval()
+        self.actor.eval()
+
+        h_prev_backup = self.world_model.h_prev.clone()
+
+        env = create_env(self.config.environment.environment_name, use_pixels=self.use_pixels)
+        target_size = self.config.models.encoder.cnn.target_size if self.use_pixels else None
+
+        episode_lengths = []
+        episode_rewards = []
+
+        with torch.no_grad():
+            for _ in range(num_episodes):
+                obs, _info = env.reset()
+                h = torch.zeros(
+                    1,
+                    self.config.models.d_hidden * self.config.models.rnn.n_blocks,
+                    device=self.device,
+                )
+                action_onehot = torch.zeros(1, self.n_actions, device=self.device)
+
+                total_reward = 0.0
+                steps = 0
+
+                while True:
+                    if self.use_pixels:
+                        pixel_obs_t = (
+                            torch.from_numpy(obs["pixels"])
+                            .to(self.device)
+                            .float()
+                            .permute(2, 0, 1)
+                            .unsqueeze(0)
+                        )
+                        if target_size and pixel_obs_t.shape[-2:] != tuple(target_size):
+                            pixel_obs_t = resize_pixels_to_target(pixel_obs_t, target_size)
+                        vec_obs_t = torch.from_numpy(obs["state"]).to(self.device).float().unsqueeze(0)
+                        vec_obs_t = symlog(vec_obs_t)
+                        encoder_input = {"pixels": pixel_obs_t, "state": vec_obs_t}
+                    else:
+                        vec_obs_t = torch.from_numpy(obs).to(self.device).float().unsqueeze(0)
+                        vec_obs_t = symlog(vec_obs_t)
+                        encoder_input = vec_obs_t
+
+                    posterior_logits = self.encoder(encoder_input)
+                    posterior_logits_mixed = unimix_logits(posterior_logits, unimix_ratio=0.01)
+                    z_indices = posterior_logits_mixed.argmax(dim=-1)
+                    z_onehot = F.one_hot(z_indices, num_classes=self.d_hidden // 16).float()
+                    z_sample = z_onehot
+
+                    z_flat = z_sample.view(1, -1)
+                    z_embed = self.world_model.z_embedding(z_flat)
+                    h, _ = self.world_model.step_dynamics(z_embed, action_onehot, h)
+
+                    actor_input = self.world_model.join_h_and_z(h, z_sample)
+                    action_logits = self.actor(actor_input)
+                    action = action_logits.argmax(dim=-1)
+                    action_onehot = F.one_hot(action, num_classes=self.n_actions).float()
+
+                    obs, reward, terminated, truncated, _info = env.step(action.item())
+                    total_reward += float(reward)
+                    steps += 1
+
+                    if terminated or truncated:
+                        break
+
+                episode_lengths.append(steps)
+                episode_rewards.append(total_reward)
+
+        env.close()
+        self.world_model.h_prev = h_prev_backup
+
+        if was_training[0]:
+            self.encoder.train()
+        if was_training[1]:
+            self.world_model.train()
+        if was_training[2]:
+            self.actor.train()
+
+        avg_len = sum(episode_lengths) / len(episode_lengths)
+        avg_reward = sum(episode_rewards) / len(episode_rewards)
+        self.logger.add_scalar("eval/episode_length", avg_len, step)
+        self.logger.add_scalar("eval/episode_reward", avg_reward, step)
+        self.logger.add_scalar("_key/eval_episode_length", avg_len, step)
 
     def should_skip_ac_for_wm_focus(self) -> bool:
         """
@@ -852,200 +971,6 @@ class WorldModelTrainer:
                 f"Resumed full checkpoint from {checkpoint_path} at step {self.train_step}"
             )
             return "full"
-
-    def dream_sequence(self, initial_h, initial_z_embed, num_dream_steps):
-        """
-        Generates a sequence of dreamed states and actions starting from an initial state.
-        """
-        dreamed_recurrent_states = []
-        dreamed_actions_logits = []
-        dreamed_actions_sampled = []
-
-        # Treat the world model rollout as a fixed simulator for actor/critic updates.
-        # We detach the starting state and all subsequent transitions so gradients do
-        # not flow back into the world model when optimizing the policy or value head.
-        dream_h = initial_h.detach()
-        dream_z_embed = initial_z_embed.detach()
-
-        for _ in range(num_dream_steps):
-            dreamed_recurrent_states.append(dream_h.detach())
-            action_logits = self.actor(dream_h.detach())
-            dreamed_actions_logits.append(action_logits)
-
-            # action_dist = torch.distributions.Categorical(logits=action_logits)
-            action_dist = torch.distributions.Categorical(
-                logits=action_logits, validate_args=False
-            )
-            action_sample = action_dist.sample()
-            dreamed_actions_sampled.append(action_sample)
-            action_onehot = F.one_hot(action_sample, num_classes=self.n_actions).float()
-
-            # 1. Step the dynamics model to get the next h and prior_z
-            dream_h_dyn, dream_prior_logits = self.world_model.step_dynamics(
-                dream_z_embed, action_onehot, dream_h
-            )
-
-            # 2. Sample z from the prior with unimix (DreamerV3 Section 4)
-            dream_prior_logits_mixed = unimix_logits(dream_prior_logits, unimix_ratio=0.01)
-            dream_prior_dist = dist.Categorical(
-                logits=dream_prior_logits_mixed, validate_args=False
-            )
-            dream_z_sample_indices = dream_prior_dist.sample()
-            dream_z_sample = F.one_hot(
-                dream_z_sample_indices, num_classes=self.d_hidden // 16
-            ).float()
-
-            # 3. Form the full state (h, z) for the next iteration's predictions
-            dream_h = self.world_model.join_h_and_z(
-                dream_h_dyn, dream_z_sample
-            ).detach()
-            dream_z_embed = self.world_model.z_embedding(
-                dream_z_sample.view(dream_z_sample.size(0), -1)
-            ).detach()
-
-        # Stack the collected dreamed states and actions
-        return (
-            torch.stack(dreamed_recurrent_states),
-            torch.stack(dreamed_actions_logits),
-            torch.stack(dreamed_actions_sampled),
-        )
-
-    def calculate_lambda_returns(
-        self,
-        dreamed_rewards,
-        dreamed_values,
-        dreamed_continues,
-        gamma,
-        lam,
-        num_dream_steps,
-    ):
-        """
-        Calculates lambda-returns for a dreamed trajectory.
-        """
-        lambda_returns = []
-        next_lambda_return = dreamed_values[-1]
-
-        # Iterate backwards through the trajectory
-        for i in reversed(range(num_dream_steps)):
-            reward_t = dreamed_rewards[i]
-            continue_prob_t = torch.sigmoid(dreamed_continues[i])
-            value_t = dreamed_values[i]
-
-            next_lambda_return = reward_t + gamma * continue_prob_t * (
-                (1 - lam) * value_t + lam * next_lambda_return
-            )
-            lambda_returns.append(next_lambda_return)
-
-        # The returns are calculated backwards, so we reverse them
-        return torch.stack(lambda_returns).flip(0)
-
-    def update_wm_loss(
-        self,
-        obs_reconstruction,
-        obs_t,
-        reward_dist,
-        reward_t,
-        terminated_t,
-        continue_logits,
-        posterior_dist,
-        prior_logits,
-    ):
-        # Observation vectors use symlog squared loss
-        obs_pred = symlog(obs_reconstruction["state"])
-        obs_target = symlog(obs_t["state"])  # loss in symlog space
-        beta_dyn = self.config.train.beta_dyn
-        beta_rep = self.config.train.beta_rep
-        beta_pred = self.config.train.beta_pred
-
-        # There are three loss terms:
-        # 1. Prediction loss: -ln p(x|z,h) - ln(p(r|z,h)) + ln(p(c|z,h))
-        # a. dynamics representation
-        # -ln p(x|z,h) is trained with symlog squared loss
-        pred_loss_vector = 1 / 2 * (obs_pred - obs_target) ** 2
-        pred_loss_vector = pred_loss_vector.mean()
-
-        # Pixel loss (only when using pixels)
-        if self.use_pixels and "pixels" in obs_reconstruction and "pixels" in obs_t:
-            pixel_probs = obs_reconstruction["pixels"]
-            pixel_target = obs_t["pixels"]
-            bce_with_logits_loss_fn = nn.BCEWithLogitsLoss()
-            pred_loss_pixel = bce_with_logits_loss_fn(
-                input=pixel_probs, target=pixel_target / 255.0
-            )
-        else:
-            pred_loss_pixel = torch.tensor(0.0, device=self.device)
-
-        reward_target = twohot_encode(reward_t, self.B)
-        # Use soft cross-entropy for soft targets (twohot encoding)
-        # reward_dist should be logits, reward_target is probabilities
-        reward_loss = -torch.sum(
-            reward_target * F.log_softmax(reward_dist, dim=-1), dim=-1
-        ).mean()
-
-        # c. continue predictor
-        # The target is 1 if we continue, 0 if we terminate.
-        continue_target = (1.0 - terminated_t.float()).unsqueeze(-1)
-        pred_loss_continue = nn.BCEWithLogitsLoss()(continue_logits, continue_target)
-
-        # Prediction loss is the sum of the individual losses
-        l_pred = pred_loss_pixel + pred_loss_vector + reward_loss + pred_loss_continue
-
-        # 2. Dynamics loss: max(1,KL) ; KL = KL[sg(q(z|h,x)) || p(z,h)]
-        # 3. Representation Loss: max(1,KL) ; KL = KL[q(z|h,x) || sg(p(z|h))]
-        # Log-likelihoods. Torch accepts logits
-
-        # The "free bits" technique provides a minimum budget for the KL divergence.
-        # prior_dist = dist.Categorical(logits=prior_logits)
-        free_bits = 1.0
-        # l_dyn_raw = dist.kl_divergence(
-        #     dist.Categorical(logits=posterior_dist.logits.detach()),
-        #     prior_dist,
-        # ).mean()
-        # l_rep_raw = dist.kl_divergence(
-        #     posterior_dist,
-        #     dist.Categorical(logits=prior_dist.logits.detach()),
-        # ).mean()
-        # Manual categorical KL to avoid distribution overhead.
-        # Apply unimix to prior_logits for consistency (posterior already has unimix)
-        prior_logits_mixed = unimix_logits(prior_logits, unimix_ratio=0.01)
-        posterior_logits_detached = posterior_dist.logits.detach()
-        log_posterior_detached = F.log_softmax(posterior_logits_detached, dim=-1)
-        log_prior = F.log_softmax(prior_logits_mixed, dim=-1)
-        posterior_probs_detached = log_posterior_detached.exp()
-        l_dyn_raw = (
-            (posterior_probs_detached * (log_posterior_detached - log_prior))
-            .sum(dim=-1)
-            .mean()
-        )
-
-        log_posterior = F.log_softmax(posterior_dist.logits, dim=-1)
-        log_prior_detached = F.log_softmax(prior_logits_mixed.detach(), dim=-1)
-        posterior_probs = log_posterior.exp()
-        l_rep_raw = (
-            (posterior_probs * (log_posterior - log_prior_detached)).sum(dim=-1).mean()
-        )
-
-        # Straight-through estimator for free bits:
-        # Forward: loss = max(free_bits, raw) for reporting/scaling
-        # Backward: gradient flows through raw value (not killed by max)
-        l_dyn = l_dyn_raw + (free_bits - l_dyn_raw).clamp(min=0).detach()
-        l_rep = l_rep_raw + (free_bits - l_rep_raw).clamp(min=0).detach()
-
-        total_loss = beta_pred * l_pred + beta_dyn * l_dyn + beta_rep * l_rep
-
-        # Return both total loss and individual components for logging
-        loss_dict = {
-            "prediction_pixel": pred_loss_pixel,
-            "prediction_vector": pred_loss_vector,
-            "prediction_reward": reward_loss,
-            "prediction_continue": pred_loss_continue,
-            "dynamics": l_dyn,
-            "representation": l_rep,
-            "kl_dynamics_raw": l_dyn_raw,
-            "kl_representation_raw": l_rep_raw,
-        }
-
-        return total_loss, loss_dict
 
     def log_metrics(
         self,

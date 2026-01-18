@@ -114,6 +114,10 @@ class TrainConfig:
     surprise_wm_focus_duration: int = 20
     surprise_wm_focus_cooldown: int = 50  # steps after focus before re-entry allowed
 
+    # Evaluation (deterministic policy)
+    eval_every: int = 1000
+    eval_episodes: int = 5
+
     # Checkpointing
     checkpoint_interval: int = 5000
 
@@ -194,6 +198,10 @@ class GeneralAdapter:
     @property
     def dry_run(self):
         return self._cfg.dry_run
+
+    @property
+    def experiment_name(self):
+        return getattr(self._cfg, "experiment_name", None)
 
 
 class EnvironmentAdapter:
@@ -426,6 +434,14 @@ class TrainAdapter:
     @property
     def surprise_wm_focus_cooldown(self):
         return self._cfg.surprise_wm_focus_cooldown
+
+    @property
+    def eval_every(self):
+        return self._cfg.eval_every
+
+    @property
+    def eval_episodes(self):
+        return self._cfg.eval_episodes
 
     @property
     def checkpoint_interval(self):
