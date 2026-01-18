@@ -131,7 +131,9 @@ class WorldModelTrainer:
         self.surprise_wm_focus_threshold = config.train.surprise_wm_focus_threshold
         self.surprise_wm_focus_ratio = config.train.surprise_wm_focus_ratio
         self.surprise_wm_focus_duration = config.train.surprise_wm_focus_duration
+        self.surprise_wm_focus_cooldown = config.train.surprise_wm_focus_cooldown
         self._wm_focus_steps_remaining = 0  # Countdown for focus mode
+        self._wm_focus_cooldown_remaining = 0  # Cooldown after focus (no re-entry)
         self._wm_focus_ac_counter = 0  # Counter for AC step ratio
         self._ac_training_started = False  # Track if we've entered AC training phase
 
@@ -673,6 +675,7 @@ class WorldModelTrainer:
         if should_train and not self._ac_training_started:
             self._ac_training_started = True
             self._wm_focus_steps_remaining = 0
+            self._wm_focus_cooldown_remaining = 0
             self._wm_focus_ac_counter = 0
             self._smoothed_surprise = 0.0
 
@@ -701,10 +704,17 @@ class WorldModelTrainer:
         decayed = self._smoothed_surprise * self.surprise_smooth_beta
         self._smoothed_surprise = max(decayed, positive_surprise)
 
-        # Trigger WM focus mode if surprise exceeds threshold
+        # Trigger WM focus mode if surprise exceeds threshold (respecting cooldown)
         if positive_surprise > self.surprise_wm_focus_threshold:
-            self._wm_focus_steps_remaining = self.surprise_wm_focus_duration
-            self._wm_focus_ac_counter = 0  # Reset counter
+            if self._wm_focus_cooldown_remaining <= 0:
+                # Not in cooldown, can enter focus
+                self._wm_focus_steps_remaining = self.surprise_wm_focus_duration
+                self._wm_focus_ac_counter = 0  # Reset counter
+            # If in cooldown, LR scaling still applies but no focus mode
+
+        # Tick cooldown
+        if self._wm_focus_cooldown_remaining > 0:
+            self._wm_focus_cooldown_remaining -= 1
 
         return raw_surprise
 
@@ -718,6 +728,10 @@ class WorldModelTrainer:
 
         # Decrement focus countdown
         self._wm_focus_steps_remaining -= 1
+
+        # Start cooldown when exiting focus mode
+        if self._wm_focus_steps_remaining == 0:
+            self._wm_focus_cooldown_remaining = self.surprise_wm_focus_cooldown
 
         # Check if this is an AC step (every Nth step)
         self._wm_focus_ac_counter += 1
@@ -1189,8 +1203,9 @@ class WorldModelTrainer:
                     self.logger.add_scalar("_key/delta_lr", 1.0 - lr_scale, step)
                     # Log smoothed vs raw surprise for debugging
                     self.logger.add_scalar("wm/surprise/smoothed", self._smoothed_surprise, step)
-                    # Log WM focus mode (1 = in focus, 0 = normal)
+                    # Log WM focus mode (1 = in focus, 0 = normal) and cooldown
                     self.logger.add_scalar("ac/wm_focus_active", float(self._wm_focus_steps_remaining > 0), step)
+                    self.logger.add_scalar("ac/wm_focus_cooldown", float(self._wm_focus_cooldown_remaining > 0), step)
 
                 # World model sub-component losses (grouped by module)
                 # Decoder losses (reconstruction)

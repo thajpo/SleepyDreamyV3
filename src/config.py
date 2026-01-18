@@ -112,6 +112,7 @@ class TrainConfig:
     surprise_wm_focus_threshold: float = 0.05
     surprise_wm_focus_ratio: int = 4
     surprise_wm_focus_duration: int = 20
+    surprise_wm_focus_cooldown: int = 50  # steps after focus before re-entry allowed
 
     # Checkpointing
     checkpoint_interval: int = 5000
@@ -421,6 +422,10 @@ class TrainAdapter:
     @property
     def surprise_wm_focus_duration(self):
         return self._cfg.surprise_wm_focus_duration
+
+    @property
+    def surprise_wm_focus_cooldown(self):
+        return self._cfg.surprise_wm_focus_cooldown
 
     @property
     def checkpoint_interval(self):

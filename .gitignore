@@ -23,6 +23,6 @@ DreamerPaper.pdf
 *.h5
 *.pt
 
-# TensorBoard logs and Hydra outputs
+# MLflow tracking and Hydra outputs
 runs/
-outputs/
+outputs/saved_models/
