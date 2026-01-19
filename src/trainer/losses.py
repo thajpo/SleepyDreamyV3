@@ -158,7 +158,10 @@ def compute_actor_critic_losses(
     dreamed_values_logits_flat = dreamed_values_logits.view(
         -1, dreamed_values_logits.size(-1)
     )
-    lambda_returns_flat = lambda_returns.reshape(-1)
+    # Detach lambda_returns: critic targets should not have gradients flowing back
+    # through dreamed_values (which is part of lambda_returns). This matches
+    # DreamerV3's use of sg() (stop_gradient) on value targets.
+    lambda_returns_flat = lambda_returns.detach().reshape(-1)
     critic_targets = twohot_encode(lambda_returns_flat, B)
 
     # Use soft cross-entropy for soft targets (twohot encoding)
