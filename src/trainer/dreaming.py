@@ -8,7 +8,7 @@ from .math_utils import unimix_logits
 
 
 def dream_sequence(
-    initial_h,
+    initial_h_z,
     initial_z_embed,
     num_dream_steps,
     actor,
@@ -23,7 +23,7 @@ def dream_sequence(
     Gradients do not flow back into the world model when optimizing the policy or value head.
 
     Args:
-        initial_h: Initial recurrent state (batch, h_dim)
+        initial_h_z: Initial joined state (batch, h_dim + z_dim) where h_dim = n_blocks * d_hidden
         initial_z_embed: Initial z embedding (batch, z_embed_dim)
         num_dream_steps: Number of imagination steps
         actor: Actor network for action selection
@@ -33,7 +33,7 @@ def dream_sequence(
 
     Returns:
         Tuple of:
-            - dreamed_recurrent_states: (num_steps, batch, h_dim)
+            - dreamed_recurrent_states: (num_steps, batch, h_z_dim) - full joined states
             - dreamed_actions_logits: (num_steps, batch, n_actions)
             - dreamed_actions_sampled: (num_steps, batch)
     """
@@ -44,12 +44,18 @@ def dream_sequence(
     # Treat the world model rollout as a fixed simulator for actor/critic updates.
     # We detach the starting state and all subsequent transitions so gradients do
     # not flow back into the world model when optimizing the policy or value head.
-    dream_h = initial_h.detach()
+    #
+    # Track two state representations:
+    # - dream_h_z: joined (h, z) state for actor input (h_dim + z_dim)
+    # - dream_h_state: just h for step_dynamics (h_dim = n_blocks * d_hidden)
+    h_dim = world_model.n_blocks * d_hidden
+    dream_h_z = initial_h_z.detach()
+    dream_h_state = dream_h_z[:, :h_dim]  # Extract h from joined state
     dream_z_embed = initial_z_embed.detach()
 
     for _ in range(num_dream_steps):
-        dreamed_recurrent_states.append(dream_h.detach())
-        action_logits = actor(dream_h.detach())
+        dreamed_recurrent_states.append(dream_h_z.detach())
+        action_logits = actor(dream_h_z.detach())
         dreamed_actions_logits.append(action_logits)
 
         action_dist = dist.Categorical(logits=action_logits, validate_args=False)
@@ -59,7 +65,7 @@ def dream_sequence(
 
         # 1. Step the dynamics model to get the next h and prior_z
         dream_h_dyn, dream_prior_logits = world_model.step_dynamics(
-            dream_z_embed, action_onehot, dream_h
+            dream_z_embed, action_onehot, dream_h_state
         )
 
         # 2. Sample z from the prior with unimix (DreamerV3 Section 4)
@@ -72,8 +78,9 @@ def dream_sequence(
             dream_z_sample_indices, num_classes=d_hidden // 16
         ).float()
 
-        # 3. Form the full state (h, z) for the next iteration's predictions
-        dream_h = world_model.join_h_and_z(
+        # 3. Update both state representations for next iteration
+        dream_h_state = dream_h_dyn.detach()
+        dream_h_z = world_model.join_h_and_z(
             dream_h_dyn, dream_z_sample
         ).detach()
         dream_z_embed = world_model.z_embedding(
