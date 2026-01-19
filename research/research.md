@@ -373,3 +373,137 @@ Initial WM training. Expect WM to converge for cartpole. Will investigate AC lat
   | Asymmetric LR | WM 1e-4, Actor 3e-5 |
 
 - **Next Steps**: Test with βrep=0.1 and unimix fixes before adding adaptive mechanisms
+
+### 01-18-26 Baseline Run Oscillation (gated_seq32 sweep)
+- **Setup**: WM checkpoint from 5k bootstrap, dreamer mode, 25k steps, batch_size=16
+- **Experiment**: `+experiment=gated_seq32` (surprise_scale_ac_lr=true, seq_len=32)
+
+- **Observed Behavior** (episode length trajectory):
+  | Step Range | Ep Length | Notes |
+  |------------|-----------|-------|
+  | 0-4000 | 24→400 | Fast learning, peak |
+  | 4000-6000 | 400→125 | First collapse |
+  | 6000-8000 | 125 plateau | Stuck for ~2k steps |
+  | 8000-13000 | 125→300 | Recovery |
+  | 13000-16000 | 300→40 | Second collapse (worse) |
+  | 16000-17200 | 40→112 | Partial recovery |
+
+- **Analysis**:
+  - Oscillatory pattern suggests AC instability, not permanent collapse
+  - Surprise-gated mechanisms never activated (surprise < 0.05 threshold)
+  - WM loss stable (~1.78), so WM not the issue
+  - Actor entropy declined but not catastrophically (~0.69→0.32)
+
+- **Likely Causes**:
+  1. **Actor LR too high** (4e-5): Policy overshoots good regions
+  2. **Entropy coef too low** (3e-4): Can't explore out of bad regions
+  3. **Dream steps too long** (15): Compounding WM errors in imagination
+
+- **Parameters to Tune**:
+  | Param | Current | Try |
+  |-------|---------|-----|
+  | actor_lr | 4e-5 | 2e-5 |
+  | actor_entropy_coef | 3e-4 | 1e-3 |
+  | num_dream_steps | 15 | 10 |
+  | surprise_wm_focus_threshold | 0.05 | 0.02 |
+
+- **Decision**: Kill run, retry with adjusted hyperparameters
+
+### 01-18-26 tuned_v1 Failure - WM Focus Always Active
+- **Problem**: After GRU parallelization + dream_sequence fix, set `surprise_wm_focus_threshold=0.02`
+- **Result**: WM focus mode was **always active** (surprise constantly > 0.02), blocking ALL AC training
+- **Symptom**: Actor/critic loss = 0.0, episode length stuck at ~21 (random policy)
+- **Fix**: Raised threshold to 0.10 in tuned_v2
+
+### 01-18-26 tuned_v2 - Working
+- **Config**: actor_lr=2e-5, entropy=1e-3, dream_steps=10, surprise_threshold=0.10
+- **Result**: AC training working, episode length climbing (62→68 by step 5200)
+- **Monitoring**: MLflow experiment `tuned_v2`
+
+### 01-19-26 Training Collapse Investigation (tuned_v2 continuation)
+- **Setup**: Resumed tuned_v2 checkpoint at step 15k, trained to 115k steps
+- **Bug found**: `mode=dreamer` always sets `reset_ac=True`, so resumed from step 0 with fresh AC (not 15k)
+
+- **Observed Behavior**:
+  | Step | Eval Ep Length | Training Ep Length | Critic Value |
+  |------|----------------|-------------------|--------------|
+  | 7,000 | **500** (solved!) | 489 | 5.0 |
+  | 8,000 | 500 | 488 | 5.0 |
+  | 21,000 | 500 | ~400 | 5.2 |
+  | 25,000 | ~200 | ~150 | 5.4 |
+  | 35,000 | ~100 | ~100 | 5.5 |
+  | 59,000 | ~98 | ~97 | 5.5 |
+
+- **Key Insight**: Agent **solved CartPole** (500 steps eval) from step 7k-21k, then **collapsed to ~100 steps** while **critic values kept increasing**.
+
+- **Root Cause Analysis**:
+  1. Critic thinks performance is improving (value 5.0 → 5.5)
+  2. Real performance is collapsing (500 → 100 steps)
+  3. WM loss stable (~1.6) - WM fits replay buffer fine
+  4. Actor loss increasing (0.1 → 0.3) - actor being pushed away from good policy
+
+- **Diagnosis**: Actor is exploiting the world model
+  - In model-based RL, actor optimizes against imagined rewards from WM
+  - Actor found latent trajectories where WM's reward head predicts high rewards
+  - These trajectories are **out-of-distribution** - WM never saw them in real data
+  - WM extrapolates optimistically on OOD inputs → actor exploits this
+  - Critic learns from same faulty imagined rewards → can't keep actor in check
+  - Both AC components are "drinking from the same poisoned well"
+
+- **Why critic can't prevent exploitation**:
+  - In model-free AC: critic learns from REAL rewards → provides ground truth
+  - In Dreamer: critic learns from IMAGINED rewards → fooled by same WM errors
+  - Critic is trained to match WM's predictions, not reality
+
+- **Early stopping bug**: Was checking training ep length (peaked at 489, below 500 threshold) instead of eval ep length (hit 500 multiple times). Fixed to use eval-based early stopping.
+
+- **Open Questions**:
+  1. Is this an implementation bug or fundamental model-based RL challenge?
+  2. DreamerV3 solves harder tasks - why do we collapse on CartPole?
+  3. Potential fixes: reward ensemble, shorter dreams, KL penalty on imagination, freeze WM after solving
+
+- **Status**: Investigating potential implementation issues before adding complexity
+
+### 01-19-26 Hypothesis: Missing stop_gradient on critic targets
+- **Observation**: Official DreamerV3 uses `sg()` (stop_gradient) on lambda returns when computing critic loss
+- **Our code**: Did not detach lambda_returns before using as critic targets
+- **Potential issue**: Circular gradient flow
+  - lambda_returns contains dreamed_values (critic output)
+  - Without detach: critic_loss -> critic_targets -> lambda_returns -> dreamed_values -> critic
+  - Could allow critic to "cheat" by adjusting both predictions AND targets
+- **Fix applied**: `lambda_returns.detach()` in `compute_actor_critic_losses()`
+- **CAUTION**: This is hypothesis, not proven cause. Need experiment to verify.
+
+---
+
+## Next Experiment Queue
+
+### Experiment: Double AC Learning Rate (detach fix included)
+- **Hypothesis**: Higher LR will show whether detach fix prevents collapse, or if collapse still occurs faster
+- **Baseline**: tuned_v2 config (actor_lr=2e-5, critic_lr=4e-5)
+- **Change**: Double LR (actor_lr=4e-5, critic_lr=8e-5)
+- **WM Checkpoint**: `/home/j/Projects/SleepyDreamyV3/runs/01-18_105307/checkpoints/wm_checkpoint_step_5000.pt`
+- **Steps**: 25k (should be enough to see collapse if it happens)
+
+**Run command**:
+```bash
+uv run python -m src.train \
+  mode=dreamer \
+  checkpoint=/home/j/Projects/SleepyDreamyV3/runs/01-18_105307/checkpoints/wm_checkpoint_step_5000.pt \
+  general.experiment_name=double_lr_detach_test \
+  train.max_steps=25000 \
+  train.actor_lr=4e-5 \
+  train.critic_lr=8e-5 \
+  train.num_dream_steps=10 \
+  train.actor_entropy_coef=0.001 \
+  train.surprise_wm_focus_threshold=0.1
+```
+
+**Success criteria**:
+- If detach fix works: Should NOT see value drift (critic values stable) even at higher LR
+- If collapse still happens: Detach was not the root cause, need different hypothesis
+
+**Metrics to watch**:
+- `_key/eval_episode_length`: Should improve and stay stable (not collapse)
+- `dream.critic_value.mean`: Should NOT continuously increase while performance drops
+- `loss.actor.total`: Should NOT continuously increase
