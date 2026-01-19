@@ -634,10 +634,6 @@ class WorldModelTrainer:
                     self.logger.add_scalar(
                         "_key/episode_length", avg_ep_len, self.train_step
                     )
-                    # Early stopping check
-                    if self.early_stop_ep_length > 0 and avg_ep_len >= self.early_stop_ep_length:
-                        print(f"SOLVED! avg_ep_len={avg_ep_len:.1f} >= {self.early_stop_ep_length}")
-                        break
                 self.last_log_time = time.time()
                 self.steps_since_log = 0
 
@@ -648,7 +644,11 @@ class WorldModelTrainer:
                 and self.train_step > 0
                 and self.train_step % self.eval_every == 0
             ):
-                self.evaluate_policy(self.eval_episodes, step=self.train_step)
+                eval_avg_len = self.evaluate_policy(self.eval_episodes, step=self.train_step)
+                # Early stopping based on eval (deterministic policy)
+                if self.early_stop_ep_length > 0 and eval_avg_len >= self.early_stop_ep_length:
+                    print(f"SOLVED! eval_avg_len={eval_avg_len:.1f} >= {self.early_stop_ep_length}")
+                    break
 
             # Checkpoint every N steps (skip in dry_run)
             if not self.dry_run and self.train_step > 0 and self.train_step % self.checkpoint_interval == 0:
@@ -746,10 +746,14 @@ class WorldModelTrainer:
 
         return raw_surprise
 
-    def evaluate_policy(self, num_episodes: int, step: int) -> None:
-        """Run deterministic evaluation episodes and log summary metrics."""
+    def evaluate_policy(self, num_episodes: int, step: int) -> float:
+        """Run deterministic evaluation episodes and log summary metrics.
+
+        Returns:
+            Average episode length across evaluation episodes.
+        """
         if num_episodes <= 0:
-            return
+            return 0.0
 
         was_training = (self.encoder.training, self.world_model.training, self.actor.training)
         self.encoder.eval()
@@ -836,6 +840,8 @@ class WorldModelTrainer:
         self.logger.add_scalar("eval/episode_length", avg_len, step)
         self.logger.add_scalar("eval/episode_reward", avg_reward, step)
         self.logger.add_scalar("_key/eval_episode_length", avg_len, step)
+
+        return avg_len
 
     def should_skip_ac_for_wm_focus(self) -> bool:
         """
@@ -939,9 +945,15 @@ class WorldModelTrainer:
             checkpoint["world_model"], strict=False
         )
 
-        # Restore WM optimizer if present
+        # Restore WM optimizer if present (skip if architecture changed)
         if "wm_optimizer" in checkpoint:
-            self.wm_optimizer.load_state_dict(checkpoint["wm_optimizer"])
+            try:
+                self.wm_optimizer.load_state_dict(checkpoint["wm_optimizer"])
+            except ValueError as e:
+                if "doesn't match the size" in str(e):
+                    print(f"Warning: Skipping WM optimizer state (architecture changed)")
+                else:
+                    raise
 
         # Handle actor/critic based on explicit user intent
         has_ac = "actor" in checkpoint
