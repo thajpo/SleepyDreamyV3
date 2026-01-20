@@ -474,36 +474,77 @@ Initial WM training. Expect WM to converge for cartpole. Will investigate AC lat
 - **Fix applied**: `lambda_returns.detach()` in `compute_actor_critic_losses()`
 - **CAUTION**: This is hypothesis, not proven cause. Need experiment to verify.
 
+### 01-20-26 Run: double_lr_detach_test (d_hidden=64)
+- **Hypothesis**: `lambda_returns.detach()` fix prevents critic value drift and collapse
+- **Config**: actor_lr=4e-5, critic_lr=8e-5, d_hidden=64, 25k steps
+- **Checkpoint**: WM from `01-18_105307` (5k bootstrap)
+
+**Results**:
+
+| Step | Eval Ep Len | Critic Value | Actor Loss | KL Dyn |
+|------|-------------|--------------|------------|--------|
+| 10k | **500** | 141 | 0.005 | 0.004 |
+| 15k | **500** | 142 | 0.036 | 0.010 |
+| 16k | **500** | 143 | 0.107 | **0.017** |
+| 20k | **500** | 147 | 0.176 | 0.006 |
+| 21k | 363 | 147 | 0.136 | 0.007 |
+| 25k | 157 | 147 | **0.214** | 0.006 |
+
+**Observations**:
+- Solved at 10k, maintained 500 for 10k steps (10k-20k)
+- Collapse at 21k: 500 → 157
+- KL dynamics spiked at 14.5k-16k (0.004 → 0.017) - prior/posterior divergence
+- Actor loss rose BEFORE collapse (started at 13k)
+- Critic values saturated at ~147, stayed flat during collapse
+- Dream rewards constant at ~1.0 throughout (WM thinks agent always succeeds)
+
+**Conclusion**: Detach fix didn't prevent collapse. Actor loss rising is a leading indicator. Critic saturation at max value is a failure mode.
+
+---
+
+### 01-20-26 Run: large_model_256 (d_hidden=256)
+- **Hypothesis**: Larger model capacity improves stability and prevents collapse
+- **Config**: actor_lr=4e-5, critic_lr=8e-5, d_hidden=256, 30k steps (from scratch)
+
+**Results**:
+
+| Step | Eval Ep Len | Critic Value | Actor Loss |
+|------|-------------|--------------|------------|
+| 9k | **500** | 105 | 0.003 |
+| 14k | **500** | 120 | 0.004 |
+| 17k | 209 | 95 | 0.003 |
+| 21k | 129 | 90 | 0.002 |
+| 23k | **421** | 116 | 0.004 |
+| 28k | **486** | 107 | 0.005 |
+| 30k | **453** | 100 | 0.006 |
+
+**Comparison (d_hidden 64 vs 256)**:
+
+| Metric | d_hidden=64 | d_hidden=256 |
+|--------|-------------|--------------|
+| Solved (500) | Steps 10k-20k | Steps 9k-14k |
+| Collapse bottom | 157 (no recovery) | 129 (recovers!) |
+| Final eval | 157 | **453** |
+| Actor loss (end) | **0.21** | 0.006 |
+| Critic value (end) | 147 (saturated) | 90-130 (oscillating) |
+| KL dyn max spike | 0.017 | 0.013 |
+
+**Key Finding**: Both models collapse, but **larger model recovers**.
+
+**Why larger model recovers**:
+1. Critic doesn't saturate - oscillates 90-130 instead of stuck at 147
+2. Actor loss stays low (0.006 vs 0.21) - not pushed away from good policy
+3. More diverse latent representations - doesn't get stuck in local minimum
+4. Smaller KL spikes - dreams stay closer to reality
+
+**Conclusion**: Model capacity IS a factor in stability. Larger model doesn't prevent collapse but enables recovery. The d_hidden=64 critic saturating at 147 is a "trapped" state the larger model avoids.
+
 ---
 
 ## Next Experiment Queue
 
-### Experiment: Double AC Learning Rate (detach fix included)
-- **Hypothesis**: Higher LR will show whether detach fix prevents collapse, or if collapse still occurs faster
-- **Baseline**: tuned_v2 config (actor_lr=2e-5, critic_lr=4e-5)
-- **Change**: Double LR (actor_lr=4e-5, critic_lr=8e-5)
-- **WM Checkpoint**: `/home/j/Projects/SleepyDreamyV3/runs/01-18_105307/checkpoints/wm_checkpoint_step_5000.pt`
-- **Steps**: 25k (should be enough to see collapse if it happens)
-
-**Run command**:
-```bash
-uv run python -m src.train \
-  mode=dreamer \
-  checkpoint=/home/j/Projects/SleepyDreamyV3/runs/01-18_105307/checkpoints/wm_checkpoint_step_5000.pt \
-  general.experiment_name=double_lr_detach_test \
-  train.max_steps=25000 \
-  train.actor_lr=4e-5 \
-  train.critic_lr=8e-5 \
-  train.num_dream_steps=10 \
-  train.actor_entropy_coef=0.001 \
-  train.surprise_wm_focus_threshold=0.1
-```
-
-**Success criteria**:
-- If detach fix works: Should NOT see value drift (critic values stable) even at higher LR
-- If collapse still happens: Detach was not the root cause, need different hypothesis
-
-**Metrics to watch**:
-- `_key/eval_episode_length`: Should improve and stay stable (not collapse)
-- `dream.critic_value.mean`: Should NOT continuously increase while performance drops
-- `loss.actor.total`: Should NOT continuously increase
+### Potential directions:
+1. **Early stopping on KL spike**: Stop/pause AC training when KL dyn > threshold
+2. **Adaptive dream horizon**: Shorten dreams when KL rises
+3. **Smaller replay buffer**: Faster WM adaptation to policy changes
+4. **Critic capacity study**: Is critic saturation the root cause? Try larger critic only
