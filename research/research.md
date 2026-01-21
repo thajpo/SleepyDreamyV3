@@ -541,10 +541,54 @@ Initial WM training. Expect WM to converge for cartpole. Will investigate AC lat
 
 ---
 
+### 01-20-26 Run: wm_ac_ratio_4 (4:1 WM:AC update ratio)
+- **Hypothesis**: More WM updates per AC update prevents WM-AC lag and collapse
+- **Config**: d_hidden=256, wm_ac_ratio=4, actor_lr=4e-5, critic_lr=8e-5, 30k steps
+- **Implementation**: Added `train.wm_ac_ratio` config - AC only updates every N WM steps
+
+**Results**:
+
+| Step | Eval Ep Len | Critic Value | Actor Loss |
+|------|-------------|--------------|------------|
+| 7k | **488** (peak) | 95 | 0.004 |
+| 10k | 385 | 90 | 0.005 |
+| 15k | **259** (low) | 78 | 0.004 |
+| 17k | 364 | 100 | 0.006 |
+| 18k | 261 | 110 | 0.007 |
+
+**Comparison across all runs**:
+
+| Config | Peak | Collapse Low | Final | Actor Loss | Pattern |
+|--------|------|--------------|-------|------------|---------|
+| d=64, ratio=1 | 500 | **129** | 157 | **0.21** | Collapse, no recovery |
+| d=256, ratio=1 | 500 | **129** | 453 | 0.006 | Collapse, then recovery |
+| d=256, ratio=4 | 488 | **259** | ~300 | 0.006 | Oscillating, no catastrophic collapse |
+
+**Key Findings**:
+
+1. **4:1 ratio prevents catastrophic collapse** - lowest was 259 vs 129 in ratio=1 runs
+2. **Convergence is slower** - never reached 500 (ratio=1 hit 500 by 9-10k)
+3. **Still oscillates** - not monotonically improving, eval is "jagged"
+4. **Actor loss stays low** - 0.004-0.007 throughout (good sign)
+5. **Critic doesn't saturate** - oscillates 75-118 (healthy range)
+
+**Interpretation**:
+
+The 4:1 ratio successfully keeps WM ahead of AC, preventing the "WM exploitation" failure mode. But AC is still somewhat unstable, causing oscillation rather than smooth convergence. The stability/speed tradeoff is real:
+- ratio=1: Fast but unstable (collapses)
+- ratio=4: Stable but slow (oscillates without collapse)
+
+**Next hypotheses**:
+1. Lower actor LR (2e-5) with ratio=4 might reduce oscillation
+2. Higher ratio (8:1) might further stabilize
+3. The oscillation might be fundamental to model-based RL exploration
+
+---
+
 ## Next Experiment Queue
 
 ### Potential directions:
-1. **Early stopping on KL spike**: Stop/pause AC training when KL dyn > threshold
-2. **Adaptive dream horizon**: Shorten dreams when KL rises
-3. **Smaller replay buffer**: Faster WM adaptation to policy changes
-4. **Critic capacity study**: Is critic saturation the root cause? Try larger critic only
+1. **Lower actor LR + ratio=4**: actor_lr=2e-5 to reduce oscillation amplitude
+2. **Higher ratio (8:1)**: Even more WM-dominant training
+3. **Early stopping on KL spike**: Pause AC when dreams diverge
+4. **Adaptive ratio**: Start with high ratio, decrease as WM stabilizes

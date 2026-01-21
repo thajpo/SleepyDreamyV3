@@ -1,0 +1,2 @@
+- checkpoint=/home/j/Projects/SleepyDreamyV3/runs/01-18_142647/checkpoints/checkpoint_step_15000.pt
+- train.max_steps=115000

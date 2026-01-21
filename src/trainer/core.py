@@ -138,6 +138,10 @@ class WorldModelTrainer:
         self._wm_focus_cooldown_remaining = 0  # Cooldown after focus (no re-entry)
         self._wm_focus_ac_counter = 0  # Counter for AC step ratio
 
+        # WM:AC update ratio (e.g., 4 = do 4 WM updates per 1 AC update)
+        self.wm_ac_ratio = config.train.wm_ac_ratio
+        self._wm_ac_counter = 0  # Counts WM steps since last AC step
+
         # Deterministic evaluation
         self.eval_every = config.train.eval_every
         self.eval_episodes = config.train.eval_episodes
@@ -390,7 +394,15 @@ class WorldModelTrainer:
                 # --- Dream Sequence for Actor-Critic ---
                 # Check WM focus skip BEFORE dream (uses previous step's surprise)
                 # This avoids computing dream when we'll skip AC anyway
-                skip_ac_this_step = self.should_skip_ac_for_wm_focus() if self.should_train_ac() else True
+                skip_ac_this_step = True
+                if self.should_train_ac():
+                    # Check WM:AC ratio first (most common skip reason)
+                    self._wm_ac_counter += 1
+                    if self._wm_ac_counter >= self.wm_ac_ratio:
+                        self._wm_ac_counter = 0
+                        # Then check WM focus mode (surprise-triggered)
+                        skip_ac_this_step = self.should_skip_ac_for_wm_focus()
+                    # else: skip_ac_this_step stays True (not enough WM steps yet)
 
                 if self.should_train_ac() and not skip_ac_this_step:
                     h_prev_backup = self.world_model.h_prev.clone()
@@ -705,7 +717,10 @@ class WorldModelTrainer:
             self._wm_focus_steps_remaining = 0
             self._wm_focus_cooldown_remaining = 0
             self._wm_focus_ac_counter = 0
+            self._wm_ac_counter = 0
             self._smoothed_surprise = 0.0
+            if self.wm_ac_ratio > 1:
+                print(f"AC training started with WM:AC ratio = {self.wm_ac_ratio}:1")
 
         return should_train
 

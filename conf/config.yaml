@@ -74,6 +74,7 @@ train:
   # Training phases
   bootstrap_steps: 5000
   actor_warmup_steps: 5000
+  wm_ac_ratio: 1  # WM updates per AC update (e.g., 4 = train WM 4x more than AC)
 
   # Surprise-scaled AC learning rate
   # When enabled, AC learning rate is scaled by 1/(1 + surprise * k)

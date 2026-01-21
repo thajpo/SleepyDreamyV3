@@ -103,6 +103,7 @@ class TrainConfig:
     # Training phases
     bootstrap_steps: int = 5000
     actor_warmup_steps: int = 5000
+    wm_ac_ratio: int = 1  # WM updates per AC update (e.g., 4 = train WM 4x more than AC)
 
     # Surprise-scaled AC learning rate
     surprise_scale_ac_lr: bool = True
@@ -390,6 +391,10 @@ class TrainAdapter:
     @property
     def actor_warmup_steps(self):
         return self._cfg.actor_warmup_steps
+
+    @property
+    def wm_ac_ratio(self):
+        return self._cfg.wm_ac_ratio
 
     @property
     def num_collectors(self):

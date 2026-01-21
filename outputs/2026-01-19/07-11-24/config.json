@@ -1,0 +1,79 @@
+{
+  "general": {
+    "device": "auto",
+    "use_pixels": false,
+    "profile": false,
+    "compile_models": false,
+    "debug_memory": false,
+    "dry_run": false,
+    "experiment_name": "tuned_v2"
+  },
+  "environment": {
+    "name": "CartPole-v1",
+    "n_actions": 2,
+    "n_observations": 4
+  },
+  "models": {
+    "d_hidden": 64,
+    "encoder": {
+      "cnn": {
+        "stride": 2,
+        "kernel_size": 2,
+        "padding": 0,
+        "input_channels": 3,
+        "num_layers": 4,
+        "final_feature_size": 4,
+        "target_size": [
+          64,
+          64
+        ]
+      },
+      "mlp": {
+        "hidden_dim_ratio": 8,
+        "n_layers": 3,
+        "latent_categories": 16
+      }
+    },
+    "rnn": {
+      "n_blocks": 4
+    }
+  },
+  "train": {
+    "max_steps": 115000,
+    "batch_size": 16,
+    "sequence_length": 32,
+    "wm_lr": 4e-05,
+    "actor_lr": 2e-05,
+    "critic_lr": 4e-05,
+    "weight_decay": 1e-06,
+    "gamma": 0.997,
+    "lam": 0.95,
+    "num_dream_steps": 10,
+    "actor_entropy_coef": 0.001,
+    "normalize_advantages": true,
+    "beta_dyn": 1.0,
+    "beta_rep": 0.1,
+    "beta_pred": 1.0,
+    "b_start": -5,
+    "b_end": 6,
+    "bootstrap_steps": 5000,
+    "actor_warmup_steps": 5000,
+    "surprise_scale_ac_lr": true,
+    "surprise_lr_scale_k": 10.0,
+    "surprise_ema_beta": 0.99,
+    "surprise_wm_focus_threshold": 0.1,
+    "surprise_wm_focus_ratio": 4,
+    "surprise_wm_focus_duration": 20,
+    "surprise_wm_focus_cooldown": 50,
+    "early_stop_ep_length": 500,
+    "eval_every": 1000,
+    "eval_episodes": 5,
+    "checkpoint_interval": 5000,
+    "num_collectors": 1,
+    "replay_buffer_size": 1000,
+    "min_buffer_episodes": 64,
+    "steps_per_weight_sync": 5
+  },
+  "mode": "dreamer",
+  "checkpoint": "/home/j/Projects/SleepyDreamyV3/runs/01-18_142647/checkpoints/checkpoint_step_15000.pt"
+}

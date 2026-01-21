@@ -1,0 +1,6 @@
+artifact_location: file:///home/j/Projects/SleepyDreamyV3/outputs/2026-01-19/mlruns/896139674862867909
+creation_time: 1768824691824
+experiment_id: '896139674862867909'
+last_update_time: 1768824691824
+lifecycle_stage: active
+name: tuned_v2
