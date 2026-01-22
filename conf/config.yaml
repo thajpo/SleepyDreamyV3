@@ -82,8 +82,9 @@ train:
 
   # Cosine WM:AC ratio schedule (high ratio early, low ratio late)
   wm_ac_ratio_cosine: false
-  wm_ac_ratio_max: 8  # Starting ratio
-  wm_ac_ratio_min: 2  # Ending ratio
+  wm_ac_ratio_max: 8  # High end of range
+  wm_ac_ratio_min: 2  # Low end of range
+  wm_ac_ratio_invert: false  # If true: start low (2→8), if false: start high (8→2)
 
   # Surprise-scaled AC learning rate
   # When enabled, AC learning rate is scaled by 1/(1 + surprise * k)

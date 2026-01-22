@@ -150,6 +150,7 @@ class WorldModelTrainer:
         self.wm_ac_ratio_cosine = config.train.wm_ac_ratio_cosine
         self.wm_ac_ratio_max = config.train.wm_ac_ratio_max
         self.wm_ac_ratio_min = config.train.wm_ac_ratio_min
+        self.wm_ac_ratio_invert = config.train.wm_ac_ratio_invert
 
         # Deterministic evaluation
         self.eval_every = config.train.eval_every
@@ -733,7 +734,13 @@ class WorldModelTrainer:
             self._wm_ac_counter = 0
             self._smoothed_surprise = 0.0
             if self.wm_ac_ratio > 1 or self.wm_ac_ratio_cosine:
-                ratio_str = f"{self.wm_ac_ratio_max}→{self.wm_ac_ratio_min}" if self.wm_ac_ratio_cosine else str(self.wm_ac_ratio)
+                if self.wm_ac_ratio_cosine:
+                    if self.wm_ac_ratio_invert:
+                        ratio_str = f"{self.wm_ac_ratio_min}→{self.wm_ac_ratio_max}"
+                    else:
+                        ratio_str = f"{self.wm_ac_ratio_max}→{self.wm_ac_ratio_min}"
+                else:
+                    ratio_str = str(self.wm_ac_ratio)
                 print(f"AC training started with WM:AC ratio = {ratio_str}:1")
 
         return should_train
@@ -755,7 +762,11 @@ class WorldModelTrainer:
         """Get current WM:AC ratio (possibly scheduled)."""
         if not self.wm_ac_ratio_cosine:
             return self.wm_ac_ratio
-        ratio = self.get_cosine_schedule(float(self.wm_ac_ratio_max), float(self.wm_ac_ratio_min))
+        # Normal: max→min (8→2), Inverted: min→max (2→8)
+        if self.wm_ac_ratio_invert:
+            ratio = self.get_cosine_schedule(float(self.wm_ac_ratio_min), float(self.wm_ac_ratio_max))
+        else:
+            ratio = self.get_cosine_schedule(float(self.wm_ac_ratio_max), float(self.wm_ac_ratio_min))
         return max(1, round(ratio))
 
     def apply_lr_schedule(self):

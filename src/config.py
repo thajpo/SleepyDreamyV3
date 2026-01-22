@@ -111,8 +111,9 @@ class TrainConfig:
 
     # Cosine WM:AC ratio schedule (high ratio early, low ratio late)
     wm_ac_ratio_cosine: bool = False
-    wm_ac_ratio_max: int = 8  # Starting ratio (high = more WM updates early)
-    wm_ac_ratio_min: int = 2  # Ending ratio (low = balanced later)
+    wm_ac_ratio_max: int = 8  # High end of range
+    wm_ac_ratio_min: int = 2  # Low end of range
+    wm_ac_ratio_invert: bool = False  # If true: start low (2), end high (8)
 
     # Surprise-scaled AC learning rate
     surprise_scale_ac_lr: bool = True
@@ -424,6 +425,10 @@ class TrainAdapter:
     @property
     def wm_ac_ratio_min(self):
         return self._cfg.wm_ac_ratio_min
+
+    @property
+    def wm_ac_ratio_invert(self):
+        return self._cfg.wm_ac_ratio_invert
 
     @property
     def num_collectors(self):
