@@ -76,6 +76,15 @@ train:
   actor_warmup_steps: 5000
   wm_ac_ratio: 1  # WM updates per AC update (e.g., 4 = train WM 4x more than AC)
 
+  # Cosine LR decay (applies to all optimizers after warmup)
+  lr_cosine_decay: false
+  lr_cosine_min_factor: 0.1  # Decay to 10% of base LR
+
+  # Cosine WM:AC ratio schedule (high ratio early, low ratio late)
+  wm_ac_ratio_cosine: false
+  wm_ac_ratio_max: 8  # Starting ratio
+  wm_ac_ratio_min: 2  # Ending ratio
+
   # Surprise-scaled AC learning rate
   # When enabled, AC learning rate is scaled by 1/(1 + surprise * k)
   # High surprise = slower AC, keeping WM and AC coupled

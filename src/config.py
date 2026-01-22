@@ -105,6 +105,15 @@ class TrainConfig:
     actor_warmup_steps: int = 5000
     wm_ac_ratio: int = 1  # WM updates per AC update (e.g., 4 = train WM 4x more than AC)
 
+    # Cosine LR decay (applies to all optimizers)
+    lr_cosine_decay: bool = False
+    lr_cosine_min_factor: float = 0.1  # Decay to 10% of base LR
+
+    # Cosine WM:AC ratio schedule (high ratio early, low ratio late)
+    wm_ac_ratio_cosine: bool = False
+    wm_ac_ratio_max: int = 8  # Starting ratio (high = more WM updates early)
+    wm_ac_ratio_min: int = 2  # Ending ratio (low = balanced later)
+
     # Surprise-scaled AC learning rate
     surprise_scale_ac_lr: bool = True
     surprise_lr_scale_k: float = 10.0
@@ -395,6 +404,26 @@ class TrainAdapter:
     @property
     def wm_ac_ratio(self):
         return self._cfg.wm_ac_ratio
+
+    @property
+    def lr_cosine_decay(self):
+        return self._cfg.lr_cosine_decay
+
+    @property
+    def lr_cosine_min_factor(self):
+        return self._cfg.lr_cosine_min_factor
+
+    @property
+    def wm_ac_ratio_cosine(self):
+        return self._cfg.wm_ac_ratio_cosine
+
+    @property
+    def wm_ac_ratio_max(self):
+        return self._cfg.wm_ac_ratio_max
+
+    @property
+    def wm_ac_ratio_min(self):
+        return self._cfg.wm_ac_ratio_min
 
     @property
     def num_collectors(self):

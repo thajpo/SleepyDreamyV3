@@ -142,6 +142,15 @@ class WorldModelTrainer:
         self.wm_ac_ratio = config.train.wm_ac_ratio
         self._wm_ac_counter = 0  # Counts WM steps since last AC step
 
+        # Cosine LR decay
+        self.lr_cosine_decay = config.train.lr_cosine_decay
+        self.lr_cosine_min_factor = config.train.lr_cosine_min_factor
+
+        # Cosine WM:AC ratio schedule
+        self.wm_ac_ratio_cosine = config.train.wm_ac_ratio_cosine
+        self.wm_ac_ratio_max = config.train.wm_ac_ratio_max
+        self.wm_ac_ratio_min = config.train.wm_ac_ratio_min
+
         # Deterministic evaluation
         self.eval_every = config.train.eval_every
         self.eval_episodes = config.train.eval_episodes
@@ -252,6 +261,9 @@ class WorldModelTrainer:
         timing = TimingAccumulator(print_interval=50)
 
         while self.train_step < self.max_train_steps:
+            # Apply cosine LR schedule (if enabled)
+            self.apply_lr_schedule()
+
             # --- PROFILE: Data loading ---
             t0 = time.perf_counter()
             self.get_data_from_buffer()  # Sample from replay buffer (non-blocking)
@@ -397,8 +409,9 @@ class WorldModelTrainer:
                 skip_ac_this_step = True
                 if self.should_train_ac():
                     # Check WM:AC ratio first (most common skip reason)
+                    current_ratio = self.get_current_wm_ac_ratio()
                     self._wm_ac_counter += 1
-                    if self._wm_ac_counter >= self.wm_ac_ratio:
+                    if self._wm_ac_counter >= current_ratio:
                         self._wm_ac_counter = 0
                         # Then check WM focus mode (surprise-triggered)
                         skip_ac_this_step = self.should_skip_ac_for_wm_focus()
@@ -719,10 +732,43 @@ class WorldModelTrainer:
             self._wm_focus_ac_counter = 0
             self._wm_ac_counter = 0
             self._smoothed_surprise = 0.0
-            if self.wm_ac_ratio > 1:
-                print(f"AC training started with WM:AC ratio = {self.wm_ac_ratio}:1")
+            if self.wm_ac_ratio > 1 or self.wm_ac_ratio_cosine:
+                ratio_str = f"{self.wm_ac_ratio_max}→{self.wm_ac_ratio_min}" if self.wm_ac_ratio_cosine else str(self.wm_ac_ratio)
+                print(f"AC training started with WM:AC ratio = {ratio_str}:1")
 
         return should_train
+
+    def get_cosine_schedule(self, max_val: float, min_val: float) -> float:
+        """
+        Cosine schedule from max_val to min_val over training.
+        Progress is measured from actor_warmup_steps to max_train_steps.
+        """
+        if self.train_step <= self.actor_warmup_steps:
+            return max_val
+        ac_steps = self.train_step - self.actor_warmup_steps
+        total_ac_steps = self.max_train_steps - self.actor_warmup_steps
+        progress = min(1.0, ac_steps / max(1, total_ac_steps))
+        # Cosine decay: starts at max, ends at min
+        return min_val + 0.5 * (max_val - min_val) * (1 + math.cos(math.pi * progress))
+
+    def get_current_wm_ac_ratio(self) -> int:
+        """Get current WM:AC ratio (possibly scheduled)."""
+        if not self.wm_ac_ratio_cosine:
+            return self.wm_ac_ratio
+        ratio = self.get_cosine_schedule(float(self.wm_ac_ratio_max), float(self.wm_ac_ratio_min))
+        return max(1, round(ratio))
+
+    def apply_lr_schedule(self):
+        """Apply cosine LR decay to all optimizers."""
+        if not self.lr_cosine_decay:
+            return
+        scale = self.get_cosine_schedule(1.0, self.lr_cosine_min_factor)
+        for pg in self.wm_optimizer.param_groups:
+            pg['lr'] = self.config.train.wm_lr * scale
+        for pg in self.actor_optimizer.param_groups:
+            pg['lr'] = self.base_actor_lr * scale
+        for pg in self.critic_optimizer.param_groups:
+            pg['lr'] = self.base_critic_lr * scale
 
     def compute_surprise_for_batch(self, wm_loss: torch.Tensor, seq_len: int) -> float:
         """
@@ -1266,6 +1312,14 @@ class WorldModelTrainer:
                 self.critic_optimizer.param_groups[0]["lr"],
                 step,
             )
+
+            # Log WM:AC ratio (if using cosine schedule)
+            if self.wm_ac_ratio_cosine:
+                self.logger.add_scalar(
+                    "train/wm_ac_ratio",
+                    self.get_current_wm_ac_ratio(),
+                    step,
+                )
 
         # Visualizations every 250 steps (show first sample only)
         if (
