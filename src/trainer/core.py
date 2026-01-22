@@ -197,6 +197,9 @@ class WorldModelTrainer:
                 print("Dreamer mode: Fresh actor/critic, keeping WM weights")
             else:
                 print("Dreamer mode: Resuming all weights from checkpoint")
+            # Send models to collector immediately so it uses learned policy during buffer fill
+            print("Dreamer mode: Sending initial models to collector...")
+            self.send_models_to_collector(0)
 
     def get_data_from_buffer(self):
         """Sample batch from replay buffer (non-blocking after initial fill)."""

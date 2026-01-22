@@ -248,9 +248,11 @@ def run_training(cfg: DictConfig, mode: str = "train", checkpoint_path: str | No
         reset_ac = mode == "dreamer"
 
         # Launch processes
+        # Pass mode to collector so it knows to wait for models in dreamer mode
+        wait_for_models = (mode == "dreamer")
         experience_loop = mp_ctx.Process(
             target=collect_experiences,
-            args=(data_queue, model_queue, config, stop_event, log_dir),
+            args=(data_queue, model_queue, config, stop_event, log_dir, wait_for_models),
         )
         trainer_loop = mp_ctx.Process(
             target=train_world_model,

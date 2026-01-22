@@ -1,0 +1,29 @@
+# @package _global_
+# Scheduler experiments - 5k AC steps using pre-trained WM
+# Usage: uv run python -m src.train +experiment=scheduler general.experiment_name=sched_X
+# Uses dreamer mode with d_hidden=256 WM checkpoint
+
+# Use pre-trained WM checkpoint (d_hidden=256)
+mode: dreamer
+checkpoint: /home/j/Projects/SleepyDreamyV3/runs/01-20_181847/checkpoints/checkpoint_step_5000.pt
+
+models:
+  d_hidden: 256
+
+train:
+  max_steps: 5000  # 5k AC steps only (WM already trained)
+  actor_warmup_steps: 0  # Start AC immediately
+  actor_lr: 4e-5
+  critic_lr: 8e-5
+  num_dream_steps: 10
+  actor_entropy_coef: 0.001
+  eval_every: 500
+  checkpoint_interval: 2500
+
+# Experiment variants:
+# 1. baseline:   (default)
+# 2. ratio_4:    train.wm_ac_ratio=4
+# 3. ratio_8to2: train.wm_ac_ratio_cosine=true
+# 4. ratio_2to8: train.wm_ac_ratio_cosine=true train.wm_ac_ratio_invert=true
+# 5. lr_cosine:  train.lr_cosine_decay=true
+# 6. full_8to2:  train.wm_ac_ratio_cosine=true train.lr_cosine_decay=true

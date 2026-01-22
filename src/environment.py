@@ -14,13 +14,17 @@ def resize_image(img, target_size=(64, 64)):
     """Resize image using cv2 (much faster than torch on CPU)."""
     return cv2.resize(img, target_size, interpolation=cv2.INTER_AREA)
 
-def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=None):
+def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=None, wait_for_models=False):
     """
     Continuously collects experiences from the environment and puts them on a queue.
 
     Starts with random actions (fast, no model inference).
     Switches to learned policy when trainer sends first model update.
     Stops when stop_event is set by the trainer.
+
+    Args:
+        wait_for_models: If True, block until models are received before starting collection.
+                        Use this in dreamer mode to avoid collecting random episodes.
     """
     use_pixels = config.general.use_pixels
     env = create_env(config.environment.environment_name, use_pixels=use_pixels)
@@ -42,6 +46,26 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
         chunk_steps=200,
     )
     profiler.__enter__()
+
+    # If wait_for_models is True, block until we receive initial models
+    if wait_for_models:
+        print("Collector: Waiting for initial models from trainer...", flush=True)
+        while not stop_event.is_set():
+            try:
+                new_model_states = model_queue.get(timeout=1.0)  # Block with timeout
+                actor = initialize_actor(device=device, cfg=config)
+                encoder, world_model = initialize_world_model(device, batch_size=1, cfg=config)
+                actor.load_state_dict(new_model_states['actor'])
+                encoder.load_state_dict(new_model_states['encoder'])
+                world_model.load_state_dict(new_model_states['world_model'], strict=False)
+                actor.eval()
+                encoder.eval()
+                world_model.eval()
+                use_random_actions = False
+                print("Collector: Received initial models, starting with learned policy.", flush=True)
+                break
+            except Empty:
+                continue  # Keep waiting
 
     while not stop_event.is_set():
         # Check for model updates from trainer
