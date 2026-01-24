@@ -8,13 +8,22 @@ import os
 import time
 
 from ..replay_buffer import EpisodeReplayBuffer
-from .math_utils import symlog, symexp, resize_pixels_to_target, unimix_logits
-from .model_init import initialize_actor, initialize_critic, initialize_world_model
-from .profiling import ProfilerManager, TimingAccumulator
-from .losses import compute_wm_loss, compute_actor_critic_losses
-from .dreaming import dream_sequence, calculate_lambda_returns
-from .mlflow_logger import MLflowLogger
-from .optimizers import LaProp, adaptive_gradient_clipping
+from ..models import (
+    symlog,
+    symexp,
+    resize_pixels_to_target,
+    unimix_logits,
+    initialize_actor,
+    initialize_critic,
+    initialize_world_model,
+    compute_wm_loss,
+    compute_actor_critic_losses,
+    dream_sequence,
+    calculate_lambda_returns,
+    LaProp,
+    adaptive_gradient_clipping,
+)
+from ..utils.mlflow_logger import MLflowLogger
 from ..utils.environment import create_env
 
 
@@ -26,8 +35,6 @@ class WorldModelTrainer:
         model_queue,
         log_dir,
         checkpoint_path=None,
-        mode="train",
-        reset_ac=False,
         mlflow_run_id=None,
         dry_run=False,
     ):
@@ -176,30 +183,9 @@ class WorldModelTrainer:
         self.last_log_time = time.time()
         self.steps_since_log = 0
 
-        # Mode and checkpoint handling
-        self.mode = mode
-        self.reset_ac = reset_ac
-
+        # Checkpoint loading
         if checkpoint_path:
-            self.checkpoint_type = self.load_checkpoint(
-                checkpoint_path, reset_ac=reset_ac
-            )
-        else:
-            self.checkpoint_type = None
-
-        # Mode-specific settings
-        if mode == "bootstrap":
-            self.actor_warmup_steps = float("inf")  # Never train AC
-            print("Bootstrap mode: WM-only training with random actions")
-        elif mode == "dreamer":
-            self.actor_warmup_steps = 0  # Immediate AC training
-            if reset_ac:
-                print("Dreamer mode: Fresh actor/critic, keeping WM weights")
-            else:
-                print("Dreamer mode: Resuming all weights from checkpoint")
-            # Send models to collector immediately so it uses learned policy during buffer fill
-            print("Dreamer mode: Sending initial models to collector...")
-            self.send_models_to_collector(0)
+            self.load_checkpoint(checkpoint_path)
 
     def get_data_from_buffer(self):
         """Sample batch from replay buffer (non-blocking after initial fill)."""
@@ -254,16 +240,6 @@ class WorldModelTrainer:
         self.terminated = torch.stack(batch_terminated).to(self.device)  # (B, T)
 
     def train_models(self):
-        # === PROFILING: Setup profiler and timing ===
-        profiler = ProfilerManager(
-            enabled=self.profile_enabled,
-            log_dir=self.log_dir,
-            component_name="trainer",
-            chunk_steps=200,
-        )
-        profiler.__enter__()
-        timing = TimingAccumulator(print_interval=50)
-
         while self.train_step < self.max_train_steps:
             # Apply cosine LR schedule (if enabled)
             self.apply_lr_schedule()
@@ -618,15 +594,14 @@ class WorldModelTrainer:
                 log_step,
             )
 
-            # Send models to collector (skip in bootstrap mode - keep random actions)
-            if self.mode != "bootstrap":
-                if (
-                    self.train_step >= self.actor_warmup_steps
-                    and self.train_step % self.steps_per_weight_sync == 0
-                ):
-                    if self.train_step == self.actor_warmup_steps:
-                        print(
-                            f"Trainer: Warmup complete at step {self.train_step}. Sending initial models."
+            # Send models to collector after warmup
+            if (
+                self.train_step >= self.actor_warmup_steps
+                and self.train_step % self.steps_per_weight_sync == 0
+            ):
+                if self.train_step == self.actor_warmup_steps:
+                    print(
+                        f"Trainer: Warmup complete at step {self.train_step}. Sending initial models."
                         )
                     self.send_models_to_collector(self.train_step)
 
@@ -669,7 +644,6 @@ class WorldModelTrainer:
             if (
                 self.eval_every > 0
                 and self.eval_episodes > 0
-                and self.mode != "bootstrap"
                 and self.train_step > 0
                 and self.train_step % self.eval_every == 0
             ):
@@ -681,23 +655,12 @@ class WorldModelTrainer:
 
             # Checkpoint every N steps (skip in dry_run)
             if not self.dry_run and self.train_step > 0 and self.train_step % self.checkpoint_interval == 0:
-                if self.mode == "bootstrap":
-                    self.save_wm_only_checkpoint()
-                else:
-                    self.save_checkpoint()
-
-            profiler.step()
-
-        profiler.__exit__(None, None, None)
+                self.save_checkpoint()
 
         # Final save (skip in dry_run)
         if not self.dry_run:
-            if self.mode == "bootstrap":
-                self.save_wm_only_checkpoint(final=True)
-                print(f"Bootstrap complete. WM checkpoint saved to {self.checkpoint_dir}")
-            else:
-                self.save_checkpoint(final=True)
-                print(f"Training complete. Final checkpoint saved to {self.checkpoint_dir}")
+            self.save_checkpoint(final=True)
+            print(f"Training complete. Final checkpoint saved to {self.checkpoint_dir}")
         else:
             print("DRY RUN complete - no checkpoint saved.")
 
@@ -982,45 +945,27 @@ class WorldModelTrainer:
         torch.save(checkpoint, path)
         print(f"Checkpoint saved: {path}")
 
-    def save_wm_only_checkpoint(self, final=False):
-        """Save WM-only checkpoint for bootstrap phase (no actor/critic)."""
-        suffix = "final" if final else f"step_{self.train_step}"
-        checkpoint = {
-            "step": self.train_step,
-            "encoder": self._get_model(self.encoder).state_dict(),
-            "world_model": {
-                k: v
-                for k, v in self._get_model(self.world_model).state_dict().items()
-                if k not in ("h_prev", "z_prev")
-            },
-            "wm_optimizer": self.wm_optimizer.state_dict(),
-            "checkpoint_type": "wm_only",
-            "mlflow_run_id": self.mlflow_run_id,
-        }
-        path = os.path.join(self.checkpoint_dir, f"wm_checkpoint_{suffix}.pt")
-        torch.save(checkpoint, path)
-        print(f"WM-only checkpoint saved: {path}")
-
-    def load_checkpoint(self, checkpoint_path, reset_ac=False):
+    def load_checkpoint(self, checkpoint_path):
         """
-        Load checkpoint with explicit control over actor/critic loading.
+        Load full checkpoint (encoder, world model, actor, critic, optimizers).
 
         Args:
             checkpoint_path: Path to checkpoint file
-            reset_ac: If True, skip loading actor/critic (keep random init)
-
-        Returns:
-            checkpoint_type: 'wm_only', 'full', or 'reset_ac'
         """
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
 
-        # Load encoder and world_model (always present)
+        # Load encoder and world_model
         self._get_model(self.encoder).load_state_dict(checkpoint["encoder"])
         self._get_model(self.world_model).load_state_dict(
             checkpoint["world_model"], strict=False
         )
 
-        # Restore WM optimizer if present (skip if architecture changed)
+        # Load actor/critic
+        if "actor" in checkpoint:
+            self._get_model(self.actor).load_state_dict(checkpoint["actor"])
+            self._get_model(self.critic).load_state_dict(checkpoint["critic"])
+
+        # Restore optimizers (skip if architecture changed)
         if "wm_optimizer" in checkpoint:
             try:
                 self.wm_optimizer.load_state_dict(checkpoint["wm_optimizer"])
@@ -1029,35 +974,15 @@ class WorldModelTrainer:
                     print(f"Warning: Skipping WM optimizer state (architecture changed)")
                 else:
                     raise
+        if "actor_optimizer" in checkpoint:
+            self.actor_optimizer.load_state_dict(checkpoint["actor_optimizer"])
+        if "critic_optimizer" in checkpoint:
+            self.critic_optimizer.load_state_dict(checkpoint["critic_optimizer"])
 
-        # Handle actor/critic based on explicit user intent
-        has_ac = "actor" in checkpoint
-
-        if reset_ac:
-            # User explicitly requested fresh actor/critic
-            print(f"Loaded WM weights from {checkpoint_path}")
-            print("Actor/critic reset to random (--reset-ac)")
-            return "reset_ac"
-        elif not has_ac:
-            # WM-only checkpoint, no AC to load
-            print(f"Loaded WM-only checkpoint from {checkpoint_path}")
-            print("Actor/critic initialized randomly")
-            return "wm_only"
-        else:
-            # Full checkpoint with --resume: load everything
-            self._get_model(self.actor).load_state_dict(checkpoint["actor"])
-            self._get_model(self.critic).load_state_dict(checkpoint["critic"])
-
-            if "actor_optimizer" in checkpoint:
-                self.actor_optimizer.load_state_dict(checkpoint["actor_optimizer"])
-            if "critic_optimizer" in checkpoint:
-                self.critic_optimizer.load_state_dict(checkpoint["critic_optimizer"])
-
-            self.train_step = checkpoint.get("step", 0)
-            print(
-                f"Resumed full checkpoint from {checkpoint_path} at step {self.train_step}"
-            )
-            return "full"
+        self.train_step = checkpoint.get("step", 0)
+        print(
+            f"Resumed checkpoint from {checkpoint_path} at step {self.train_step}"
+        )
 
     def log_metrics(
         self,
@@ -1439,8 +1364,6 @@ def train_world_model(
     model_queue,
     log_dir,
     checkpoint_path=None,
-    mode="train",
-    reset_ac=False,
     mlflow_run_id=None,
     dry_run=False,
 ):
@@ -1452,6 +1375,6 @@ def train_world_model(
         mlflow.start_run(run_id=mlflow_run_id)
 
     trainer = WorldModelTrainer(
-        config, data_queue, model_queue, log_dir, checkpoint_path, mode, reset_ac, mlflow_run_id, dry_run
+        config, data_queue, model_queue, log_dir, checkpoint_path, mlflow_run_id, dry_run
     )
     trainer.train_models()
