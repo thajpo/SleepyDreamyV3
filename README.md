@@ -146,8 +146,7 @@ src/dreamer/
 │   └── ...
 ├── scripts/             # Utility scripts
 │   ├── evaluate.py      # dreamer-eval
-│   └── visualize.py     # dreamer-viz
-└── utils/               # Shared utilities
+│   ├── visualize.py     # dreamer-viz
 ```
 
 ## Training Modes

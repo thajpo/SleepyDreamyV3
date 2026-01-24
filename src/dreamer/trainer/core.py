@@ -23,7 +23,7 @@ from ..models import (
     LaProp,
     adaptive_gradient_clipping,
 )
-from ..utils.mlflow_logger import MLflowLogger
+from .mlflow_logger import MLflowLogger
 from ..envs.utils import create_env
 
 
