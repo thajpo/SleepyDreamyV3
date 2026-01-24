@@ -38,7 +38,7 @@ import multiprocessing as mp
 import torch
 
 from .trainer import train_world_model
-from .environment import collect_experiences
+from .envs.collector import collect_experiences
 
 
 def resolve_device(cfg: DictConfig) -> str:

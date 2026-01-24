@@ -9,8 +9,8 @@ from pathlib import Path
 import hydra
 from omegaconf import DictConfig, OmegaConf
 
-from .models import initialize_actor, initialize_world_model, symlog, resize_pixels_to_target
-from .utils import create_env
+from ..models import initialize_actor, initialize_world_model, symlog, resize_pixels_to_target
+from ..envs.utils import create_env
 
 
 def load_models(config, checkpoint_path, device, load_actor=False):

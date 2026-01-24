@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from queue import Empty
 import cv2
 
-from .models import initialize_actor, initialize_world_model, symlog, unimix_logits
+from ..models import initialize_actor, initialize_world_model, symlog, unimix_logits
 from .utils import create_env
 
 

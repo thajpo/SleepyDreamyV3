@@ -6,8 +6,8 @@ import torch.nn.functional as F
 import hydra
 from omegaconf import DictConfig, OmegaConf
 
-from .models import initialize_actor, initialize_world_model, symlog
-from .utils import create_env
+from ..models import initialize_actor, initialize_world_model, symlog
+from ..envs.utils import create_env
 
 
 def evaluate(config: DictConfig, checkpoint_path: str, num_episodes: int = 10, device: str = "cuda"):
