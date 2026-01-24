@@ -25,4 +25,6 @@ DreamerPaper.pdf
 
 # MLflow tracking and Hydra outputs
 runs/
-outputs/saved_models/
+outputs/
+mlruns/
+saved_models/
