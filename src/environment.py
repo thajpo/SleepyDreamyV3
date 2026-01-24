@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from queue import Empty
 import cv2
 
-from .trainer import initialize_actor, initialize_world_model, ProfilerManager, symlog, unimix_logits
+from .models import initialize_actor, initialize_world_model, symlog, unimix_logits
 from .utils import create_env
 
 
@@ -14,17 +14,13 @@ def resize_image(img, target_size=(64, 64)):
     """Resize image using cv2 (much faster than torch on CPU)."""
     return cv2.resize(img, target_size, interpolation=cv2.INTER_AREA)
 
-def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=None, wait_for_models=False):
+def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=None):
     """
     Continuously collects experiences from the environment and puts them on a queue.
 
     Starts with random actions (fast, no model inference).
     Switches to learned policy when trainer sends first model update.
     Stops when stop_event is set by the trainer.
-
-    Args:
-        wait_for_models: If True, block until models are received before starting collection.
-                        Use this in dreamer mode to avoid collecting random episodes.
     """
     use_pixels = config.general.use_pixels
     env = create_env(config.environment.environment_name, use_pixels=use_pixels)
@@ -38,34 +34,6 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
     world_model = None
 
     episode_count = 0
-    profile_enabled = getattr(config.general, "profile", False) and log_dir is not None
-    profiler = ProfilerManager(
-        enabled=profile_enabled,
-        log_dir=log_dir or "",
-        component_name=f"collector_{os.getpid()}",
-        chunk_steps=200,
-    )
-    profiler.__enter__()
-
-    # If wait_for_models is True, block until we receive initial models
-    if wait_for_models:
-        print("Collector: Waiting for initial models from trainer...", flush=True)
-        while not stop_event.is_set():
-            try:
-                new_model_states = model_queue.get(timeout=1.0)  # Block with timeout
-                actor = initialize_actor(device=device, cfg=config)
-                encoder, world_model = initialize_world_model(device, batch_size=1, cfg=config)
-                actor.load_state_dict(new_model_states['actor'])
-                encoder.load_state_dict(new_model_states['encoder'])
-                world_model.load_state_dict(new_model_states['world_model'], strict=False)
-                actor.eval()
-                encoder.eval()
-                world_model.eval()
-                use_random_actions = False
-                print("Collector: Received initial models, starting with learned policy.", flush=True)
-                break
-            except Empty:
-                continue  # Keep waiting
 
     while not stop_event.is_set():
         # Check for model updates from trainer
@@ -130,7 +98,7 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
                     posterior_logits_mixed = unimix_logits(posterior_logits, unimix_ratio=0.01)
                     posterior_dist = torch.distributions.Categorical(logits=posterior_logits_mixed)
                     z_indices = posterior_dist.sample()
-                    z_onehot = F.one_hot(z_indices, num_classes=config.models.d_hidden // 16).float()
+                    z_onehot = F.one_hot(z_indices, num_classes=config.models.encoder.mlp.latent_categories).float()
                     z_sample = z_onehot + (posterior_dist.probs - posterior_dist.probs.detach())
                     z_flat = z_sample.view(1, -1)
 
@@ -162,8 +130,6 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
             episode_rewards.append(reward)
             episode_terminated.append(terminated)
 
-            profiler.step()
-
             if terminated or truncated:
                 break
 
@@ -190,7 +156,6 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
                     break  # Queue has room, collect more
                 time.sleep(0.1)  # Wait for trainer to drain queue
 
-    profiler.__exit__(None, None, None)
     # Cleanup
     env.close()
     print("Experience collector: Stopped gracefully.")

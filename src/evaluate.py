@@ -3,17 +3,15 @@ import argparse
 import torch
 import torch.nn.functional as F
 
-from .config import config
-from .trainer import initialize_actor, initialize_world_model, symlog
-from .utils import load_env_config, create_env
+import hydra
+from omegaconf import DictConfig, OmegaConf
+
+from .models import initialize_actor, initialize_world_model, symlog
+from .utils import create_env
 
 
-def evaluate(checkpoint_path, config_path, num_episodes=10, device="cuda"):
+def evaluate(config: DictConfig, checkpoint_path: str, num_episodes: int = 10, device: str = "cuda"):
     """Run evaluation episodes and report statistics."""
-    # Load config
-    if config_path:
-        load_env_config(config_path)
-
     use_pixels = config.general.use_pixels
 
     print(f"Environment: {config.environment.environment_name}")
@@ -135,15 +133,20 @@ def evaluate(checkpoint_path, config_path, num_episodes=10, device="cuda"):
         print("Still training needed (avg < 200)")
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Evaluate trained policy")
-    parser.add_argument('--checkpoint', type=str, required=True, help='Path to checkpoint')
-    parser.add_argument('--config', type=str, help='Path to env config YAML')
-    parser.add_argument('--episodes', type=int, default=10, help='Number of episodes to run')
-    parser.add_argument('--device', type=str, default='cuda', help='Device (cuda/cpu)')
-
-    args = parser.parse_args()
-    evaluate(args.checkpoint, args.config, args.episodes, args.device)
+@hydra.main(version_base=None, config_path="../conf", config_name="config")
+def main(cfg: DictConfig):
+    # Determine checkpoint from config overrides
+    checkpoint = cfg.get("checkpoint", None)
+    if not checkpoint:
+        print("Error: No checkpoint specified. Use checkpoint=/path/to/model.pt")
+        return
+        
+    evaluate(
+        config=cfg,
+        checkpoint_path=checkpoint,
+        num_episodes=cfg.get("episodes", 10),
+        device=cfg.general.device
+    )
 
 
 if __name__ == "__main__":

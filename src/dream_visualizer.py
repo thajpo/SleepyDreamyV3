@@ -6,12 +6,14 @@ import torch.distributions as dist
 import numpy as np
 from pathlib import Path
 
-from .config import config
-from .trainer import initialize_actor, initialize_world_model, symlog, resize_pixels_to_target
-from .utils import load_env_config, create_env
+import hydra
+from omegaconf import DictConfig, OmegaConf
+
+from .models import initialize_actor, initialize_world_model, symlog, resize_pixels_to_target
+from .utils import create_env
 
 
-def load_models(checkpoint_path, device, load_actor=False):
+def load_models(config, checkpoint_path, device, load_actor=False):
     """Load encoder, world model, and optionally actor from checkpoint."""
     encoder, world_model = initialize_world_model(device, batch_size=1, cfg=config)
 
@@ -37,7 +39,7 @@ def load_models(checkpoint_path, device, load_actor=False):
     return encoder, world_model, actor
 
 
-def encode_observation(obs, encoder, world_model, device):
+def encode_observation(config, obs, encoder, world_model, device):
     """Encode an observation to get (h, z) state."""
     target_size = config.models.encoder.cnn.target_size
 
@@ -77,7 +79,7 @@ def encode_observation(obs, encoder, world_model, device):
     return h, z_sample, z_embed, pixels
 
 
-def dream_rollout(world_model, actor, h_init, z_embed_init, num_steps, device, use_actor=False):
+def dream_rollout(config, world_model, actor, h_init, z_embed_init, num_steps, device, use_actor=False):
     """
     Roll out the world model for num_steps, returning decoded frames.
 
@@ -207,100 +209,61 @@ def create_comparison_grid(initial_frame, dream_frames, grid_cols=6):
     return grid
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Visualize world model dreams as MP4 videos",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Basic dream from env reset
-  python -m src.dream_visualizer --checkpoint runs/01-09_1709/checkpoints/wm_checkpoint_final.pt --config env_configs/cartpole_b8.yaml
-
-  # Longer dream with trained actor
-  python -m src.dream_visualizer --checkpoint runs/.../checkpoint_final.pt --config env_configs/cartpole_b8.yaml --use-actor --steps 50
-
-  # Multiple rollouts for comparison
-  python -m src.dream_visualizer --checkpoint ... --num-rollouts 5
-""",
-    )
-    parser.add_argument("--checkpoint", type=str, required=True, help="Path to checkpoint")
-    parser.add_argument("--config", type=str, required=True, help="Path to env config YAML")
-    parser.add_argument("--steps", type=int, default=30, help="Number of dream steps (default: 30)")
-    parser.add_argument("--num-rollouts", type=int, default=1, help="Number of dream rollouts to generate")
-    parser.add_argument("--use-actor", action="store_true", help="Use trained actor for action selection")
-    parser.add_argument("--output", type=str, default="dream", help="Output filename prefix (default: dream)")
-    parser.add_argument("--fps", type=int, default=10, help="Video FPS (default: 10)")
-    parser.add_argument("--device", type=str, default="cuda", help="Device (default: cuda)")
-    parser.add_argument("--save-grid", action="store_true", help="Also save a grid image of frames")
-    parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility")
-
-    args = parser.parse_args()
-
-    if args.seed is not None:
-        torch.manual_seed(args.seed)
-        np.random.seed(args.seed)
-
+@hydra.main(version_base=None, config_path="../conf", config_name="config")
+def main(cfg: DictConfig):
     # Setup
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    device = torch.device(cfg.general.device if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    load_env_config(args.config)
-    print(f"Environment: {config.environment.environment_name}")
-    print(f"d_hidden: {config.models.d_hidden}")
-    use_pixels = config.general.use_pixels
+    print(f"Environment: {cfg.environment.environment_name}")
+    print(f"d_hidden: {cfg.models.d_hidden}")
+    use_pixels = cfg.general.use_pixels
     print(f"use_pixels: {use_pixels}")
 
-    if not use_pixels:
-        print(
-            "Config has general.use_pixels = false. "
-            "Dream visualizations require pixel observations; enable pixels to generate videos."
-        )
+    checkpoint_path = cfg.get("checkpoint", None)
+    if not checkpoint_path:
+        print("Error: No checkpoint specified. Use checkpoint=/path/to/model.pt")
         return
+
+    num_steps = cfg.get("steps", 30)
+    num_rollouts = cfg.get("num_rollouts", 1)
+    use_actor = cfg.get("use_actor", False)
+    output_prefix = cfg.get("output", "dream")
+    fps = cfg.get("fps", 10)
 
     # Load models
     encoder, world_model, actor = load_models(
-        args.checkpoint, device, load_actor=args.use_actor
+        cfg, checkpoint_path, device, load_actor=use_actor
     )
 
     # Create environment and get initial observation
-    env = create_env(config.environment.environment_name, use_pixels=use_pixels)
-    obs, info = env.reset(seed=args.seed)
+    env = create_env(cfg.environment.environment_name, use_pixels=use_pixels)
+    obs, info = env.reset()
     env.close()
 
     # Encode initial observation
     h_init, z_sample, z_embed_init, initial_pixels = encode_observation(
-        obs, encoder, world_model, device
+        cfg, obs, encoder, world_model, device
     )
     initial_frame = (initial_pixels.squeeze(0) / 255.0).cpu()  # Normalize to [0,1]
 
-    print(f"\nGenerating {args.num_rollouts} dream rollout(s) of {args.steps} steps...")
+    print(f"\nGenerating {num_rollouts} dream rollout(s) of {num_steps} steps...")
 
     output_dir = Path(".")
 
-    for rollout_idx in range(args.num_rollouts):
+    for rollout_idx in range(num_rollouts):
         # Generate dream rollout
         frames, actions = dream_rollout(
-            world_model, actor, h_init, z_embed_init,
-            args.steps, device, use_actor=args.use_actor
+            cfg, world_model, actor, h_init, z_embed_init,
+            num_steps, device, use_actor=use_actor
         )
 
         # Build output filename
-        suffix = f"_{rollout_idx}" if args.num_rollouts > 1 else ""
-        video_path = output_dir / f"{args.output}{suffix}.mp4"
+        suffix = f"_{rollout_idx}" if num_rollouts > 1 else ""
+        video_path = output_dir / f"{output_prefix}{suffix}.mp4"
 
         # Save video
-        frames_to_video(frames, str(video_path), fps=args.fps, initial_frame=initial_frame)
-
-        # Save grid image if requested
-        if args.save_grid:
-            try:
-                import imageio.v3 as iio
-                grid = create_comparison_grid(initial_frame, frames)
-                grid_path = output_dir / f"{args.output}{suffix}_grid.png"
-                iio.imwrite(str(grid_path), grid)
-                print(f"Saved grid: {grid_path}")
-            except ImportError:
-                print("imageio not found, skipping grid save")
+        frames_to_video(frames, str(video_path), fps=fps, initial_frame=initial_frame)
 
         # Print action sequence
         action_str = "".join(str(a) for a in actions[:20])

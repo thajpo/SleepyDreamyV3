@@ -11,7 +11,7 @@ models:
   d_hidden: 256
 
 train:
-  max_steps: 5000  # 5k AC steps only (WM already trained)
+  max_train_steps: 5000  # 5k AC steps only (WM already trained)
   actor_warmup_steps: 0  # Start AC immediately
   actor_lr: 4e-5
   critic_lr: 8e-5

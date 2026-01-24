@@ -19,7 +19,7 @@ general:
 
 # Environment (overridden by env/*.yaml)
 environment:
-  name: CartPole-v1
+  environment_name: CartPole-v1
   n_actions: 2
   n_observations: 4
 
@@ -45,7 +45,7 @@ models:
 # Training hyperparameters
 train:
   # Core settings
-  max_steps: 30000
+  max_train_steps: 30000
   batch_size: 16
   sequence_length: 32
 

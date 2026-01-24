@@ -20,9 +20,6 @@ Usage:
     # Resume from checkpoint
     uv run python -m src.train checkpoint=/path/to/checkpoint.pt
 
-    # Dreamer mode (AC training with fixed WM)
-    uv run python -m src.train mode=dreamer checkpoint=/path/to/wm.pt
-
     # Dry run (smoke test - no MLflow, no checkpoints, temp directory)
     uv run python -m src.train general.dry_run=true train.max_steps=100
 """
@@ -38,6 +35,22 @@ import hydra
 import mlflow
 from omegaconf import DictConfig, OmegaConf
 import multiprocessing as mp
+import torch
+
+from .trainer import train_world_model
+from .environment import collect_experiences
+
+
+def resolve_device(cfg: DictConfig) -> str:
+    """Resolve device from config, handling 'auto' setting."""
+    device = cfg.general.device
+    if device == "auto":
+        if torch.cuda.is_available():
+            return "cuda"
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return "mps"
+        return "cpu"
+    return device
 
 
 def is_port_in_use(port: int) -> bool:
@@ -127,16 +140,19 @@ def start_mlflow_ui(mlruns_dir: str, port: int = 5000) -> subprocess.Popen | Non
         return None
 
     proc = subprocess.Popen(
-        ["mlflow", "ui", "--backend-store-uri", f"file://{mlruns_dir}", "--port", str(port)],
+        [
+            "mlflow",
+            "ui",
+            "--backend-store-uri",
+            f"file://{mlruns_dir}",
+            "--port",
+            str(port),
+        ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
     print(f"  MLflow UI started at http://localhost:{port}")
     return proc
-
-from .config import adapt_config
-from .trainer import train_world_model
-from .environment import collect_experiences
 
 
 def flatten_config(cfg: DictConfig, parent_key: str = "", sep: str = ".") -> dict:
@@ -159,12 +175,14 @@ def flatten_config(cfg: DictConfig, parent_key: str = "", sep: str = ".") -> dic
     return items
 
 
-def run_training(cfg: DictConfig, mode: str = "train", checkpoint_path: str | None = None):
+def run_training(
+    cfg: DictConfig, checkpoint_path: str | None = None
+):
     """Run training with the given configuration."""
     import tempfile
 
-    # Adapt Hydra config for backward compatibility
-    config = adapt_config(cfg)
+    # Resolve device (handle 'auto' setting)
+    device = resolve_device(cfg)
 
     # Check for dry_run mode (smoke tests - no MLflow, no checkpoints)
     dry_run = cfg.get("general", {}).get("dry_run", False)
@@ -177,12 +195,12 @@ def run_training(cfg: DictConfig, mode: str = "train", checkpoint_path: str | No
         log_dir = hydra.core.hydra_config.HydraConfig.get().runtime.output_dir
 
     print(f"Training Configuration:")
-    print(f"  Environment: {config.environment.environment_name}")
-    print(f"  Device: {config.general.device}")
-    print(f"  d_hidden: {config.models.d_hidden}")
-    print(f"  batch_size: {config.train.batch_size}")
-    print(f"  actor_lr: {config.train.actor_lr}")
-    print(f"  actor_entropy_coef: {config.train.actor_entropy_coef}")
+    print(f"  Environment: {cfg.environment.environment_name}")
+    print(f"  Device: {device}")
+    print(f"  d_hidden: {cfg.models.d_hidden}")
+    print(f"  batch_size: {cfg.train.batch_size}")
+    print(f"  actor_lr: {cfg.train.actor_lr}")
+    print(f"  actor_entropy_coef: {cfg.train.actor_entropy_coef}")
     print(f"  Output: {log_dir}")
 
     if checkpoint_path:
@@ -194,9 +212,9 @@ def run_training(cfg: DictConfig, mode: str = "train", checkpoint_path: str | No
     if not dry_run:
         mlruns_dir = os.path.join(os.path.dirname(log_dir), "mlruns")
         mlflow.set_tracking_uri(f"file://{mlruns_dir}")
-        exp_name = getattr(config.general, "experiment_name", None)
+        exp_name = cfg.general.get("experiment_name", None)
         if not exp_name:
-            exp_name = f"DreamerV3-{config.environment.environment_name}"
+            exp_name = f"DreamerV3-{cfg.environment.environment_name}"
         mlflow.set_experiment(exp_name)
 
         # Always start fresh MLflow runs (even when loading checkpoint)
@@ -240,30 +258,29 @@ def run_training(cfg: DictConfig, mode: str = "train", checkpoint_path: str | No
         mp_ctx = mp.get_context("spawn")
 
         # Create queues for inter-process communication
-        data_queue = mp_ctx.Queue(maxsize=config.train.batch_size * 5)
+        data_queue = mp_ctx.Queue(maxsize=cfg.train.batch_size * 5)
         model_queue = mp_ctx.Queue(maxsize=1)
         stop_event = mp_ctx.Event()
 
-        # Determine reset_ac based on mode
-        reset_ac = mode == "dreamer"
-
         # Launch processes
-        # Pass mode to collector so it knows to wait for models in dreamer mode
-        wait_for_models = (mode == "dreamer")
         experience_loop = mp_ctx.Process(
             target=collect_experiences,
-            args=(data_queue, model_queue, config, stop_event, log_dir, wait_for_models),
+            args=(
+                data_queue,
+                model_queue,
+                cfg,
+                stop_event,
+                log_dir,
+            ),
         )
         trainer_loop = mp_ctx.Process(
             target=train_world_model,
             args=(
-                config,
+                cfg,
                 data_queue,
                 model_queue,
                 log_dir,
                 checkpoint_path,
-                mode,
-                reset_ac,
                 mlflow_run_id,  # Pass MLflow run ID to trainer (None in dry_run)
                 dry_run,
             ),
@@ -294,11 +311,10 @@ def main(cfg: DictConfig):
     # Print resolved config
     print(OmegaConf.to_yaml(cfg))
 
-    # Determine mode and checkpoint from config overrides
-    mode = cfg.get("mode", "train")
+    # Get checkpoint from config overrides
     checkpoint = cfg.get("checkpoint", None)
 
-    run_training(cfg, mode=mode, checkpoint_path=checkpoint)
+    run_training(cfg, checkpoint_path=checkpoint)
 
 
 if __name__ == "__main__":
