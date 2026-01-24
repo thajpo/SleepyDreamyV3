@@ -13,7 +13,7 @@ def initialize_actor(device, cfg):
         Actor network (ThreeLayerMLP)
     """
     # This import is here to avoid circular dependencies
-    from ..encoder import ThreeLayerMLP
+    from .encoder import ThreeLayerMLP
 
     d_in = (cfg.models.d_hidden * cfg.models.rnn.n_blocks) + (
         cfg.models.d_hidden
@@ -37,7 +37,7 @@ def initialize_critic(device, cfg):
     Returns:
         Critic network (ThreeLayerMLP)
     """
-    from ..encoder import ThreeLayerMLP
+    from .encoder import ThreeLayerMLP
 
     d_in = (cfg.models.d_hidden * cfg.models.rnn.n_blocks) + (
         cfg.models.d_hidden
@@ -62,8 +62,8 @@ def initialize_world_model(device, cfg, batch_size=1):
     Returns:
         Tuple of (encoder, world_model)
     """
-    from ..encoder import ObservationEncoder, StateOnlyEncoder
-    from ..world_model import RSSMWorldModel
+    from .encoder import ObservationEncoder, StateOnlyEncoder
+    from .world_model import RSSMWorldModel
 
     use_pixels = cfg.general.use_pixels
 

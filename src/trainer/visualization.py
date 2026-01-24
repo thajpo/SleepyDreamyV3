@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 
 if TYPE_CHECKING:
-    from .mlflow_logger import MLflowLogger
+    from ..utils.mlflow_logger import MLflowLogger
 
 
 def log_metrics(

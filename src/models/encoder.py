@@ -81,7 +81,8 @@ class ObservationCNNEncoder(nn.Module):
         final_feature_size=4,
     ):
         super().__init__()
-        self.target_size = target_size
+        # Coerce to tuple for PyTorch compatibility (OmegaConf returns ListConfig)
+        self.target_size = tuple(target_size)
         self.num_layers = num_layers
         self.final_feature_size = final_feature_size
 

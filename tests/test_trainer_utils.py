@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from src.trainer_utils import twohot_encode, symexp, symlog
+from src.trainer import twohot_encode, symexp, symlog
 
 
 def test_twohot_encode():
