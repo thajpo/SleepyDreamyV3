@@ -1,0 +1,129 @@
+# DreamerV3 Default Configuration
+# Override with: python -m src.train +env=cartpole_state_only
+# Sweep with: python -m src.train --multirun train.actor_lr=1e-5,3e-5,1e-4
+
+defaults:
+  - _self_
+  - env: cartpole_state_only  # default environment
+  - override /hydra/launcher: joblib
+
+# General settings
+general:
+  device: auto  # auto, cuda, mps, cpu
+  use_pixels: false
+  profile: false
+  compile_models: false
+  debug_memory: false
+  dry_run: false  # Skip MLflow/checkpoints for smoke tests
+  experiment_name: null  # MLflow experiment name (null = auto from env name)
+
+# Environment (overridden by env/*.yaml)
+environment:
+  environment_name: CartPole-v1
+  n_actions: 2
+  n_observations: 4
+
+# Model architecture
+models:
+  d_hidden: 64
+  encoder:
+    cnn:
+      stride: 2
+      kernel_size: 2
+      padding: 0
+      input_channels: 3
+      num_layers: 4
+      final_feature_size: 4
+      target_size: [64, 64]
+    mlp:
+      hidden_dim_ratio: 8
+      n_layers: 3
+      latent_categories: 16
+  rnn:
+    n_blocks: 4
+
+# Training hyperparameters
+train:
+  # Core settings
+  max_train_steps: 30000
+  batch_size: 16
+  sequence_length: 32
+
+  # Learning rates (paper: 4e-5 with LaProp)
+  wm_lr: 4e-5
+  actor_lr: 4e-5
+  critic_lr: 4e-5
+  weight_decay: 1e-6
+
+  # RL settings
+  gamma: 0.997  # paper: discount horizon 1/(1-γ)=333
+  lam: 0.95
+  num_dream_steps: 15
+  actor_entropy_coef: 3e-4  # paper: η=3e-4
+  normalize_advantages: true
+
+  # Loss coefficients (DreamerV3 paper: βpred=1, βdyn=1, βrep=0.1)
+  beta_dyn: 1.0
+  beta_rep: 0.1
+  beta_pred: 1.0
+
+  # Reward bins (symexp range)
+  b_start: -5
+  b_end: 6
+
+  # Training phases
+  bootstrap_steps: 5000
+  actor_warmup_steps: 5000
+  wm_ac_ratio: 1  # WM updates per AC update (e.g., 4 = train WM 4x more than AC)
+
+  # Cosine LR decay (applies to all optimizers after warmup)
+  lr_cosine_decay: false
+  lr_cosine_min_factor: 0.1  # Decay to 10% of base LR
+
+  # Cosine WM:AC ratio schedule (high ratio early, low ratio late)
+  wm_ac_ratio_cosine: false
+  wm_ac_ratio_max: 8  # High end of range
+  wm_ac_ratio_min: 2  # Low end of range
+  wm_ac_ratio_invert: false  # If true: start low (2→8), if false: start high (8→2)
+
+  # Surprise-scaled AC learning rate
+  # When enabled, AC learning rate is scaled by 1/(1 + surprise * k)
+  # High surprise = slower AC, keeping WM and AC coupled
+  surprise_scale_ac_lr: true
+  surprise_lr_scale_k: 10.0  # sensitivity (higher = more aggressive scaling)
+  surprise_ema_beta: 0.99  # EMA decay for surprise baseline
+
+  # WM focus mode (extra WM steps when surprise high)
+  surprise_wm_focus_threshold: 0.05  # surprise level to trigger focus
+  surprise_wm_focus_ratio: 4  # WM:AC update ratio during focus
+  surprise_wm_focus_duration: 20  # steps in focus mode
+  surprise_wm_focus_cooldown: 50  # steps after focus before re-entry
+
+  # Early stopping (0 to disable)
+  early_stop_ep_length: 500  # CartPole solved at 500
+
+  # Evaluation (deterministic policy)
+  eval_every: 1000  # 0 to disable
+  eval_episodes: 5
+
+  # Checkpointing
+  checkpoint_interval: 5000
+
+  # Data collection
+  num_collectors: 1
+  replay_buffer_size: 1000
+  min_buffer_episodes: 64
+  steps_per_weight_sync: 5
+
+# Hydra settings
+hydra:
+  run:
+    dir: runs/${now:%m-%d_%H%M%S}
+  sweep:
+    dir: runs/sweeps/${now:%m-%d_%H%M}
+    subdir: ${hydra.job.override_dirname}
+  launcher:
+    # Sequential execution - parallel n_jobs>1 conflicts with nested mp.Process
+    n_jobs: 1
+  job:
+    chdir: false  # Don't change working directory

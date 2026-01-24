@@ -1,0 +1,5 @@
+# @package _global_
+# Run A: Surprise gating enabled, seq_len=32
+train:
+  surprise_scale_ac_lr: true
+  sequence_length: 32

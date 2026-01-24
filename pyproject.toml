@@ -1,5 +1,5 @@
 [project]
-name = "sleepydreamyv3"
+name = "dreamer"
 version = "0.1.0"
 description = "PyTorch implementation of DreamerV3 - model-based reinforcement learning with learned world models"
 readme = "README.md"
@@ -21,6 +21,11 @@ dependencies = [
     "torch>=2.5.0",
     "torchvision>=0.20.0",
 ]
+
+[project.scripts]
+dreamer-train = "dreamer.main:main"
+dreamer-eval = "dreamer.scripts.evaluate:main"
+dreamer-viz = "dreamer.scripts.visualize:main"
 
 [tool.uv.sources]
 torch = [
