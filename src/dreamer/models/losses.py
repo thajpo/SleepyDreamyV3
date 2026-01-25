@@ -20,6 +20,7 @@ def compute_wm_loss(
     config,
     device,
     use_pixels=True,
+    sample_mask=None,
 ):
     """
     Compute world model loss combining prediction, dynamics, and representation losses.
@@ -41,7 +42,7 @@ def compute_wm_loss(
     Returns:
         Tuple of (total_loss, loss_dict) where loss_dict contains individual components
     """
-    # Observation vectors use symlog squared loss
+    # Observation vectors use symlog squared loss (per-sample)
     obs_pred = symlog(obs_reconstruction["state"])
     obs_target = symlog(obs_t["state"])  # loss in symlog space
     beta_dyn = config.train.beta_dyn
@@ -53,30 +54,34 @@ def compute_wm_loss(
     # a. dynamics representation
     # -ln p(x|z,h) is trained with symlog squared loss
     pred_loss_vector = 1 / 2 * (obs_pred - obs_target) ** 2
-    pred_loss_vector = pred_loss_vector.mean()
+    pred_loss_vector = pred_loss_vector.mean(dim=-1)  # (B,)
 
     # Pixel loss (only when using pixels)
     if use_pixels and "pixels" in obs_reconstruction and "pixels" in obs_t:
         pixel_probs = obs_reconstruction["pixels"]
         pixel_target = obs_t["pixels"]
-        bce_with_logits_loss_fn = nn.BCEWithLogitsLoss()
-        pred_loss_pixel = bce_with_logits_loss_fn(
-            input=pixel_probs, target=pixel_target / 255.0
+        pixel_bce = F.binary_cross_entropy_with_logits(
+            pixel_probs, pixel_target / 255.0, reduction="none"
         )
+        pred_loss_pixel = pixel_bce.mean(dim=(1, 2, 3))  # (B,)
     else:
-        pred_loss_pixel = torch.tensor(0.0, device=device)
+        pred_loss_pixel = torch.zeros(
+            pred_loss_vector.shape[0], device=device, dtype=pred_loss_vector.dtype
+        )
 
     reward_target = twohot_encode(reward_t, B)
     # Use soft cross-entropy for soft targets (twohot encoding)
     # reward_dist should be logits, reward_target is probabilities
     reward_loss = -torch.sum(
         reward_target * F.log_softmax(reward_dist, dim=-1), dim=-1
-    ).mean()
+    )  # (B,)
 
     # c. continue predictor
     # The target is 1 if we continue, 0 if we terminate.
     continue_target = (1.0 - terminated_t.float()).unsqueeze(-1)
-    pred_loss_continue = nn.BCEWithLogitsLoss()(continue_logits, continue_target)
+    pred_loss_continue = F.binary_cross_entropy_with_logits(
+        continue_logits, continue_target, reduction="none"
+    ).squeeze(-1)  # (B,)
 
     # Prediction loss is the sum of the individual losses
     l_pred = pred_loss_pixel + pred_loss_vector + reward_loss + pred_loss_continue
@@ -96,15 +101,17 @@ def compute_wm_loss(
     l_dyn_raw = (
         (posterior_probs_detached * (log_posterior_detached - log_prior))
         .sum(dim=-1)
-        .mean()
-    )
+        .mean(dim=-1)
+    )  # (B,)
 
     log_posterior = F.log_softmax(posterior_dist.logits, dim=-1)
     log_prior_detached = F.log_softmax(prior_logits_mixed.detach(), dim=-1)
     posterior_probs = log_posterior.exp()
     l_rep_raw = (
-        (posterior_probs * (log_posterior - log_prior_detached)).sum(dim=-1).mean()
-    )
+        (posterior_probs * (log_posterior - log_prior_detached))
+        .sum(dim=-1)
+        .mean(dim=-1)
+    )  # (B,)
 
     # Straight-through estimator for free bits:
     # Forward: loss = max(free_bits, raw) for reporting/scaling
@@ -112,18 +119,30 @@ def compute_wm_loss(
     l_dyn = l_dyn_raw + (free_bits - l_dyn_raw).clamp(min=0).detach()
     l_rep = l_rep_raw + (free_bits - l_rep_raw).clamp(min=0).detach()
 
-    total_loss = beta_pred * l_pred + beta_dyn * l_dyn + beta_rep * l_rep
+    total_loss_per_sample = beta_pred * l_pred + beta_dyn * l_dyn + beta_rep * l_rep
+
+    if sample_mask is None:
+        total_loss = total_loss_per_sample.mean()
+        mask = None
+    else:
+        mask = sample_mask.float()
+        total_loss = (total_loss_per_sample * mask).sum() / (mask.sum() + 1e-8)
+
+    def _masked_mean(x):
+        if mask is None:
+            return x.mean()
+        return (x * mask).sum() / (mask.sum() + 1e-8)
 
     # Return both total loss and individual components for logging
     loss_dict = {
-        "prediction_pixel": pred_loss_pixel,
-        "prediction_vector": pred_loss_vector,
-        "prediction_reward": reward_loss,
-        "prediction_continue": pred_loss_continue,
-        "dynamics": l_dyn,
-        "representation": l_rep,
-        "kl_dynamics_raw": l_dyn_raw,
-        "kl_representation_raw": l_rep_raw,
+        "prediction_pixel": _masked_mean(pred_loss_pixel),
+        "prediction_vector": _masked_mean(pred_loss_vector),
+        "prediction_reward": _masked_mean(reward_loss),
+        "prediction_continue": _masked_mean(pred_loss_continue),
+        "dynamics": _masked_mean(l_dyn),
+        "representation": _masked_mean(l_rep),
+        "kl_dynamics_raw": _masked_mean(l_dyn_raw),
+        "kl_representation_raw": _masked_mean(l_rep_raw),
     }
 
     return total_loss, loss_dict
@@ -138,6 +157,9 @@ def compute_actor_critic_losses(
     B,
     S,  # EMA for returns
     actor_entropy_coef=0.003,
+    dreamed_values_logits_ema=None,
+    critic_ema_coef=1.0,
+    sample_mask=None,
 ):
     """
     Compute actor and critic losses for policy gradient training.
@@ -149,15 +171,17 @@ def compute_actor_critic_losses(
         dreamed_actions_logits: Action logits from actor
         dreamed_actions_sampled: Sampled actions
         B: Bin tensor for twohot encoding
-        normalize_advantages: Whether to normalize advantages
+        S: EMA for returns
         actor_entropy_coef: Entropy regularization coefficient
+        dreamed_values_logits_ema: Logits from EMA critic (for regularization)
+        critic_ema_coef: Coefficient for EMA regularization
 
     Returns:
         Tuple of (actor_loss, critic_loss, entropy)
     """
-    dreamed_values_logits_flat = dreamed_values_logits.view(
-        -1, dreamed_values_logits.size(-1)
-    )
+    num_bins = dreamed_values_logits.size(-1)
+    H, Bsz = lambda_returns.shape[:2]
+    dreamed_values_logits_flat = dreamed_values_logits.view(-1, num_bins)
     # Detach lambda_returns: critic targets should not have gradients flowing back
     # through dreamed_values (which is part of lambda_returns). This matches
     # DreamerV3's use of sg() (stop_gradient) on value targets.
@@ -166,9 +190,36 @@ def compute_actor_critic_losses(
 
     # Use soft cross-entropy for soft targets (twohot encoding)
     # -sum(targets * log_softmax(logits))
-    critic_loss = -torch.sum(
+    per_step_ce = -torch.sum(
         critic_targets * F.log_softmax(dreamed_values_logits_flat, dim=-1), dim=-1
-    ).mean()
+    ).view(H, Bsz)
+
+    if sample_mask is not None:
+        mask = sample_mask.float().view(1, Bsz)
+        critic_loss = (per_step_ce * mask).sum() / (mask.sum() * H + 1e-8)
+    else:
+        critic_loss = per_step_ce.mean()
+
+    # --- Critic EMA Regularizer (Distributional) ---
+    if dreamed_values_logits_ema is not None:
+        ema_logits_flat = dreamed_values_logits_ema.view(-1, num_bins).detach()
+
+        # Target distribution from EMA critic
+        ema_probs = F.softmax(ema_logits_flat, dim=-1)
+
+        # Cross-entropy: -sum(P_ema * log(P_current))
+        # Note: P_ema is fixed target (detached), P_current has gradients
+        per_step_ema = -torch.sum(
+            ema_probs * F.log_softmax(dreamed_values_logits_flat, dim=-1), dim=-1
+        ).view(H, Bsz)
+        if sample_mask is not None:
+            mask = sample_mask.float().view(1, Bsz)
+            ema_reg_loss = (per_step_ema * mask).sum() / (mask.sum() * H + 1e-8)
+        else:
+            ema_reg_loss = per_step_ema.mean()
+
+        critic_loss += critic_ema_coef * ema_reg_loss
+    # -----------------------------------------------
 
     # Actor Loss: Policy gradient with lambda returns as advantage
     # advantage = (lambda_returns - dreamed_values).detach()
@@ -181,10 +232,17 @@ def compute_actor_critic_losses(
     action_dist = torch.distributions.Categorical(
         logits=dreamed_actions_logits, validate_args=False
     )
-    entropy = action_dist.entropy().mean()
-    log_probs = action_dist.log_prob(dreamed_actions_sampled)
+    entropy = action_dist.entropy()  # (H, B)
+    log_probs = action_dist.log_prob(dreamed_actions_sampled)  # (H, B)
 
     # Reinforce algorithm: log_prob * advantage + entropy bonus for exploration
-    actor_loss = -torch.mean(log_probs * advantage) - actor_entropy_coef * entropy
+    per_step_actor = -(log_probs * advantage) - actor_entropy_coef * entropy
+    if sample_mask is not None:
+        mask = sample_mask.float().view(1, Bsz)
+        actor_loss = (per_step_actor * mask).sum() / (mask.sum() * H + 1e-8)
+        entropy = (entropy * mask).sum() / (mask.sum() * H + 1e-8)
+    else:
+        actor_loss = per_step_actor.mean()
+        entropy = entropy.mean()
 
     return actor_loss, critic_loss, entropy

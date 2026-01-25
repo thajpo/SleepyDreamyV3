@@ -1,4 +1,5 @@
 import math
+import copy
 import torch
 import torch.distributions as dist
 import torch.nn.functional as F
@@ -13,6 +14,7 @@ from ..models import (
     symexp,
     resize_pixels_to_target,
     unimix_logits,
+    twohot_encode,
     initialize_actor,
     initialize_critic,
     initialize_world_model,
@@ -105,6 +107,15 @@ class WorldModelTrainer:
             lr=config.train.actor_lr,
             weight_decay=config.train.weight_decay,
         )
+
+        # distinct critic target network for stability (DreamerV3)
+        self.critic_ema = copy.deepcopy(self.critic)
+        for param in self.critic_ema.parameters():
+            param.requires_grad = False
+
+        self.critic_ema_decay = getattr(config.train, "critic_ema_decay", 0.98)
+        self.critic_ema_regularizer = getattr(config.train, "critic_ema_regularizer", 1.0)
+        self.critic_replay_scale = getattr(config.train, "critic_replay_scale", 0.0)
 
         self.max_train_steps = config.train.max_train_steps
         self.train_step = 0
@@ -320,11 +331,15 @@ class WorldModelTrainer:
             dreamed_rewards_list = []
             dreamed_values_list = []
             actor_entropy_list = []  # Track actor entropy for monitoring
+            # Replay grounding accumulators (posterior states + value annotations)
+            replay_posterior_states = []
+            replay_value_annotations = []
+            replay_loss = None
+            replay_ema_reg = None
             # Initialize loss variables in case loop doesn't execute
             wm_loss = torch.tensor(0.0, device=self.device)
             actor_loss = torch.tensor(0.0, device=self.device)
             critic_loss = torch.tensor(0.0, device=self.device)
-            skip_ac_this_step = True  # Default to skip if loop doesn't run
             last_obs_pixels = None
             last_obs_pixels_original = None
             last_reconstruction_pixels = None
@@ -354,6 +369,17 @@ class WorldModelTrainer:
                 B, T, *all_posterior_logits.shape[1:]
             )
 
+            # Decide AC update once per batch (ratio + focus), then mask per timestep
+            skip_ac_batch = False
+            ac_any = False
+            current_ratio = self.get_current_wm_ac_ratio()
+            self._wm_ac_counter += 1
+            if self._wm_ac_counter < current_ratio:
+                skip_ac_batch = True
+            else:
+                self._wm_ac_counter = 0
+                skip_ac_batch = self.should_skip_ac_for_wm_focus()
+
             for t_step in range(T):
                 # Extract time step - now just indexing, no encoder call
                 if self.use_pixels and self.pixels is not None:
@@ -366,6 +392,7 @@ class WorldModelTrainer:
                 action_t = self.actions[:, t_step]
                 reward_t = self.rewards[:, t_step]
                 terminated_t = self.terminated[:, t_step]
+                sample_mask = self.mask[:, t_step]
 
                 # Use pre-computed encoder output with unimix (DreamerV3 Section 4)
                 posterior_logits = all_posterior_logits[:, t_step]
@@ -407,7 +434,12 @@ class WorldModelTrainer:
                     self.config,
                     self.device,
                     use_pixels=self.use_pixels,
+                    sample_mask=sample_mask,
                 )
+
+                # Collect posterior states for replay grounding (detach to avoid WM grads)
+                if self.critic_replay_scale > 0.0:
+                    replay_posterior_states.append(h_z_joined.detach())
 
                 # Accumulate individual loss components (tensor addition, no GPU sync)
                 for key in wm_loss_components:
@@ -429,20 +461,9 @@ class WorldModelTrainer:
                 )  # (batch, d_hidden, d_hidden/16)
 
                 # --- Dream Sequence for Actor-Critic ---
-                # Check WM focus skip BEFORE dream (uses previous step's surprise)
-                # This avoids computing dream when we'll skip AC anyway
-                skip_ac_this_step = True
-                if self.should_train_ac():
-                    # Check WM:AC ratio first (most common skip reason)
-                    current_ratio = self.get_current_wm_ac_ratio()
-                    self._wm_ac_counter += 1
-                    if self._wm_ac_counter >= current_ratio:
-                        self._wm_ac_counter = 0
-                        # Then check WM focus mode (surprise-triggered)
-                        skip_ac_this_step = self.should_skip_ac_for_wm_focus()
-                    # else: skip_ac_this_step stays True (not enough WM steps yet)
-
-                if self.should_train_ac() and not skip_ac_this_step:
+                # Skip AC for this timestep if batch-level skip is active or no valid samples.
+                valid_ac_step = sample_mask.sum() > 0
+                if not skip_ac_batch and valid_ac_step:
                     h_prev_backup = self.world_model.h_prev.clone()
                     (
                         dreamed_recurrent_states,
@@ -477,6 +498,8 @@ class WorldModelTrainer:
                     )  # Remove trailing (1,) dimension
 
                     dreamed_values_logits = self.critic(dreamed_recurrent_states)
+                    with torch.no_grad():
+                        dreamed_values_logits_ema = self.critic_ema(dreamed_recurrent_states)
                     dreamed_values_probs = F.softmax(dreamed_values_logits, dim=-1)
                     dreamed_values = torch.sum(dreamed_values_probs * self.B, dim=-1)
                     dreamed_values_list.append(dreamed_values.detach().cpu())
@@ -489,6 +512,10 @@ class WorldModelTrainer:
                         self.lam,
                         self.n_dream_steps,
                     )
+
+                    # Store per-timestep imagination return annotation for replay loss
+                    if self.critic_replay_scale > 0.0:
+                        replay_value_annotations.append(lambda_returns[0].detach())
 
                     self.update_return_scale(lambda_returns)
 
@@ -505,8 +532,20 @@ class WorldModelTrainer:
                         self.B,
                         self.S,
                         actor_entropy_coef=self.actor_entropy_coef,
+                        dreamed_values_logits_ema=dreamed_values_logits_ema,
+                        critic_ema_coef=self.critic_ema_regularizer,
+                        sample_mask=sample_mask,
                     )
                     actor_entropy_list.append(entropy.detach().cpu())
+                    ac_any = True
+                else:
+                    actor_loss = torch.tensor(0.0, device=self.device)
+                    critic_loss = torch.tensor(0.0, device=self.device)
+                    # If this timestep is fully padded, append zero annotation to keep length
+                    if self.critic_replay_scale > 0.0 and not skip_ac_batch:
+                        replay_value_annotations.append(
+                            torch.zeros_like(sample_mask, device=self.device)
+                        )
 
                     # Decode dreamed states for visualization (every 50 steps)
                     if self.train_step % 50 == 0 and self.use_pixels:
@@ -529,27 +568,72 @@ class WorldModelTrainer:
                             except Exception:
                                 last_dreamed_pixels = None
 
-                # Accumulate losses (weighted by mask to skip padded steps)
-                # mask_t is mean of mask at this timestep (fraction of valid samples)
-                mask_t = self.mask[:, t_step].mean()
-                
+                # Accumulate losses (per-sample masking handled inside loss functions)
                 if total_wm_loss is None:
-                    total_wm_loss = wm_loss * mask_t
-                    if self.should_train_ac():
-                        total_actor_loss = actor_loss
-                        total_critic_loss = critic_loss
-                    else:
-                        total_actor_loss = torch.tensor(
-                            0.0, device=self.device, requires_grad=False
-                        )
-                        total_critic_loss = torch.tensor(
-                            0.0, device=self.device, requires_grad=False
-                        )
+                    total_wm_loss = wm_loss
+                    total_actor_loss = actor_loss
+                    total_critic_loss = critic_loss
                 else:
-                    total_wm_loss = total_wm_loss + wm_loss * mask_t  # type: ignore
-                    if self.should_train_ac():
-                        total_actor_loss = total_actor_loss + actor_loss  # type: ignore
-                        total_critic_loss = total_critic_loss + critic_loss  # type: ignore
+                    total_wm_loss = total_wm_loss + wm_loss  # type: ignore
+                    total_actor_loss = total_actor_loss + actor_loss  # type: ignore
+                    total_critic_loss = total_critic_loss + critic_loss  # type: ignore
+
+            # --- Replay critic grounding (uses imagination annotations) ---
+            if (
+                self.critic_replay_scale > 0.0
+                and not skip_ac_batch
+                and ac_any
+                and len(replay_value_annotations) == T
+                and len(replay_posterior_states) == T
+            ):
+                # Stack replay data
+                replay_posterior = torch.stack(replay_posterior_states, dim=1)  # [B, T, D]
+                replay_annotations = torch.stack(replay_value_annotations, dim=0)  # [T, B]
+
+                replay_rewards = self.rewards.transpose(0, 1)  # [T, B]
+                replay_continues = (1.0 - self.terminated.float()).transpose(0, 1)  # [T, B]
+                replay_mask = self.mask.transpose(0, 1)  # [T, B]
+
+                # Compute replay lambda-returns with annotations (continues are probabilities)
+                replay_lambda_returns = calculate_lambda_returns(
+                    replay_rewards,
+                    replay_rewards,
+                    replay_continues,
+                    self.gamma,
+                    self.lam,
+                    T,
+                    value_annotations=replay_annotations,
+                    continues_are_logits=False,
+                ).transpose(0, 1)  # [B, T]
+
+                # Critic logits on posterior states (gradients to critic only)
+                replay_logits = self.critic(replay_posterior.detach())  # [B, T, num_bins]
+                logits_flat = replay_logits.reshape(-1, replay_logits.size(-1))
+                targets_flat = replay_lambda_returns.detach().reshape(-1)
+                mask_flat = replay_mask.reshape(-1).float()
+
+                targets_twohot = twohot_encode(targets_flat, self.B)
+                per_step_ce = -torch.sum(
+                    targets_twohot * F.log_softmax(logits_flat, dim=-1), dim=-1
+                )
+                replay_loss = (per_step_ce * mask_flat).sum() / (
+                    mask_flat.sum() + 1e-8
+                )
+
+                # EMA regularizer for replay pass (distributional)
+                with torch.no_grad():
+                    replay_logits_ema = self.critic_ema(replay_posterior.detach())
+                ema_logits_flat = replay_logits_ema.reshape(-1, replay_logits_ema.size(-1))
+                ema_probs = F.softmax(ema_logits_flat, dim=-1)
+                per_step_ema = -torch.sum(
+                    ema_probs * F.log_softmax(logits_flat, dim=-1), dim=-1
+                )
+                replay_ema_reg = (per_step_ema * mask_flat).sum() / (
+                    mask_flat.sum() + 1e-8
+                )
+
+                replay_loss_total = replay_loss + self.critic_ema_regularizer * replay_ema_reg
+                total_critic_loss = total_critic_loss + self.critic_replay_scale * replay_loss_total  # type: ignore
 
             # --- PROFILE: End forward, start backward ---
             torch.cuda.synchronize()
@@ -567,8 +651,8 @@ class WorldModelTrainer:
                 and total_critic_loss is not None
             )
 
-            # Use the skip decision made before dream (already decremented counters)
-            if skip_ac_this_step:
+            # Use the batch-level AC skip decision (or skip if no valid AC steps)
+            if skip_ac_batch or not ac_any:
                 # WM focus mode: only update WM this step
                 total_wm_loss.backward()
                 adaptive_gradient_clipping(self.wm_params)
@@ -594,12 +678,21 @@ class WorldModelTrainer:
                 self.critic_optimizer.step()
                 self.actor_optimizer.step()
 
-                # Reset lr after step (for next iteration's scaling)
-                if lr_scale < 1.0:
-                    for pg in self.actor_optimizer.param_groups:
-                        pg['lr'] = self.base_actor_lr
-                    for pg in self.critic_optimizer.param_groups:
-                        pg['lr'] = self.base_critic_lr
+                # Polyak update for critic EMA
+                with torch.no_grad():
+                    for param, param_ema in zip(
+                        self.critic.parameters(), self.critic_ema.parameters()
+                    ):
+                        param_ema.data.mul_(self.critic_ema_decay).add_(
+                            param.data, alpha=1 - self.critic_ema_decay
+                        )
+
+                    # Reset lr after step (for next iteration's scaling)
+                    if lr_scale < 1.0:
+                        for pg in self.actor_optimizer.param_groups:
+                            pg['lr'] = self.base_actor_lr
+                        for pg in self.critic_optimizer.param_groups:
+                            pg['lr'] = self.base_critic_lr
 
             # --- PROFILE: End backward ---
             torch.cuda.synchronize()
@@ -622,6 +715,8 @@ class WorldModelTrainer:
                 dreamed_rewards_list,
                 dreamed_values_list,
                 actor_entropy_list,
+                replay_loss,
+                replay_ema_reg,
                 last_obs_pixels,
                 last_obs_pixels_original,
                 last_reconstruction_pixels,
@@ -994,6 +1089,8 @@ class WorldModelTrainer:
         dreamed_rewards_list,
         dreamed_values_list,
         actor_entropy_list,
+        replay_loss=None,
+        replay_ema_reg=None,
         last_obs_pixels=None,
         last_obs_pixels_original=None,
         last_reconstruction_pixels=None,
@@ -1050,6 +1147,16 @@ class WorldModelTrainer:
                 self.logger.add_scalar("_key/loss_wm", wm_per_step, step)
                 self.logger.add_scalar("_key/loss_actor", actor_per_step, step)
                 self.logger.add_scalar("_key/loss_critic", critic_per_step, step)
+
+                # Replay critic grounding (logged as raw masked average loss)
+                if replay_loss is not None:
+                    replay_loss_value = float(replay_loss.item())
+                    self.logger.add_scalar("loss/critic/replay", replay_loss_value, step)
+                    self.logger.add_scalar("_key/loss_critic_replay", replay_loss_value, step)
+                if replay_ema_reg is not None:
+                    self.logger.add_scalar(
+                        "loss/critic/replay_ema_reg", float(replay_ema_reg.item()), step
+                    )
 
                 # Raw component values (per-step, unscaled)
                 pixel = wm_components_cpu["prediction_pixel"] * norm

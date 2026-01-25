@@ -51,8 +51,11 @@ train:
   # Learning rates (paper: 4e-5 with LaProp)
   wm_lr: 4e-5
   actor_lr: 4e-5
-  critic_lr: 4e-5
-  weight_decay: 1e-6
+  critic_lr: 3e-5
+  weight_decay: 0.0
+  critic_ema_decay: 0.98        # critic target network polyak decay
+  critic_ema_regularizer: 1.0   # scale of critic EMA regularization loss
+  critic_replay_scale: 0.3      # replay critic loss scale (βrepval)
 
   # RL settings
   gamma: 0.997  # paper: discount horizon 1/(1-γ)=333

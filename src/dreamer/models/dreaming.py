@@ -101,6 +101,8 @@ def calculate_lambda_returns(
     gamma,
     lam,
     num_dream_steps,
+    value_annotations=None,
+    continues_are_logits=True,
 ):
     """
     Calculate lambda-returns (GAE-style) for a dreamed trajectory.
@@ -111,22 +113,34 @@ def calculate_lambda_returns(
     Args:
         dreamed_rewards: (num_steps, batch) predicted rewards
         dreamed_values: (num_steps, batch) predicted values
-        dreamed_continues: (num_steps, batch) continue logits
+        dreamed_continues: (num_steps, batch) continue logits or probabilities
         gamma: Discount factor
         lam: Lambda parameter for GAE (0=TD(0), 1=Monte Carlo)
         num_dream_steps: Number of dream steps
+        value_annotations: Optional (num_steps, batch) value annotations. If provided,
+            these replace dreamed_values in the (1-λ) term and in the bootstrap.
+        continues_are_logits: If True, applies sigmoid to dreamed_continues.
 
     Returns:
         Lambda returns tensor of shape (num_steps, batch)
     """
     lambda_returns = []
-    next_lambda_return = dreamed_values[-1]
+    if value_annotations is None:
+        next_lambda_return = dreamed_values[-1]
+    else:
+        next_lambda_return = value_annotations[-1]
 
     # Iterate backwards through the trajectory
     for i in reversed(range(num_dream_steps)):
         reward_t = dreamed_rewards[i]
-        continue_prob_t = torch.sigmoid(dreamed_continues[i])
-        value_t = dreamed_values[i]
+        if continues_are_logits:
+            continue_prob_t = torch.sigmoid(dreamed_continues[i])
+        else:
+            continue_prob_t = dreamed_continues[i]
+        if value_annotations is None:
+            value_t = dreamed_values[i]
+        else:
+            value_t = value_annotations[i]
 
         next_lambda_return = reward_t + gamma * continue_prob_t * (
             (1 - lam) * value_t + lam * next_lambda_return
