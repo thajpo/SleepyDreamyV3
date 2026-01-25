@@ -2,7 +2,7 @@
 Test script to demonstrate the dynamic CNN encoder with different configurations
 """
 import torch
-from src.encoder import ObservationCNNEncoder
+from dreamer.models.encoder import ObservationCNNEncoder
 
 def test_different_architectures():
     """Test the dynamic CNN encoder with different layer counts and feature sizes"""

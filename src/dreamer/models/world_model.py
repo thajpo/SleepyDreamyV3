@@ -24,6 +24,7 @@ class RSSMWorldModel(nn.Module):
     ):
         super().__init__()
         self.d_hidden = models_config.d_hidden
+        num_classes = self.d_hidden // 16
 
         # GatedRecurrentUnit | Uses n_blocks independent GRUs computed in parallel
         self.n_blocks = models_config.rnn.n_blocks
@@ -53,26 +54,26 @@ class RSSMWorldModel(nn.Module):
         # Outputs prior distribution \hat{z} from the sequence model
         n_gru_blocks = models_config.rnn.n_blocks
         self.dynamics_predictor = DynamicsPredictor(
-            d_in=self.d_hidden * n_gru_blocks, d_hidden=self.d_hidden
+            d_in=self.d_hidden * n_gru_blocks,
+            d_hidden=self.d_hidden,
+            num_latents=models_config.num_latents,
+            num_classes=num_classes,
         )
 
-        self.n_latents = models_config.d_hidden
+        self.n_latents = models_config.num_latents
+        self.n_classes = num_classes
+
         # Initalizing network params for t=0 ; h_0 is the zero matrix
         h_prev = torch.zeros(batch_size, self.d_hidden * n_gru_blocks)
         self.register_buffer("h_prev", h_prev)
-        z_prev = torch.zeros((batch_size, self.d_hidden, int(self.d_hidden / 16)))
+        z_prev = torch.zeros((batch_size, self.n_latents, self.n_classes))
         self.register_buffer("z_prev", z_prev)
 
         # Linear layer to project categorical sample to embedding dimension
-        self.z_embedding = nn.Linear(
-            self.d_hidden * (self.d_hidden // 16), self.d_hidden
-        )
+        self.z_embedding = nn.Linear(self.n_latents * self.n_classes, self.d_hidden)
 
         # Takes 2D categorical samples and projects to d_hidden for GRU input
-        h_z_dim = (self.d_hidden * n_gru_blocks) + (
-            self.d_hidden
-            * (self.d_hidden // models_config.encoder.mlp.latent_categories)
-        )
+        h_z_dim = (self.d_hidden * n_gru_blocks) + (self.n_latents * self.n_classes)
 
         # Rewards use two-hot encoding
         reward_out = abs(b_start - b_end)
@@ -83,10 +84,10 @@ class RSSMWorldModel(nn.Module):
         # Decoder. Outputs distribution of mean predictions for pixel/vector observations
         if use_pixels:
             self.decoder = ObservationDecoder(
+                d_in=h_z_dim,
                 mlp_config=models_config.encoder.mlp,
                 cnn_config=models_config.encoder.cnn,
                 env_config=env_config,
-                gru_config=models_config.rnn,
                 d_hidden=models_config.d_hidden,
             )
         else:
@@ -115,17 +116,19 @@ class RSSMWorldModel(nn.Module):
         """
         B = z_embed.shape[0]
         x = torch.cat((z_embed, action), dim=1)  # (B, d_in)
-        h_blocks = h_prev.view(B, self.n_blocks, self.d_hidden)  # (B, n_blocks, d_hidden)
+        h_blocks = h_prev.view(
+            B, self.n_blocks, self.d_hidden
+        )  # (B, n_blocks, d_hidden)
 
         # Input projections: (B, d_in) @ (n_blocks, d_hidden, d_in).T -> (B, n_blocks, d_hidden)
-        ir = torch.einsum('bi,kji->bkj', x, self._W_ir) + self._b_ir
-        iz = torch.einsum('bi,kji->bkj', x, self._W_iz) + self._b_iz
-        in_ = torch.einsum('bi,kji->bkj', x, self._W_in) + self._b_in
+        ir = torch.einsum("bi,kji->bkj", x, self._W_ir) + self._b_ir
+        iz = torch.einsum("bi,kji->bkj", x, self._W_iz) + self._b_iz
+        in_ = torch.einsum("bi,kji->bkj", x, self._W_in) + self._b_in
 
         # Hidden projections: (B, n_blocks, d_hidden) @ (n_blocks, d_hidden, d_hidden).T -> (B, n_blocks, d_hidden)
-        hr = torch.einsum('bki,kji->bkj', h_blocks, self._W_hr) + self._b_hr
-        hz = torch.einsum('bki,kji->bkj', h_blocks, self._W_hz) + self._b_hz
-        hn = torch.einsum('bki,kji->bkj', h_blocks, self._W_hn) + self._b_hn
+        hr = torch.einsum("bki,kji->bkj", h_blocks, self._W_hr) + self._b_hr
+        hz = torch.einsum("bki,kji->bkj", h_blocks, self._W_hz) + self._b_hz
+        hn = torch.einsum("bki,kji->bkj", h_blocks, self._W_hn) + self._b_hn
 
         # GRU equations (batched element-wise)
         r = torch.sigmoid(ir + hr)
@@ -159,7 +162,7 @@ class RSSMWorldModel(nn.Module):
         """
         # Apply straight-through method to sample z while keeping gradients
         z_indices = posterior_dist.sample()  # (batch_size, latents)
-        z_onehot = F.one_hot(z_indices, num_classes=self.d_hidden // 16).float()
+        z_onehot = F.one_hot(z_indices, num_classes=self.n_classes).float()
         z_sample = z_onehot + (posterior_dist.probs - posterior_dist.probs.detach())
         bsz = z_onehot.shape[0]
         z_flat = z_sample.view(bsz, -1)
@@ -169,10 +172,16 @@ class RSSMWorldModel(nn.Module):
         h, prior_logits = self.step_dynamics(z_embed, action, self.h_prev)
 
         # Generate predictions using the new state
-        (
-            obs_reconstruction, reward_logits, continue_logits, h_z_joined
-        ) = self.predict_heads(h, z_sample)
-        return obs_reconstruction, reward_logits, continue_logits, h_z_joined, prior_logits
+        (obs_reconstruction, reward_logits, continue_logits, h_z_joined) = (
+            self.predict_heads(h, z_sample)
+        )
+        return (
+            obs_reconstruction,
+            reward_logits,
+            continue_logits,
+            h_z_joined,
+            prior_logits,
+        )
 
     def join_h_and_z(self, h, z):
         z_flat = z.view(z.size(0), -1)
@@ -226,15 +235,16 @@ class GatedRecurrentUnit(nn.Module):
 
 class DynamicsPredictor(nn.Module):
     """
-    Upscales GRU to d_hidden ** 2 / 16
+    Upscales GRU to num_latents * num_classes
     Breaks the hidden state into a distribution, and set of bins
     Takes logits over the bins (final dimension)
     """
 
-    def __init__(self, d_in, d_hidden):
+    def __init__(self, d_in, d_hidden, num_latents, num_classes):
         super().__init__()
-        d_out = int(d_hidden**2 / 16)
-        self.n_latents = d_hidden
+        d_out = num_latents * num_classes
+        self.num_latents = num_latents
+        self.num_classes = num_classes
 
         self.layers = nn.Sequential(
             nn.Linear(d_in, d_hidden, bias=True),
@@ -246,6 +256,6 @@ class DynamicsPredictor(nn.Module):
 
     def forward(self, x):
         out = self.layers(x)
-        out = out.view(out.shape[0], self.n_latents, self.n_latents // 16)
+        out = out.view(out.shape[0], self.num_latents, self.num_classes)
 
         return out

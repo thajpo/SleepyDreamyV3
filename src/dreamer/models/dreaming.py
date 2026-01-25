@@ -56,6 +56,7 @@ def dream_sequence(
     for _ in range(num_dream_steps):
         dreamed_recurrent_states.append(dream_h_z.detach())
         action_logits = actor(dream_h_z.detach())
+        action_logits = unimix_logits(action_logits, unimix_ratio=0.01)  # Actor unimix (1%)
         dreamed_actions_logits.append(action_logits)
 
         action_dist = dist.Categorical(logits=action_logits, validate_args=False)
@@ -75,14 +76,12 @@ def dream_sequence(
         )
         dream_z_sample_indices = dream_prior_dist.sample()
         dream_z_sample = F.one_hot(
-            dream_z_sample_indices, num_classes=d_hidden // 16
+            dream_z_sample_indices, num_classes=world_model.n_classes
         ).float()
 
         # 3. Update both state representations for next iteration
         dream_h_state = dream_h_dyn.detach()
-        dream_h_z = world_model.join_h_and_z(
-            dream_h_dyn, dream_z_sample
-        ).detach()
+        dream_h_z = world_model.join_h_and_z(dream_h_dyn, dream_z_sample).detach()
         dream_z_embed = world_model.z_embedding(
             dream_z_sample.view(dream_z_sample.size(0), -1)
         ).detach()

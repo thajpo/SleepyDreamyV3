@@ -1,6 +1,6 @@
 # DreamerV3 Default Configuration
-# Override with: python -m src.train +env=cartpole_state_only
-# Sweep with: python -m src.train --multirun train.actor_lr=1e-5,3e-5,1e-4
+# Override with: uv run dreamer-train +env=cartpole_state_only
+# Sweep with: uv run dreamer-train --multirun train.actor_lr=1e-5,3e-5,1e-4
 
 defaults:
   - _self_
@@ -13,7 +13,6 @@ general:
   use_pixels: false
   profile: false
   compile_models: false
-  debug_memory: false
   dry_run: false  # Skip MLflow/checkpoints for smoke tests
   experiment_name: null  # MLflow experiment name (null = auto from env name)
 
@@ -26,6 +25,7 @@ environment:
 # Model architecture
 models:
   d_hidden: 64
+  num_latents: 32
   encoder:
     cnn:
       stride: 2
@@ -38,14 +38,13 @@ models:
     mlp:
       hidden_dim_ratio: 8
       n_layers: 3
-      latent_categories: 16
   rnn:
     n_blocks: 4
 
 # Training hyperparameters
 train:
   # Core settings
-  max_train_steps: 30000
+  max_train_steps: 7500
   batch_size: 16
   sequence_length: 32
 
@@ -68,12 +67,10 @@ train:
   beta_pred: 1.0
 
   # Reward bins (symexp range)
-  b_start: -5
-  b_end: 6
+  b_start: -20
+  b_end: 20
 
   # Training phases
-  bootstrap_steps: 5000
-  actor_warmup_steps: 5000
   wm_ac_ratio: 1  # WM updates per AC update (e.g., 4 = train WM 4x more than AC)
 
   # Cosine LR decay (applies to all optimizers after warmup)
@@ -114,6 +111,14 @@ train:
   replay_buffer_size: 1000
   min_buffer_episodes: 64
   steps_per_weight_sync: 5
+
+  # Replay ratio gating (DreamerV3 paper)
+  replay_ratio: 1.0  # target train steps per env step
+  action_repeat: 1   # env frames per action
+  recent_fraction: 0.2  # fraction of batch from newest episodes
+
+  # Baseline mode: disable non-paper extras for baseline experiments
+  baseline_mode: false
 
 # Hydra settings
 hydra:

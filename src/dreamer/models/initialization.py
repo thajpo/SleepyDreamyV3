@@ -15,9 +15,9 @@ def initialize_actor(device, cfg):
     # This import is here to avoid circular dependencies
     from .encoder import ThreeLayerMLP
 
+    num_classes = cfg.models.d_hidden // 16
     d_in = (cfg.models.d_hidden * cfg.models.rnn.n_blocks) + (
-        cfg.models.d_hidden
-        * (cfg.models.d_hidden // cfg.models.encoder.mlp.latent_categories)
+        cfg.models.num_latents * num_classes
     )
     return ThreeLayerMLP(
         d_in=d_in,
@@ -37,17 +37,22 @@ def initialize_critic(device, cfg):
     Returns:
         Critic network (ThreeLayerMLP)
     """
+    import torch.nn as nn
     from .encoder import ThreeLayerMLP
 
+    num_classes = cfg.models.d_hidden // 16
     d_in = (cfg.models.d_hidden * cfg.models.rnn.n_blocks) + (
-        cfg.models.d_hidden
-        * (cfg.models.d_hidden // cfg.models.encoder.mlp.latent_categories)
+        cfg.models.num_latents * num_classes
     )
-    return ThreeLayerMLP(
+    critic = ThreeLayerMLP(
         d_in=d_in,
         d_hidden=cfg.models.d_hidden,
         d_out=cfg.train.b_end - cfg.train.b_start,
-    ).to(device)
+    )
+    # Zero-init critic output layer (DreamerV3 paper)
+    nn.init.zeros_(critic.mlp[-1].weight)
+    nn.init.zeros_(critic.mlp[-1].bias)
+    return critic.to(device)
 
 
 def initialize_world_model(device, cfg, batch_size=1):
@@ -73,12 +78,14 @@ def initialize_world_model(device, cfg, batch_size=1):
             cnn_config=cfg.models.encoder.cnn,
             d_hidden=cfg.models.d_hidden,
             n_observations=cfg.environment.n_observations,
+            num_latents=cfg.models.num_latents,
         ).to(device)
     else:
         encoder = StateOnlyEncoder(
             mlp_config=cfg.models.encoder.mlp,
             d_hidden=cfg.models.d_hidden,
             n_observations=cfg.environment.n_observations,
+            num_latents=cfg.models.num_latents,
         ).to(device)
 
     world_model = RSSMWorldModel(

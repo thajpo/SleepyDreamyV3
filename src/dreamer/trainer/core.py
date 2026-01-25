@@ -40,13 +40,22 @@ class WorldModelTrainer:
     ):
         self.config = config  # Store config for use in methods
         self.dry_run = dry_run
-        self.device = torch.device(config.general.device)
+        
+        device_str = config.general.device
+        if device_str == "auto":
+            if torch.cuda.is_available():
+                device_str = "cuda"
+            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                device_str = "mps"
+            else:
+                device_str = "cpu"
+        self.device = torch.device(device_str)
+
         self.use_pixels = config.general.use_pixels
         self.n_dream_steps = config.train.num_dream_steps
         self.gamma = config.train.gamma
         self.lam = config.train.lam
         self.actor_entropy_coef = config.train.actor_entropy_coef
-        self.actor_warmup_steps = config.train.actor_warmup_steps
         b_start = config.train.b_start
         b_end = config.train.b_end
         beta_range = torch.arange(
@@ -102,9 +111,14 @@ class WorldModelTrainer:
         self.data_queue = data_queue
         self.model_queue = model_queue
         self.d_hidden = config.models.d_hidden
+        self.num_latents = config.models.num_latents  # L
+        self.num_classes = config.models.d_hidden // 16  # K
         self.n_actions = config.environment.n_actions
         self.steps_per_weight_sync = config.train.steps_per_weight_sync
         self.batch_size = config.train.batch_size
+        self.sequence_length = config.train.sequence_length
+        self.replay_ratio = getattr(config.train, "replay_ratio", 1.0)
+        self.action_repeat = getattr(config.train, "action_repeat", 1)
         self.profile_enabled = getattr(config.general, "profile", False)
 
         # Replay buffer: background thread drains queue, sample() returns instantly
@@ -159,6 +173,14 @@ class WorldModelTrainer:
         self.wm_ac_ratio_min = config.train.wm_ac_ratio_min
         self.wm_ac_ratio_invert = config.train.wm_ac_ratio_invert
 
+        # Baseline mode: disable non-paper extras for baseline experiments
+        self.baseline_mode = getattr(config.train, "baseline_mode", False)
+        if self.baseline_mode:
+            self.surprise_scale_ac_lr = False
+            self.wm_ac_ratio_cosine = False
+            self.lr_cosine_decay = False
+            print("BASELINE MODE: disabled surprise_scale_ac_lr, wm_ac_ratio_cosine, lr_cosine_decay")
+
         # Deterministic evaluation
         self.eval_every = config.train.eval_every
         self.eval_episodes = config.train.eval_episodes
@@ -189,7 +211,7 @@ class WorldModelTrainer:
 
     def get_data_from_buffer(self):
         """Sample batch from replay buffer (non-blocking after initial fill)."""
-        # Sample returns list of (pixels, states, actions, rewards, terminated) tuples
+        # Sample returns list of (pixels, states, actions, rewards, terminated, mask) tuples
         # Each already has fixed sequence_length from buffer's _sample_subsequence
         batch = self.replay_buffer.sample(self.batch_size)
 
@@ -199,8 +221,9 @@ class WorldModelTrainer:
         batch_actions = []
         batch_rewards = []
         batch_terminated = []
+        batch_mask = []
 
-        for pixels, states, actions, rewards, terminated in batch:
+        for pixels, states, actions, rewards, terminated, mask in batch:
             if self.use_pixels and pixels is not None:
                 target_size = self.config.models.encoder.cnn.target_size
                 # Convert pixels from (T, H, W, C) to (T, C, H, W)
@@ -218,6 +241,7 @@ class WorldModelTrainer:
             batch_actions.append(torch.from_numpy(actions))
             batch_rewards.append(torch.from_numpy(rewards))
             batch_terminated.append(torch.from_numpy(terminated))
+            batch_mask.append(torch.from_numpy(mask))
 
         # Stack into batch tensors: (B, T, ...)
         # Note: All sequences are same length now (buffer handles this)
@@ -238,9 +262,19 @@ class WorldModelTrainer:
         self.actions = torch.stack(batch_actions).to(self.device)  # (B, T, n_actions)
         self.rewards = torch.stack(batch_rewards).to(self.device)  # (B, T)
         self.terminated = torch.stack(batch_terminated).to(self.device)  # (B, T)
+        self.mask = torch.stack(batch_mask).to(self.device)  # (B, T) - 1=real, 0=padded
 
     def train_models(self):
         while self.train_step < self.max_train_steps:
+            # Replay ratio gating: wait if we've trained too fast relative to env steps
+            env_steps = self.replay_buffer.total_env_steps
+            target_train_steps = int(
+                env_steps * self.replay_ratio / (self.batch_size * self.sequence_length * self.action_repeat)
+            )
+            if self.train_step >= target_train_steps and env_steps > 0:
+                time.sleep(0.01)  # Brief wait for more data
+                continue
+
             # Apply cosine LR schedule (if enabled)
             self.apply_lr_schedule()
 
@@ -347,6 +381,17 @@ class WorldModelTrainer:
                     h_z_joined,
                     prior_logits,
                 ) = self.world_model(posterior_dist, action_t)
+
+                # Shape verification (DreamerV3 paper alignment)
+                if t_step == 0:  # Check once per batch
+                    L, K = self.num_latents, self.num_classes
+                    h_dim = self.world_model.n_blocks * self.d_hidden
+                    assert posterior_logits.shape[-2:] == (L, K), \
+                        f"posterior_logits shape {posterior_logits.shape} != [B, {L}, {K}]"
+                    assert prior_logits.shape[-2:] == (L, K), \
+                        f"prior_logits shape {prior_logits.shape} != [B, {L}, {K}]"
+                    assert h_z_joined.shape[-1] == h_dim + L * K, \
+                        f"h_z_joined dim {h_z_joined.shape[-1]} != {h_dim + L * K}"
 
                 # Updating loss of encoder and world model
                 wm_loss, wm_loss_dict = compute_wm_loss(
@@ -484,9 +529,12 @@ class WorldModelTrainer:
                             except Exception:
                                 last_dreamed_pixels = None
 
-                # Accumulate losses
+                # Accumulate losses (weighted by mask to skip padded steps)
+                # mask_t is mean of mask at this timestep (fraction of valid samples)
+                mask_t = self.mask[:, t_step].mean()
+                
                 if total_wm_loss is None:
-                    total_wm_loss = wm_loss
+                    total_wm_loss = wm_loss * mask_t
                     if self.should_train_ac():
                         total_actor_loss = actor_loss
                         total_critic_loss = critic_loss
@@ -498,7 +546,7 @@ class WorldModelTrainer:
                             0.0, device=self.device, requires_grad=False
                         )
                 else:
-                    total_wm_loss = total_wm_loss + wm_loss  # type: ignore
+                    total_wm_loss = total_wm_loss + wm_loss * mask_t  # type: ignore
                     if self.should_train_ac():
                         total_actor_loss = total_actor_loss + actor_loss  # type: ignore
                         total_critic_loss = total_critic_loss + critic_loss  # type: ignore
@@ -519,51 +567,39 @@ class WorldModelTrainer:
                 and total_critic_loss is not None
             )
 
-            if self.should_train_ac():
-                # Use the skip decision made before dream (already decremented counters)
-                if skip_ac_this_step:
-                    # WM focus mode: only update WM this step
-                    total_wm_loss.backward()
-                    adaptive_gradient_clipping(self.wm_params)
-                    self.wm_optimizer.step()
-                else:
-                    # Full training: WM + critic + actor
-                    # Apply surprise-based lr scaling to AC optimizers (uses smoothed surprise)
-                    lr_scale = self.get_ac_lr_scale()
-                    if lr_scale < 1.0:
-                        for pg in self.actor_optimizer.param_groups:
-                            pg['lr'] = self.base_actor_lr * lr_scale
-                        for pg in self.critic_optimizer.param_groups:
-                            pg['lr'] = self.base_critic_lr * lr_scale
-
-                    total_wm_loss.backward()
-                    total_critic_loss.backward()
-                    total_actor_loss.backward()
-                    # AGC: clip gradients based on param/grad norm ratio (DreamerV3)
-                    adaptive_gradient_clipping(self.wm_params)
-                    adaptive_gradient_clipping(self.critic.parameters())
-                    adaptive_gradient_clipping(self.actor.parameters())
-                    self.wm_optimizer.step()
-                    self.critic_optimizer.step()
-                    self.actor_optimizer.step()
-
-                    # Reset lr after step (for next iteration's scaling)
-                    if lr_scale < 1.0:
-                        for pg in self.actor_optimizer.param_groups:
-                            pg['lr'] = self.base_actor_lr
-                        for pg in self.critic_optimizer.param_groups:
-                            pg['lr'] = self.base_critic_lr
-            else:
-                # WM only: warmup phase
+            # Use the skip decision made before dream (already decremented counters)
+            if skip_ac_this_step:
+                # WM focus mode: only update WM this step
                 total_wm_loss.backward()
                 adaptive_gradient_clipping(self.wm_params)
                 self.wm_optimizer.step()
-                # Log warmup progress
-                if self.train_step % 100 == 0:
-                    seq_len = self.states.shape[1] if hasattr(self, "states") else 1
-                    print(
-                        f"Warmup {self.train_step}/{self.actor_warmup_steps} | WM Loss/step: {total_wm_loss.item() / seq_len:.4f}"
-                    )
+            else:
+                # Full training: WM + critic + actor
+                # Apply surprise-based lr scaling to AC optimizers (uses smoothed surprise)
+                lr_scale = self.get_ac_lr_scale()
+                if lr_scale < 1.0:
+                    for pg in self.actor_optimizer.param_groups:
+                        pg['lr'] = self.base_actor_lr * lr_scale
+                    for pg in self.critic_optimizer.param_groups:
+                        pg['lr'] = self.base_critic_lr * lr_scale
+
+                total_wm_loss.backward()
+                total_critic_loss.backward()
+                total_actor_loss.backward()
+                # AGC: clip gradients based on param/grad norm ratio (DreamerV3)
+                adaptive_gradient_clipping(self.wm_params)
+                adaptive_gradient_clipping(self.critic.parameters())
+                adaptive_gradient_clipping(self.actor.parameters())
+                self.wm_optimizer.step()
+                self.critic_optimizer.step()
+                self.actor_optimizer.step()
+
+                # Reset lr after step (for next iteration's scaling)
+                if lr_scale < 1.0:
+                    for pg in self.actor_optimizer.param_groups:
+                        pg['lr'] = self.base_actor_lr
+                    for pg in self.critic_optimizer.param_groups:
+                        pg['lr'] = self.base_critic_lr
 
             # --- PROFILE: End backward ---
             torch.cuda.synchronize()
@@ -594,16 +630,9 @@ class WorldModelTrainer:
                 log_step,
             )
 
-            # Send models to collector after warmup
-            if (
-                self.train_step >= self.actor_warmup_steps
-                and self.train_step % self.steps_per_weight_sync == 0
-            ):
-                if self.train_step == self.actor_warmup_steps:
-                    print(
-                        f"Trainer: Warmup complete at step {self.train_step}. Sending initial models."
-                        )
-                    self.send_models_to_collector(self.train_step)
+            # Send models to collector periodically
+            if self.train_step % self.steps_per_weight_sync == 0:
+                self.send_models_to_collector(self.train_step)
 
             # Periodic logging (every 100 steps)
             self.steps_since_log += 1
@@ -687,40 +716,11 @@ class WorldModelTrainer:
         )
         return log_ratio
 
-    def should_train_ac(self) -> bool:
-        """Check if actor-critic should be trained this step (warmup check only)."""
-        should_train = self.train_step >= self.actor_warmup_steps
 
-        # Reset focus state when first entering AC training (avoid warmup carryover)
-        if should_train and not self._ac_training_started:
-            self._ac_training_started = True
-            self._wm_focus_steps_remaining = 0
-            self._wm_focus_cooldown_remaining = 0
-            self._wm_focus_ac_counter = 0
-            self._wm_ac_counter = 0
-            self._smoothed_surprise = 0.0
-            if self.wm_ac_ratio > 1 or self.wm_ac_ratio_cosine:
-                if self.wm_ac_ratio_cosine:
-                    if self.wm_ac_ratio_invert:
-                        ratio_str = f"{self.wm_ac_ratio_min}→{self.wm_ac_ratio_max}"
-                    else:
-                        ratio_str = f"{self.wm_ac_ratio_max}→{self.wm_ac_ratio_min}"
-                else:
-                    ratio_str = str(self.wm_ac_ratio)
-                print(f"AC training started with WM:AC ratio = {ratio_str}:1")
-
-        return should_train
-
-    def get_cosine_schedule(self, max_val: float, min_val: float) -> float:
         """
         Cosine schedule from max_val to min_val over training.
-        Progress is measured from actor_warmup_steps to max_train_steps.
         """
-        if self.train_step <= self.actor_warmup_steps:
-            return max_val
-        ac_steps = self.train_step - self.actor_warmup_steps
-        total_ac_steps = self.max_train_steps - self.actor_warmup_steps
-        progress = min(1.0, ac_steps / max(1, total_ac_steps))
+        progress = min(1.0, self.train_step / max(1, self.max_train_steps))
         # Cosine decay: starts at max, ends at min
         return min_val + 0.5 * (max_val - min_val) * (1 + math.cos(math.pi * progress))
 

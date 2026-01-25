@@ -10,11 +10,10 @@ class ObservationEncoder(nn.Module):
         cnn_config,
         d_hidden,
         n_observations,
+        num_latents=32,
     ):
         super().__init__()
-        self.MLP = ThreeLayerMLP(
-            d_in=n_observations, d_hidden=d_hidden, d_out=d_hidden
-        )
+        self.MLP = ThreeLayerMLP(d_in=n_observations, d_hidden=d_hidden, d_out=d_hidden)
         self.CNN = ObservationCNNEncoder(
             target_size=cnn_config.target_size,
             in_channels=cnn_config.input_channels,
@@ -27,19 +26,19 @@ class ObservationEncoder(nn.Module):
             final_feature_size=cnn_config.final_feature_size,
         )
 
-        self.latents = d_hidden
-        # Use dynamic calculation based on actual config parameters
-
         n_channels = int(d_hidden / mlp_config.hidden_dim_ratio)
         cnn_out_features = (
             n_channels * 2 ** (cnn_config.num_layers - 1)
         ) * cnn_config.final_feature_size**2
 
         encoder_out = cnn_out_features + d_hidden  # CNN + MLP
-        self.latent_categories = mlp_config.latent_categories
 
-        # Paper
-        logit_out = self.latents * (self.latents // self.latent_categories)
+        num_classes = d_hidden // 16
+        self.num_latents = num_latents
+        self.num_classes = num_classes
+
+        # Output logits: L * K
+        logit_out = num_latents * num_classes
         self.logit_layer = nn.Linear(in_features=encoder_out, out_features=logit_out)
 
     def forward(self, x):
@@ -55,8 +54,9 @@ class ObservationEncoder(nn.Module):
         x = torch.cat((x1, x2), dim=1)  # Join outputs along feature dimension
 
         # feed this through a network to get out code * latent size
+        # feed this through a network to get out code * classes
         x = self.logit_layer(x)
-        x = x.view(x.shape[0], self.latents, self.latents // self.latent_categories)
+        x = x.view(x.shape[0], self.num_latents, self.num_classes)
 
         # Return logits directly. The Categorical distribution will handle the softmax.
         return x
@@ -175,22 +175,23 @@ class StateOnlyEncoder(nn.Module):
         mlp_config,
         d_hidden,
         n_observations,
+        num_latents=32,
     ):
         super().__init__()
-        self.MLP = ThreeLayerMLP(
-            d_in=n_observations, d_hidden=d_hidden, d_out=d_hidden
-        )
+        self.MLP = ThreeLayerMLP(d_in=n_observations, d_hidden=d_hidden, d_out=d_hidden)
 
-        self.latents = d_hidden
-        self.latent_categories = mlp_config.latent_categories
+        num_classes = d_hidden // 16
+        self.num_latents = num_latents
+        self.num_classes = num_classes
 
-        # Output: latents * (latents // categories) logits
-        logit_out = self.latents * (self.latents // self.latent_categories)
+        # Output: latents * classes logits
+        logit_out = num_latents * num_classes
         self.logit_layer = nn.Linear(in_features=d_hidden, out_features=logit_out)
 
     def forward(self, x):
         # x is the state vector directly (not a dict)
         out = self.MLP(x)
         logits = self.logit_layer(out)
-        logits = logits.view(logits.shape[0], self.latents, self.latents // self.latent_categories)
+        logits = logits.view(logits.shape[0], self.num_latents, self.num_classes)
+
         return logits

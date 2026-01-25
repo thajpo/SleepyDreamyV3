@@ -1,4 +1,5 @@
 """Visualize world model dreams as MP4 videos."""
+
 import argparse
 import torch
 import torch.nn.functional as F
@@ -9,7 +10,12 @@ from pathlib import Path
 import hydra
 from omegaconf import DictConfig, OmegaConf
 
-from ..models import initialize_actor, initialize_world_model, symlog, resize_pixels_to_target
+from ..models import (
+    initialize_actor,
+    initialize_world_model,
+    symlog,
+    resize_pixels_to_target,
+)
 from ..envs.utils import create_env
 
 
@@ -31,7 +37,9 @@ def load_models(config, checkpoint_path, device, load_actor=False):
         actor.eval()
         print("Actor loaded from checkpoint")
     elif load_actor:
-        print("Warning: --use-actor specified but no actor in checkpoint, using random actions")
+        print(
+            "Warning: --use-actor specified but no actor in checkpoint, using random actions"
+        )
 
     step = checkpoint.get("step", "unknown")
     print(f"Loaded checkpoint from step {step}")
@@ -63,8 +71,10 @@ def encode_observation(config, obs, encoder, world_model, device):
         posterior_dist = dist.Categorical(logits=posterior_logits, validate_args=False)
 
         # Sample z
+        z_onehot = F.one_hot(
+            z_indices, num_classes=config.models.d_hidden // 16
+        ).float()
         z_indices = posterior_dist.sample()
-        z_onehot = F.one_hot(z_indices, num_classes=config.models.d_hidden // 16).float()
         z_sample = z_onehot + (posterior_dist.probs - posterior_dist.probs.detach())
 
         # Get z embedding
@@ -72,14 +82,18 @@ def encode_observation(config, obs, encoder, world_model, device):
         z_embed = world_model.z_embedding(z_flat)
 
         # Initialize h and step dynamics once to get initial state
-        h = torch.zeros(1, config.models.d_hidden * config.models.rnn.n_blocks, device=device)
+        h = torch.zeros(
+            1, config.models.d_hidden * config.models.rnn.n_blocks, device=device
+        )
         action_zero = torch.zeros(1, config.environment.n_actions, device=device)
         h, _ = world_model.step_dynamics(z_embed, action_zero, h)
 
     return h, z_sample, z_embed, pixels
 
 
-def dream_rollout(config, world_model, actor, h_init, z_embed_init, num_steps, device, use_actor=False):
+def dream_rollout(
+    config, world_model, actor, h_init, z_embed_init, num_steps, device, use_actor=False
+):
     """
     Roll out the world model for num_steps, returning decoded frames.
 
@@ -99,7 +113,9 @@ def dream_rollout(config, world_model, actor, h_init, z_embed_init, num_steps, d
         for step in range(num_steps):
             # Decode current state to pixels
             # First need to get z_sample from z_embed (approximate by using prior)
-            _, prior_logits = world_model.step_dynamics(z_embed, torch.zeros(1, n_actions, device=device), h)
+            _, prior_logits = world_model.step_dynamics(
+                z_embed, torch.zeros(1, n_actions, device=device), h
+            )
             prior_dist = dist.Categorical(logits=prior_logits, validate_args=False)
             z_indices = prior_dist.sample()
             z_sample = F.one_hot(z_indices, num_classes=d_hidden // 16).float()
@@ -115,7 +131,9 @@ def dream_rollout(config, world_model, actor, h_init, z_embed_init, num_steps, d
             # Select action
             if use_actor and actor is not None:
                 action_logits = actor(h_z)
-                action_dist = dist.Categorical(logits=action_logits, validate_args=False)
+                action_dist = dist.Categorical(
+                    logits=action_logits, validate_args=False
+                )
                 action = action_dist.sample()
             else:
                 action = torch.randint(0, n_actions, (1,), device=device)
@@ -202,7 +220,7 @@ def create_comparison_grid(initial_frame, dream_frames, grid_cols=6):
     # Build grid
     rows = []
     for i in range(0, len(all_frames), grid_cols):
-        row = np.concatenate(all_frames[i:i+grid_cols], axis=1)
+        row = np.concatenate(all_frames[i : i + grid_cols], axis=1)
         rows.append(row)
     grid = np.concatenate(rows, axis=0)
 
@@ -254,8 +272,14 @@ def main(cfg: DictConfig):
     for rollout_idx in range(num_rollouts):
         # Generate dream rollout
         frames, actions = dream_rollout(
-            cfg, world_model, actor, h_init, z_embed_init,
-            num_steps, device, use_actor=use_actor
+            cfg,
+            world_model,
+            actor,
+            h_init,
+            z_embed_init,
+            num_steps,
+            device,
+            use_actor=use_actor,
         )
 
         # Build output filename

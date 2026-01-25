@@ -13,25 +13,22 @@ class ObservationDecoder(nn.Module):
 
     def __init__(
         self,
+        d_in,
         mlp_config,
         cnn_config,
         env_config,
-        gru_config,
         d_hidden,
     ):
         super().__init__()
-        n_gru_blocks = gru_config.n_blocks
-        decoder_input_dim = (d_hidden * n_gru_blocks) + (
-            d_hidden * (d_hidden // mlp_config.latent_categories)
-        )
+
 
         self.MLP = ThreeLayerMLP(
-            d_in=decoder_input_dim,
+            d_in=d_in,
             d_hidden=d_hidden,
             d_out=env_config.n_observations,
         )
         self.CNN = ObservationCNNDecoder(
-            d_in=decoder_input_dim,
+            d_in=d_in,
             in_channels=cnn_config.input_channels,
             kernel_size=cnn_config.kernel_size,
             stride=cnn_config.stride,

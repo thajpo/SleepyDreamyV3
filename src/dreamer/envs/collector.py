@@ -14,6 +14,7 @@ def resize_image(img, target_size=(64, 64)):
     """Resize image using cv2 (much faster than torch on CPU)."""
     return cv2.resize(img, target_size, interpolation=cv2.INTER_AREA)
 
+
 def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=None):
     """
     Continuously collects experiences from the environment and puts them on a queue.
@@ -42,11 +43,13 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
             # First update: initialize models
             if actor is None:
                 actor = initialize_actor(device=device, cfg=config)
-                encoder, world_model = initialize_world_model(device, batch_size=1, cfg=config)
-            actor.load_state_dict(new_model_states['actor'])
-            encoder.load_state_dict(new_model_states['encoder'])
+                encoder, world_model = initialize_world_model(
+                    device, batch_size=1, cfg=config
+                )
+            actor.load_state_dict(new_model_states["actor"])
+            encoder.load_state_dict(new_model_states["encoder"])
             # strict=False: ignore h_prev/z_prev buffer shape mismatch (batch size differs)
-            world_model.load_state_dict(new_model_states['world_model'], strict=False)
+            world_model.load_state_dict(new_model_states["world_model"], strict=False)
             actor.eval()
             encoder.eval()
             world_model.eval()
@@ -61,13 +64,19 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
         episode_count += 1
         obs, info = env.reset()
 
-        episode_pixels, episode_vec_obs, episode_actions, episode_rewards, episode_terminated = (
-            [], [], [], [], []
-        )
+        (
+            episode_pixels,
+            episode_vec_obs,
+            episode_actions,
+            episode_rewards,
+            episode_terminated,
+        ) = ([], [], [], [], [])
 
         # Initialize world model state for learned policy
         if not use_random_actions:
-            h = torch.zeros(1, config.models.d_hidden * config.models.rnn.n_blocks, device=device)
+            h = torch.zeros(
+                1, config.models.d_hidden * config.models.rnn.n_blocks, device=device
+            )
             action_onehot = torch.zeros(1, n_actions, device=device)
             print(f"Collecting episode {episode_count} (learned policy)...")
         else:
@@ -82,9 +91,19 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
                 # Learned policy path
                 if use_pixels:
                     # Pixel mode: resize and prepare dict input
-                    resized_for_encoder = resize_image(obs['pixels'], target_size=(64, 64))
-                    pixel_obs_t = torch.from_numpy(resized_for_encoder).to(device).float().permute(2, 0, 1).unsqueeze(0)
-                    vec_obs_t = torch.from_numpy(obs['state']).to(device).float().unsqueeze(0)
+                    resized_for_encoder = resize_image(
+                        obs["pixels"], target_size=(64, 64)
+                    )
+                    pixel_obs_t = (
+                        torch.from_numpy(resized_for_encoder)
+                        .to(device)
+                        .float()
+                        .permute(2, 0, 1)
+                        .unsqueeze(0)
+                    )
+                    vec_obs_t = (
+                        torch.from_numpy(obs["state"]).to(device).float().unsqueeze(0)
+                    )
                     vec_obs_t = symlog(vec_obs_t)
                     encoder_input = {"pixels": pixel_obs_t, "state": vec_obs_t}
                 else:
@@ -95,18 +114,27 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
 
                 with torch.no_grad():
                     posterior_logits = encoder(encoder_input)
-                    posterior_logits_mixed = unimix_logits(posterior_logits, unimix_ratio=0.01)
-                    posterior_dist = torch.distributions.Categorical(logits=posterior_logits_mixed)
+                    posterior_logits_mixed = unimix_logits(
+                        posterior_logits, unimix_ratio=0.01
+                    )
+                    posterior_dist = torch.distributions.Categorical(
+                        logits=posterior_logits_mixed
+                    )
                     z_indices = posterior_dist.sample()
-                    z_onehot = F.one_hot(z_indices, num_classes=config.models.encoder.mlp.latent_categories).float()
-                    z_sample = z_onehot + (posterior_dist.probs - posterior_dist.probs.detach())
+                    num_classes = config.models.d_hidden // 16
+                    z_onehot = F.one_hot(z_indices, num_classes=num_classes).float()
+                    z_sample = z_onehot + (
+                        posterior_dist.probs - posterior_dist.probs.detach()
+                    )
                     z_flat = z_sample.view(1, -1)
 
                     z_embed = world_model.z_embedding(z_flat)
                     h, _ = world_model.step_dynamics(z_embed, action_onehot, h)
 
                     actor_input = world_model.join_h_and_z(h, z_sample)
-                    action_dist = torch.distributions.Categorical(logits=actor(actor_input))
+                    action_dist = torch.distributions.Categorical(
+                        logits=actor(actor_input)
+                    )
                     action = action_dist.sample()
 
                 action_np = action.item()
@@ -146,12 +174,25 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
             terminated_np = np.array(episode_terminated, dtype=bool)
 
             episode_length = len(vec_obs_np)
-            data_queue.put((pixels_np, vec_obs_np, actions_np, rewards_np, terminated_np, episode_length))
+            data_queue.put(
+                (
+                    pixels_np,
+                    vec_obs_np,
+                    actions_np,
+                    rewards_np,
+                    terminated_np,
+                    episode_length,
+                )
+            )
 
             # On-demand collection: wait if queue is sufficiently full
             # This prevents wasteful over-collection in fast envs (e.g., state-only CartPole)
             while not stop_event.is_set():
-                queue_fill_ratio = data_queue.qsize() / data_queue._maxsize if data_queue._maxsize else 0
+                queue_fill_ratio = (
+                    data_queue.qsize() / data_queue._maxsize
+                    if data_queue._maxsize
+                    else 0
+                )
                 if queue_fill_ratio < 0.8:
                     break  # Queue has room, collect more
                 time.sleep(0.1)  # Wait for trainer to drain queue
