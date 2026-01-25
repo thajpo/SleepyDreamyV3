@@ -27,6 +27,7 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
     env = create_env(config.environment.environment_name, use_pixels=use_pixels)
     device = "cpu"
     n_actions = config.environment.n_actions
+    action_repeat = getattr(config.train, "action_repeat", 1)
 
     # Start in random action mode - models initialized lazily
     use_random_actions = True
@@ -81,6 +82,8 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
             print(f"Collecting episode {episode_count} (learned policy)...")
         else:
             print(f"Collecting episode {episode_count} (random)...")
+
+        env_steps_in_episode = 0
 
         while not stop_event.is_set():
             if use_random_actions:
@@ -141,8 +144,16 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
                 action_onehot = F.one_hot(action, num_classes=n_actions).float()
                 action_onehot_np = action_onehot.cpu().numpy().squeeze()
 
-            # Execute action
-            obs, reward, terminated, truncated, info = env.step(action_np)
+            # Execute action with repeat
+            total_reward = 0.0
+            terminated = False
+            truncated = False
+            for _ in range(action_repeat):
+                obs, reward, terminated, truncated, info = env.step(action_np)
+                total_reward += float(reward)
+                env_steps_in_episode += 1
+                if terminated or truncated:
+                    break
 
             # Store observations
             if use_pixels:
@@ -155,7 +166,7 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
                 episode_vec_obs.append(obs)
 
             episode_actions.append(action_onehot_np)
-            episode_rewards.append(reward)
+            episode_rewards.append(total_reward)
             episode_terminated.append(terminated)
 
             if terminated or truncated:
@@ -173,7 +184,7 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
             rewards_np = np.array(episode_rewards, dtype=np.float32)
             terminated_np = np.array(episode_terminated, dtype=bool)
 
-            episode_length = len(vec_obs_np)
+            episode_length = env_steps_in_episode
             data_queue.put(
                 (
                     pixels_np,
