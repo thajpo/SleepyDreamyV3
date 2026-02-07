@@ -3,6 +3,14 @@
 import gymnasium as gym
 from gymnasium.wrappers import AddRenderObservation
 
+# Register ALE (Atari) environments if available
+try:
+    import ale_py
+
+    gym.register_envs(ale_py)
+except ImportError:
+    pass
+
 
 def create_env(env_name, render_mode="rgb_array", use_pixels=True):
     """

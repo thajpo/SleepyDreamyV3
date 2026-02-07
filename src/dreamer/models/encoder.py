@@ -13,7 +13,12 @@ class ObservationEncoder(nn.Module):
         num_latents=32,
     ):
         super().__init__()
-        self.MLP = ThreeLayerMLP(d_in=n_observations, d_hidden=d_hidden, d_out=d_hidden)
+        self.use_state = n_observations > 0
+
+        if self.use_state:
+            self.MLP = ThreeLayerMLP(
+                d_in=n_observations, d_hidden=d_hidden, d_out=d_hidden
+            )
         self.CNN = ObservationCNNEncoder(
             target_size=cnn_config.target_size,
             in_channels=cnn_config.input_channels,
@@ -31,7 +36,10 @@ class ObservationEncoder(nn.Module):
             n_channels * 2 ** (cnn_config.num_layers - 1)
         ) * cnn_config.final_feature_size**2
 
-        encoder_out = cnn_out_features + d_hidden  # CNN + MLP
+        if self.use_state:
+            encoder_out = cnn_out_features + d_hidden  # CNN + MLP
+        else:
+            encoder_out = cnn_out_features  # CNN only
 
         num_classes = d_hidden // 16
         self.num_latents = num_latents
@@ -45,13 +53,16 @@ class ObservationEncoder(nn.Module):
         # x is passed as a dict of ['state', 'pixels']
         # Expect pixels in (B, C, H, W) format - conversion happens once when loading data
         image_obs = x["pixels"] / 255.0
-        vec_obs = x["state"]
 
         x1 = self.CNN(image_obs)
         x1 = x1.reshape(x1.size(0), -1)  # Flatten all features
 
-        x2 = self.MLP(vec_obs)
-        x = torch.cat((x1, x2), dim=1)  # Join outputs along feature dimension
+        if self.use_state:
+            vec_obs = x["state"]
+            x2 = self.MLP(vec_obs)
+            x = torch.cat((x1, x2), dim=1)  # Join outputs along feature dimension
+        else:
+            x = x1  # CNN only
 
         # feed this through a network to get out code * latent size
         # feed this through a network to get out code * classes

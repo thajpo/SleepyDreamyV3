@@ -45,9 +45,9 @@ def compute_wm_loss(
     # Observation vectors use symlog squared loss (per-sample)
     obs_pred = symlog(obs_reconstruction["state"])
     obs_target = symlog(obs_t["state"])  # loss in symlog space
-    beta_dyn = config.train.beta_dyn
-    beta_rep = config.train.beta_rep
-    beta_pred = config.train.beta_pred
+    beta_dyn = config.beta_dyn
+    beta_rep = config.beta_rep
+    beta_pred = config.beta_pred
 
     # There are three loss terms:
     # 1. Prediction loss: -ln p(x|z,h) - ln(p(r|z,h)) + ln(p(c|z,h))

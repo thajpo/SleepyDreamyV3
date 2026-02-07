@@ -1,57 +1,57 @@
 #!/usr/bin/env python3
 """
-Hydra-based training entry point for DreamerV3.
+Argparse-based training entry point for DreamerV3 (post-Hydra migration).
 
 Usage:
-    # Single run with defaults
     # Single run with defaults
     uv run dreamer-train
 
     # Override parameters
-    uv run dreamer-train train.actor_lr=3e-5 train.actor_entropy_coef=0.01
+    uv run dreamer-train --wm_lr 5e-4 --d_hidden 128
 
-    # Use different environment config
-    uv run dreamer-train +env=cartpole_vision
+    # Use environment-specific base config
+    uv run dreamer-train --config cartpole
 
-    # Multirun sweep (sequential)
-    uv run dreamer-train --multirun train.actor_lr=1e-5,3e-5,1e-4
-    # Or use predefined sweep config
-    uv run dreamer-train --multirun +sweep=ac_params
-
-    # Resume from checkpoint
-    uv run dreamer-train checkpoint=/path/to/checkpoint.pt
-
-    # Dry run (smoke test - no MLflow, no checkpoints, temp directory)
-    uv run dreamer-train general.dry_run=true train.max_steps=100
+    # Dry run
+    uv run dreamer-train --dry_run --max_train_steps 100
 """
 
+import argparse
 import os
 import subprocess
 import socket
+import tempfile
+from datetime import datetime
+from pathlib import Path
 
-# Set AMD ROCm env var before any torch imports
 os.environ.setdefault("HSA_OVERRIDE_GFX_VERSION", "11.0.0")
-
-import hydra
 import mlflow
-from omegaconf import DictConfig, OmegaConf
-import multiprocessing as mp
 import torch
+from dataclasses import asdict
+import multiprocessing as mp
 
-from .trainer import train_world_model
-from .envs.collector import collect_experiences
+from dreamer.config import (
+    Config,
+    default_config,
+    cartpole_config,
+    ratio_sweep_5e4_config,
+    paper_cartpole_config,
+    atari_pong_config,
+    dump_config_json,
+)
+from dreamer.trainer import train_world_model
+from dreamer.envs.collector import collect_experiences
 
 
-def resolve_device(cfg: DictConfig) -> str:
+def resolve_device(device_str: str) -> str:
     """Resolve device from config, handling 'auto' setting."""
-    device = cfg.general.device
-    if device == "auto":
+    if device_str == "auto":
         if torch.cuda.is_available():
             return "cuda"
-        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
             return "mps"
         return "cpu"
-    return device
+    return device_str
 
 
 def is_port_in_use(port: int) -> bool:
@@ -76,64 +76,6 @@ def get_git_commit() -> str | None:
     return None
 
 
-def get_sweep_info() -> dict:
-    """
-    Extract sweep information from Hydra config.
-
-    Returns:
-        dict with keys:
-        - is_sweep: bool
-        - sweep_id: str | None (sweep directory basename, e.g., "01-17_1430")
-        - varied_params: dict (parsed overrides, e.g., {"actor_lr": "1e-4"})
-    """
-    try:
-        hydra_cfg = hydra.core.hydra_config.HydraConfig.get()
-        is_sweep = hydra_cfg.mode.name == "MULTIRUN"
-
-        if is_sweep:
-            sweep_dir = hydra_cfg.sweep.dir
-            sweep_id = os.path.basename(sweep_dir)
-            override_dirname = hydra_cfg.job.override_dirname
-
-            # Parse override_dirname to extract varied params
-            # Format: "train.actor_lr=1e-4,train.gamma=0.99"
-            varied_params = {}
-            if override_dirname:
-                for part in override_dirname.split(","):
-                    if "=" in part:
-                        key, value = part.split("=", 1)
-                        # Use short key (last part after dot)
-                        short_key = key.split(".")[-1]
-                        varied_params[short_key] = value
-
-            return {
-                "is_sweep": True,
-                "sweep_id": sweep_id,
-                "varied_params": varied_params,
-            }
-    except Exception:
-        pass
-
-    return {"is_sweep": False, "sweep_id": None, "varied_params": {}}
-
-
-def generate_run_name(log_dir: str, sweep_info: dict) -> str:
-    """
-    Generate a descriptive run name.
-
-    Format:
-    - Single run: "01-17_1430" (timestamp from Hydra)
-    - Sweep run: "lr=1e-4_gamma=0.99" (varied params only, sweep_id in tags)
-    """
-    base_name = os.path.basename(log_dir)
-
-    if sweep_info["is_sweep"] and sweep_info["varied_params"]:
-        # For sweeps, show the varied params (makes comparing runs easy)
-        return "_".join(f"{k}={v}" for k, v in sweep_info["varied_params"].items())
-
-    return base_name
-
-
 def start_mlflow_ui(mlruns_dir: str, port: int = 5000) -> subprocess.Popen | None:
     """Start MLflow UI server in background if not already running."""
     if is_port_in_use(port):
@@ -156,123 +98,207 @@ def start_mlflow_ui(mlruns_dir: str, port: int = 5000) -> subprocess.Popen | Non
     return proc
 
 
-def flatten_config(cfg: DictConfig, parent_key: str = "", sep: str = ".") -> dict:
-    """
-    Flatten a nested OmegaConf config to a flat dict with dot notation keys.
+def build_arg_parser() -> argparse.ArgumentParser:
+    """Build argparse parser for Config fields."""
+    parser = argparse.ArgumentParser(description="Train DreamerV3")
+    parser.add_argument(
+        "--config",
+        choices=[
+            "default",
+            "cartpole",
+            "ratio_sweep_5e4",
+            "paper_cartpole",
+            "atari_pong",
+        ],
+        default="default",
+        help="Base config to use",
+    )
+    parser.add_argument(
+        "--dry_run",
+        action="store_true",
+        help="Dry run mode (no MLflow, no checkpoints)",
+    )
 
-    Example: {"train": {"lr": 0.001}} -> {"train.lr": 0.001}
-    """
-    items = {}
-    for key, value in cfg.items():
-        key_str = str(key)
-        new_key = f"{parent_key}{sep}{key_str}" if parent_key else key_str
-        if isinstance(value, DictConfig):
-            items.update(flatten_config(value, new_key, sep))
-        else:
-            # Convert to basic Python types for MLflow
-            if hasattr(value, "item"):  # numpy/torch scalar
-                value = value.item()
-            items[new_key] = value
-    return items
+    # Flatten all Config fields into CLI arguments
+    parser.add_argument("--device", help="Device (auto/cuda/mps/cpu)")
+    parser.add_argument("--use_pixels", type=bool, help="Use pixel observations")
+    parser.add_argument("--profile", type=bool, help="Enable PyTorch profiler")
+    parser.add_argument("--compile_models", type=bool, help="Use torch.compile")
+    parser.add_argument("--experiment_name", type=str, help="MLflow experiment name")
+
+    # Environment
+    parser.add_argument("--environment_name", type=str, help="Gym environment name")
+    parser.add_argument("--n_actions", type=int, help="Action space size")
+    parser.add_argument("--n_observations", type=int, help="Observation vector size")
+
+    # Model architecture
+    parser.add_argument("--d_hidden", type=int, help="RSSM hidden size")
+    parser.add_argument(
+        "--num_latents", type=int, help="Number of discrete latent variables"
+    )
+
+    # Encoder CNN
+    parser.add_argument("--encoder_cnn_stride", type=int, help="CNN stride")
+    parser.add_argument("--encoder_cnn_kernel_size", type=int, help="CNN kernel size")
+    parser.add_argument("--encoder_cnn_num_layers", type=int, help="CNN layers")
+    parser.add_argument(
+        "--encoder_mlp_hidden_dim_ratio", type=int, help="Encoder MLP hidden dim ratio"
+    )
+    parser.add_argument("--encoder_mlp_n_layers", type=int, help="Encoder MLP layers")
+    parser.add_argument("--rnn_n_blocks", type=int, help="RSSM GRU block count")
+
+    # Training core
+    parser.add_argument("--max_train_steps", type=int, help="Max training steps")
+    parser.add_argument("--batch_size", type=int, help="Batch size")
+    parser.add_argument("--sequence_length", type=int, help="Sequence length")
+    parser.add_argument("--wm_lr", type=float, help="World model learning rate")
+    parser.add_argument("--actor_lr", type=float, help="Actor learning rate")
+    parser.add_argument("--critic_lr", type=float, help="Critic learning rate")
+    parser.add_argument("--weight_decay", type=float, help="L2 weight decay")
+    parser.add_argument("--critic_ema_decay", type=float, help="Critic EMA decay")
+    parser.add_argument(
+        "--critic_ema_regularizer", type=float, help="Critic EMA regularizer"
+    )
+    parser.add_argument(
+        "--critic_replay_scale", type=float, help="Critic replay loss scale"
+    )
+    parser.add_argument("--gamma", type=float, help="Discount factor")
+    parser.add_argument("--lam", type=float, help="TD lambda")
+    parser.add_argument("--num_dream_steps", type=int, help="Imagination horizon")
+    parser.add_argument(
+        "--actor_entropy_coef", type=float, help="Actor entropy coefficient"
+    )
+    parser.add_argument(
+        "--normalize_advantages", type=bool, help="Normalize advantages"
+    )
+    parser.add_argument("--beta_dyn", type=float, help="Dynamics KL weight")
+    parser.add_argument("--beta_rep", type=float, help="Representation KL weight")
+    parser.add_argument("--beta_pred", type=float, help="Prediction weight")
+    parser.add_argument("--b_start", type=int, help="Reward bin start")
+    parser.add_argument("--b_end", type=int, help="Reward bin end")
+    parser.add_argument("--wm_ac_ratio", type=int, help="WM updates per AC update")
+    parser.add_argument("--lr_cosine_decay", type=bool, help="Cosine LR decay")
+    parser.add_argument(
+        "--lr_cosine_min_factor", type=float, help="Cosine LR min factor"
+    )
+    parser.add_argument(
+        "--wm_ac_ratio_cosine", type=bool, help="Cosine WM:AC ratio schedule"
+    )
+    parser.add_argument("--wm_ac_ratio_max", type=int, help="Max WM:AC ratio")
+    parser.add_argument("--wm_ac_ratio_min", type=int, help="Min WM:AC ratio")
+    parser.add_argument("--wm_ac_ratio_invert", type=bool, help="Invert WM:AC schedule")
+    parser.add_argument(
+        "--surprise_scale_ac_lr", type=bool, help="Surprise-scaled AC LR"
+    )
+    parser.add_argument("--surprise_lr_scale_k", type=float, help="Surprise LR scale k")
+    parser.add_argument("--surprise_ema_beta", type=float, help="Surprise EMA beta")
+    parser.add_argument(
+        "--surprise_wm_focus_threshold", type=float, help="WM focus threshold"
+    )
+    parser.add_argument("--surprise_wm_focus_ratio", type=int, help="WM focus ratio")
+    parser.add_argument(
+        "--surprise_wm_focus_duration", type=int, help="WM focus duration"
+    )
+    parser.add_argument(
+        "--surprise_wm_focus_cooldown", type=int, help="WM focus cooldown"
+    )
+    parser.add_argument(
+        "--early_stop_ep_length", type=int, help="Early stop episode length"
+    )
+    parser.add_argument("--eval_every", type=int, help="Eval interval")
+    parser.add_argument("--eval_episodes", type=int, help="Eval episodes")
+    parser.add_argument("--checkpoint_interval", type=int, help="Checkpoint interval")
+    parser.add_argument("--num_collectors", type=int, help="Number of collectors")
+    parser.add_argument("--replay_buffer_size", type=int, help="Replay buffer size")
+    parser.add_argument("--min_buffer_episodes", type=int, help="Min buffer episodes")
+    parser.add_argument(
+        "--steps_per_weight_sync", type=int, help="Steps per weight sync"
+    )
+    parser.add_argument("--replay_ratio", type=float, help="Replay ratio")
+    parser.add_argument("--action_repeat", type=int, help="Action repeat")
+    parser.add_argument("--recent_fraction", type=float, help="Recent fraction")
+    parser.add_argument("--baseline_mode", type=bool, help="Baseline mode")
+
+    return parser
 
 
-def run_training(
-    cfg: DictConfig, checkpoint_path: str | None = None
-):
+def apply_cli_args(cfg: Config, args: argparse.Namespace) -> Config:
+    """Apply CLI overrides to Config."""
+    args_dict = vars(args)
+    for k, v in args_dict.items():
+        if v is not None and hasattr(cfg, k) and k not in ["config", "dry_run"]:
+            setattr(cfg, k, v)
+    return cfg
+
+
+def run_training(cfg: Config, checkpoint_path: str | None = None):
     """Run training with the given configuration."""
-    import tempfile
+    device = resolve_device(cfg.device)
 
-    # Resolve device (handle 'auto' setting)
-    device = resolve_device(cfg)
-
-    # Check for dry_run mode (smoke tests - no MLflow, no checkpoints)
-    dry_run = cfg.get("general", {}).get("dry_run", False)
-
-    # Get output directory from Hydra (or temp dir for dry_run)
-    if dry_run:
-        log_dir = tempfile.mkdtemp(prefix="dreamer_dry_")
+    if cfg.dry_run:
+        log_dir = Path(tempfile.mkdtemp(prefix="dreamer_dry_"))
+        timestamp = datetime.now().strftime("%m-%d_%H%M%S")
         print(f"DRY RUN MODE - no MLflow, no checkpoints, temp dir: {log_dir}")
     else:
-        log_dir = hydra.core.hydra_config.HydraConfig.get().runtime.output_dir
+        timestamp = datetime.now().strftime("%m-%d_%H%M%S")
+        log_dir = Path("runs") / timestamp
+        log_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Training Configuration:")
-    print(f"  Environment: {cfg.environment.environment_name}")
+    print(f"  Environment: {cfg.environment_name}")
     print(f"  Device: {device}")
-    print(f"  d_hidden: {cfg.models.d_hidden}")
-    print(f"  batch_size: {cfg.train.batch_size}")
-    print(f"  actor_lr: {cfg.train.actor_lr}")
-    print(f"  actor_entropy_coef: {cfg.train.actor_entropy_coef}")
+    print(f"  d_hidden: {cfg.d_hidden}")
+    print(f"  batch_size: {cfg.batch_size}")
+    print(f"  actor_lr: {cfg.actor_lr}")
+    print(f"  actor_entropy_coef: {cfg.actor_entropy_coef}")
     print(f"  Output: {log_dir}")
 
     if checkpoint_path:
         print(f"  Checkpoint: {checkpoint_path}")
 
-    # Setup MLflow tracking (skip in dry_run mode)
-    mlflow_run_id = None
+    # Dump config JSON for repro
+    config_path = log_dir / "config.json"
+    dump_config_json(cfg, str(config_path))
+    print(f"  Config saved: {config_path}")
 
-    if not dry_run:
-        mlruns_dir = os.path.join(os.path.dirname(log_dir), "mlruns")
-        mlflow.set_tracking_uri(f"file://{mlruns_dir}")
-        exp_name = cfg.general.get("experiment_name", None)
-        if not exp_name:
-            exp_name = f"DreamerV3-{cfg.environment.environment_name}"
+    # Setup MLflow
+    mlflow_run_id = None
+    if not cfg.dry_run:
+        mlruns_dir = log_dir.parent / "mlruns"
+        mlruns_dir.mkdir(parents=True, exist_ok=True)
+        mlflow.set_tracking_uri(f"file://{mlruns_dir.resolve()}")
+
+        exp_name = cfg.experiment_name or f"DreamerV3-{cfg.environment_name}"
         mlflow.set_experiment(exp_name)
 
-        # Always start fresh MLflow runs (even when loading checkpoint)
-
-        # Get sweep info and generate descriptive run name
-        sweep_info = get_sweep_info()
-        run_name = generate_run_name(log_dir, sweep_info)
-
-        # Start MLflow run (resume if run_id exists)
-        run = mlflow.start_run(run_id=mlflow_run_id, run_name=run_name)
+        run_name = f"{cfg.experiment_name or 'run'}_{timestamp}"
+        run = mlflow.start_run(run_name=run_name)
         mlflow_run_id = run.info.run_id
         print(f"  MLflow run ID: {mlflow_run_id}")
         print(f"  MLflow tracking: {mlruns_dir}")
 
-        # Add useful tags for filtering/grouping
+        # Tags
         git_commit = get_git_commit()
         if git_commit:
             mlflow.set_tag("git_commit", git_commit)
 
-        if sweep_info["is_sweep"]:
-            mlflow.set_tag("sweep_id", sweep_info["sweep_id"])
-            mlflow.set_tag("run_type", "sweep")
-            print(f"  Sweep ID: {sweep_info['sweep_id']}")
-        else:
-            mlflow.set_tag("run_type", "single")
+        start_mlflow_ui(str(mlruns_dir), port=5000)
 
-        # Start MLflow UI server
-        start_mlflow_ui(mlruns_dir, port=5000)
-
-    # Log flattened config as parameters (skip in dry_run)
-    if not dry_run:
-        flat_params = flatten_config(cfg)
-        # MLflow has a 500 param limit, truncate long values
-        for k, v in flat_params.items():
+        # Log config as params
+        for k, v in asdict(cfg).items():
             if isinstance(v, str) and len(v) > 250:
-                flat_params[k] = v[:250] + "..."
-        mlflow.log_params(flat_params)
+                v = v[:250] + "..."
+            mlflow.log_param(k, str(v))
 
     try:
-        # Use explicit spawn context for CUDA compatibility
         mp_ctx = mp.get_context("spawn")
-
-        # Create queues for inter-process communication
-        data_queue = mp_ctx.Queue(maxsize=cfg.train.batch_size * 5)
+        data_queue = mp_ctx.Queue(maxsize=cfg.batch_size * 5)
         model_queue = mp_ctx.Queue(maxsize=1)
         stop_event = mp_ctx.Event()
 
-        # Launch processes
         experience_loop = mp_ctx.Process(
             target=collect_experiences,
-            args=(
-                data_queue,
-                model_queue,
-                cfg,
-                stop_event,
-                log_dir,
-            ),
+            args=(data_queue, model_queue, cfg, stop_event, str(log_dir)),
         )
         trainer_loop = mp_ctx.Process(
             target=train_world_model,
@@ -280,10 +306,10 @@ def run_training(
                 cfg,
                 data_queue,
                 model_queue,
-                log_dir,
+                str(log_dir),
                 checkpoint_path,
-                mlflow_run_id,  # Pass MLflow run ID to trainer (None in dry_run)
-                dry_run,
+                mlflow_run_id,
+                cfg.dry_run,
             ),
         )
 
@@ -302,20 +328,35 @@ def run_training(
 
         print("Training complete.")
     finally:
-        if not dry_run:
+        if not cfg.dry_run:
             mlflow.end_run()
 
 
-@hydra.main(version_base=None, config_path="conf", config_name="config")
-def main(cfg: DictConfig):
-    """Hydra entry point."""
-    # Print resolved config
-    print(OmegaConf.to_yaml(cfg))
+def main():
+    """Main entry point."""
+    parser = build_arg_parser()
+    args = parser.parse_args()
 
-    # Get checkpoint from config overrides
-    checkpoint = cfg.get("checkpoint", None)
+    # Apply config based on --config flag
+    if args.config == "cartpole":
+        cfg = cartpole_config()
+    elif args.config == "ratio_sweep_5e4":
+        cfg = ratio_sweep_5e4_config()
+    elif args.config == "paper_cartpole":
+        cfg = paper_cartpole_config()
+    elif args.config == "atari_pong":
+        cfg = atari_pong_config()
+    else:
+        cfg = default_config()
 
-    run_training(cfg, checkpoint_path=checkpoint)
+    # Apply dry_run if passed
+    if args.dry_run:
+        cfg.dry_run = True
+
+    # Apply CLI overrides
+    cfg = apply_cli_args(cfg, args)
+
+    run_training(cfg)
 
 
 if __name__ == "__main__":

@@ -23,11 +23,11 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
     Switches to learned policy when trainer sends first model update.
     Stops when stop_event is set by the trainer.
     """
-    use_pixels = config.general.use_pixels
-    env = create_env(config.environment.environment_name, use_pixels=use_pixels)
+    use_pixels = config.use_pixels
+    env = create_env(config.environment_name, use_pixels=use_pixels)
     device = "cpu"
-    n_actions = config.environment.n_actions
-    action_repeat = getattr(config.train, "action_repeat", 1)
+    n_actions = config.n_actions
+    action_repeat = getattr(config, "action_repeat", 1)
 
     # Start in random action mode - models initialized lazily
     use_random_actions = True
@@ -75,9 +75,7 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
 
         # Initialize world model state for learned policy
         if not use_random_actions:
-            h = torch.zeros(
-                1, config.models.d_hidden * config.models.rnn.n_blocks, device=device
-            )
+            h = torch.zeros(1, config.d_hidden * config.rnn_n_blocks, device=device)
             action_onehot = torch.zeros(1, n_actions, device=device)
             print(f"Collecting episode {episode_count} (learned policy)...")
         else:
@@ -124,7 +122,7 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
                         logits=posterior_logits_mixed
                     )
                     z_indices = posterior_dist.sample()
-                    num_classes = config.models.d_hidden // 16
+                    num_classes = config.d_hidden // 16
                     z_onehot = F.one_hot(z_indices, num_classes=num_classes).float()
                     z_sample = z_onehot + (
                         posterior_dist.probs - posterior_dist.probs.detach()
@@ -160,7 +158,8 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
                 # Resize pixels immediately (400x600 -> 64x64) to reduce memory/queue overhead
                 resized_pixels = resize_image(obs["pixels"], target_size=(64, 64))
                 episode_pixels.append(resized_pixels)
-                episode_vec_obs.append(obs["state"])
+                # obs["state"] is the same as pixels for Atari - store dummy vector
+                episode_vec_obs.append(np.zeros(1, dtype=np.float32))
             else:
                 # State-only mode: obs is the state array directly
                 episode_vec_obs.append(obs)

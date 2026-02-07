@@ -1,5 +1,7 @@
 import math
 import copy
+import json
+from dataclasses import asdict
 import torch
 import torch.distributions as dist
 import torch.nn.functional as F
@@ -42,8 +44,8 @@ class WorldModelTrainer:
     ):
         self.config = config  # Store config for use in methods
         self.dry_run = dry_run
-        
-        device_str = config.general.device
+
+        device_str = config.device
         if device_str == "auto":
             if torch.cuda.is_available():
                 device_str = "cuda"
@@ -53,13 +55,13 @@ class WorldModelTrainer:
                 device_str = "cpu"
         self.device = torch.device(device_str)
 
-        self.use_pixels = config.general.use_pixels
-        self.n_dream_steps = config.train.num_dream_steps
-        self.gamma = config.train.gamma
-        self.lam = config.train.lam
-        self.actor_entropy_coef = config.train.actor_entropy_coef
-        b_start = config.train.b_start
-        b_end = config.train.b_end
+        self.use_pixels = config.use_pixels
+        self.n_dream_steps = config.num_dream_steps
+        self.gamma = config.gamma
+        self.lam = config.lam
+        self.actor_entropy_coef = config.actor_entropy_coef
+        b_start = config.b_start
+        b_end = config.b_end
         beta_range = torch.arange(
             start=b_start,
             end=b_end,
@@ -71,10 +73,10 @@ class WorldModelTrainer:
         self.actor = initialize_actor(self.device, config)
         self.critic = initialize_critic(self.device, config)
         self.encoder, self.world_model = initialize_world_model(
-            self.device, config, batch_size=config.train.batch_size
+            self.device, config, batch_size=config.batch_size
         )
 
-        self.compile_models = getattr(config.general, "compile_models", False)
+        self.compile_models = getattr(config, "compile_models", False)
         if self.compile_models:
             if hasattr(torch, "compile"):
                 try:
@@ -94,18 +96,18 @@ class WorldModelTrainer:
         # LaProp optimizer (DreamerV3): more stable than Adam for RL
         self.wm_optimizer = LaProp(
             self.wm_params,
-            lr=config.train.wm_lr,
-            weight_decay=config.train.weight_decay,
+            lr=config.wm_lr,
+            weight_decay=config.weight_decay,
         )
         self.critic_optimizer = LaProp(
             self.critic.parameters(),
-            lr=config.train.critic_lr,
-            weight_decay=config.train.weight_decay,
+            lr=config.critic_lr,
+            weight_decay=config.weight_decay,
         )
         self.actor_optimizer = LaProp(
             self.actor.parameters(),
-            lr=config.train.actor_lr,
-            weight_decay=config.train.weight_decay,
+            lr=config.actor_lr,
+            weight_decay=config.weight_decay,
         )
 
         # distinct critic target network for stability (DreamerV3)
@@ -113,35 +115,35 @@ class WorldModelTrainer:
         for param in self.critic_ema.parameters():
             param.requires_grad = False
 
-        self.critic_ema_decay = getattr(config.train, "critic_ema_decay", 0.98)
-        self.critic_ema_regularizer = getattr(config.train, "critic_ema_regularizer", 1.0)
-        self.critic_replay_scale = getattr(config.train, "critic_replay_scale", 0.0)
+        self.critic_ema_decay = getattr(config, "critic_ema_decay", 0.98)
+        self.critic_ema_regularizer = getattr(config, "critic_ema_regularizer", 1.0)
+        self.critic_replay_scale = getattr(config, "critic_replay_scale", 0.0)
 
-        self.max_train_steps = config.train.max_train_steps
+        self.max_train_steps = config.max_train_steps
         self.train_step = 0
         self.data_queue = data_queue
         self.model_queue = model_queue
-        self.d_hidden = config.models.d_hidden
-        self.num_latents = config.models.num_latents  # L
-        self.num_classes = config.models.d_hidden // 16  # K
-        self.n_actions = config.environment.n_actions
-        self.steps_per_weight_sync = config.train.steps_per_weight_sync
-        self.batch_size = config.train.batch_size
-        self.sequence_length = config.train.sequence_length
-        self.replay_ratio = getattr(config.train, "replay_ratio", 1.0)
-        self.action_repeat = getattr(config.train, "action_repeat", 1)
-        self.profile_enabled = getattr(config.general, "profile", False)
+        self.d_hidden = config.d_hidden
+        self.num_latents = config.num_latents  # L
+        self.num_classes = config.d_hidden // 16  # K
+        self.n_actions = config.n_actions
+        self.steps_per_weight_sync = config.steps_per_weight_sync
+        self.batch_size = config.batch_size
+        self.sequence_length = config.sequence_length
+        self.replay_ratio = getattr(config, "replay_ratio", 1.0)
+        self.action_repeat = getattr(config, "action_repeat", 1)
+        self.profile_enabled = getattr(config, "profile", False)
 
         # Replay buffer: background thread drains queue, sample() returns instantly
         self.replay_buffer = EpisodeReplayBuffer(
             data_queue=data_queue,
-            max_episodes=config.train.replay_buffer_size,
-            min_episodes=config.train.batch_size
+            max_episodes=config.replay_buffer_size,
+            min_episodes=config.batch_size
             * 2,  # Wait for 2 batches worth before starting
-            sequence_length=config.train.sequence_length,
+            sequence_length=config.sequence_length,
         )
         self.replay_buffer.start()
-        print(f"Replay buffer started (max={config.train.replay_buffer_size} episodes)")
+        print(f"Replay buffer started (max={config.replay_buffer_size} episodes)")
 
         # Initialize MLflow logger with the provided log directory
         self.mlflow_run_id = mlflow_run_id
@@ -150,66 +152,71 @@ class WorldModelTrainer:
         print(f"MLflow logging to: {log_dir}")
         self.log_every = 250
         self.image_log_every = 2500
-        self.surprise_ema_beta = config.train.surprise_ema_beta
+        self.surprise_ema_beta = config.surprise_ema_beta
         self._wm_surprise_ema = {}
         self._last_surprise_log_ratio = 0.0  # Raw surprise (log ratio)
-        self._smoothed_surprise = 0.0  # Smoothed surprise for LR scaling (lingers after spikes)
-        self.surprise_smooth_beta = 0.9  # How fast smoothed surprise decays (higher = slower)
-        self.surprise_scale_ac_lr = config.train.surprise_scale_ac_lr
-        self.surprise_lr_scale_k = config.train.surprise_lr_scale_k
-        self.base_actor_lr = config.train.actor_lr
-        self.base_critic_lr = config.train.critic_lr
+        self._smoothed_surprise = (
+            0.0  # Smoothed surprise for LR scaling (lingers after spikes)
+        )
+        self.surprise_smooth_beta = (
+            0.9  # How fast smoothed surprise decays (higher = slower)
+        )
+        self.surprise_scale_ac_lr = config.surprise_scale_ac_lr
+        self.surprise_lr_scale_k = config.surprise_lr_scale_k
+        self.base_actor_lr = config.actor_lr
+        self.base_critic_lr = config.critic_lr
         self._wm_surprise_eps = 1e-8
 
         # WM focus mode: extra WM steps when surprise spikes
-        self.surprise_wm_focus_threshold = config.train.surprise_wm_focus_threshold
-        self.surprise_wm_focus_ratio = config.train.surprise_wm_focus_ratio
-        self.surprise_wm_focus_duration = config.train.surprise_wm_focus_duration
-        self.surprise_wm_focus_cooldown = config.train.surprise_wm_focus_cooldown
+        self.surprise_wm_focus_threshold = config.surprise_wm_focus_threshold
+        self.surprise_wm_focus_ratio = config.surprise_wm_focus_ratio
+        self.surprise_wm_focus_duration = config.surprise_wm_focus_duration
+        self.surprise_wm_focus_cooldown = config.surprise_wm_focus_cooldown
         self._wm_focus_steps_remaining = 0  # Countdown for focus mode
         self._wm_focus_cooldown_remaining = 0  # Cooldown after focus (no re-entry)
         self._wm_focus_ac_counter = 0  # Counter for AC step ratio
 
         # WM:AC update ratio (e.g., 4 = do 4 WM updates per 1 AC update)
-        self.wm_ac_ratio = config.train.wm_ac_ratio
+        self.wm_ac_ratio = config.wm_ac_ratio
         self._wm_ac_counter = 0  # Counts WM steps since last AC step
 
         # Cosine LR decay
-        self.lr_cosine_decay = config.train.lr_cosine_decay
-        self.lr_cosine_min_factor = config.train.lr_cosine_min_factor
+        self.lr_cosine_decay = config.lr_cosine_decay
+        self.lr_cosine_min_factor = config.lr_cosine_min_factor
 
         # Cosine WM:AC ratio schedule
-        self.wm_ac_ratio_cosine = config.train.wm_ac_ratio_cosine
-        self.wm_ac_ratio_max = config.train.wm_ac_ratio_max
-        self.wm_ac_ratio_min = config.train.wm_ac_ratio_min
-        self.wm_ac_ratio_invert = config.train.wm_ac_ratio_invert
+        self.wm_ac_ratio_cosine = config.wm_ac_ratio_cosine
+        self.wm_ac_ratio_max = config.wm_ac_ratio_max
+        self.wm_ac_ratio_min = config.wm_ac_ratio_min
+        self.wm_ac_ratio_invert = config.wm_ac_ratio_invert
 
         # Baseline mode: disable non-paper extras for baseline experiments
-        self.baseline_mode = getattr(config.train, "baseline_mode", False)
+        self.baseline_mode = getattr(config, "baseline_mode", False)
         if self.baseline_mode:
             self.surprise_scale_ac_lr = False
             self.wm_ac_ratio_cosine = False
             self.lr_cosine_decay = False
-            print("BASELINE MODE: disabled surprise_scale_ac_lr, wm_ac_ratio_cosine, lr_cosine_decay")
+            print(
+                "BASELINE MODE: disabled surprise_scale_ac_lr, wm_ac_ratio_cosine, lr_cosine_decay"
+            )
 
         # Deterministic evaluation
-        self.eval_every = config.train.eval_every
-        self.eval_episodes = config.train.eval_episodes
+        self.eval_every = config.eval_every
+        self.eval_episodes = config.eval_episodes
         self._ac_training_started = False  # Track if we've entered AC training phase
 
         # Early stopping (0 to disable)
-        self.early_stop_ep_length = getattr(config.train, "early_stop_ep_length", 0)
+        self.early_stop_ep_length = getattr(config, "early_stop_ep_length", 0)
 
         # Checkpointing
         self.checkpoint_dir = os.path.join(log_dir, "checkpoints")
         os.makedirs(self.checkpoint_dir, exist_ok=True)
-        self.checkpoint_interval = config.train.checkpoint_interval
+        self.checkpoint_interval = config.checkpoint_interval
 
         # Save config snapshot
         config_path = os.path.join(log_dir, "config.json")
         with open(config_path, "w") as f:
-            f.write(config.model_dump_json(indent=2))
-        print(f"Config saved to: {config_path}")
+            json.dump(asdict(config), f, indent=2)
 
         # Timing
         self.step_times = []
@@ -236,17 +243,13 @@ class WorldModelTrainer:
 
         for pixels, states, actions, rewards, terminated, mask in batch:
             if self.use_pixels and pixels is not None:
-                target_size = self.config.models.encoder.cnn.target_size
+                target_size = self.config.encoder_cnn_target_size
                 # Convert pixels from (T, H, W, C) to (T, C, H, W)
                 pixels_tensor = torch.from_numpy(pixels).permute(0, 3, 1, 2)
                 batch_pixels_original.append(pixels_tensor)  # Keep original resolution
-                if pixels_tensor.shape[-2:] == target_size:
-                    pixels_resized = pixels_tensor
-                else:
-                    pixels_resized = resize_pixels_to_target(
-                        pixels_tensor.float(), target_size
-                    )
-                batch_pixels.append(pixels_resized)
+                if pixels_tensor.shape[-2:] != target_size:
+                    pixels_tensor = resize_pixels_to_target(pixels_tensor, target_size)
+                batch_pixels.append(pixels_tensor)
 
             batch_states.append(torch.from_numpy(states))
             batch_actions.append(torch.from_numpy(actions))
@@ -280,7 +283,9 @@ class WorldModelTrainer:
             # Replay ratio gating: wait if we've trained too fast relative to env steps
             env_steps = self.replay_buffer.total_env_steps
             target_train_steps = int(
-                env_steps * self.replay_ratio / (self.batch_size * self.sequence_length * self.action_repeat)
+                env_steps
+                * self.replay_ratio
+                / (self.batch_size * self.sequence_length * self.action_repeat)
             )
             if self.train_step >= target_train_steps and env_steps > 0:
                 time.sleep(0.01)  # Brief wait for more data
@@ -289,11 +294,8 @@ class WorldModelTrainer:
             # Apply cosine LR schedule (if enabled)
             self.apply_lr_schedule()
 
-            # --- PROFILE: Data loading ---
-            t0 = time.perf_counter()
+            # Data loading
             self.get_data_from_buffer()  # Sample from replay buffer (non-blocking)
-            torch.cuda.synchronize()
-            timing.log_phase("data", time.perf_counter() - t0)
 
             # Skip if no data was retrieved
             if not hasattr(self, "states") or self.states.shape[1] == 0:
@@ -396,7 +398,9 @@ class WorldModelTrainer:
 
                 # Use pre-computed encoder output with unimix (DreamerV3 Section 4)
                 posterior_logits = all_posterior_logits[:, t_step]
-                posterior_logits_mixed = unimix_logits(posterior_logits, unimix_ratio=0.01)
+                posterior_logits_mixed = unimix_logits(
+                    posterior_logits, unimix_ratio=0.01
+                )
                 posterior_dist = dist.Categorical(
                     logits=posterior_logits_mixed, validate_args=False
                 )
@@ -413,12 +417,15 @@ class WorldModelTrainer:
                 if t_step == 0:  # Check once per batch
                     L, K = self.num_latents, self.num_classes
                     h_dim = self.world_model.n_blocks * self.d_hidden
-                    assert posterior_logits.shape[-2:] == (L, K), \
+                    assert posterior_logits.shape[-2:] == (L, K), (
                         f"posterior_logits shape {posterior_logits.shape} != [B, {L}, {K}]"
-                    assert prior_logits.shape[-2:] == (L, K), \
+                    )
+                    assert prior_logits.shape[-2:] == (L, K), (
                         f"prior_logits shape {prior_logits.shape} != [B, {L}, {K}]"
-                    assert h_z_joined.shape[-1] == h_dim + L * K, \
+                    )
+                    assert h_z_joined.shape[-1] == h_dim + L * K, (
                         f"h_z_joined dim {h_z_joined.shape[-1]} != {h_dim + L * K}"
+                    )
 
                 # Updating loss of encoder and world model
                 wm_loss, wm_loss_dict = compute_wm_loss(
@@ -499,7 +506,9 @@ class WorldModelTrainer:
 
                     dreamed_values_logits = self.critic(dreamed_recurrent_states)
                     with torch.no_grad():
-                        dreamed_values_logits_ema = self.critic_ema(dreamed_recurrent_states)
+                        dreamed_values_logits_ema = self.critic_ema(
+                            dreamed_recurrent_states
+                        )
                     dreamed_values_probs = F.softmax(dreamed_values_logits, dim=-1)
                     dreamed_values = torch.sum(dreamed_values_probs * self.B, dim=-1)
                     dreamed_values_list.append(dreamed_values.detach().cpu())
@@ -587,11 +596,17 @@ class WorldModelTrainer:
                 and len(replay_posterior_states) == T
             ):
                 # Stack replay data
-                replay_posterior = torch.stack(replay_posterior_states, dim=1)  # [B, T, D]
-                replay_annotations = torch.stack(replay_value_annotations, dim=0)  # [T, B]
+                replay_posterior = torch.stack(
+                    replay_posterior_states, dim=1
+                )  # [B, T, D]
+                replay_annotations = torch.stack(
+                    replay_value_annotations, dim=0
+                )  # [T, B]
 
                 replay_rewards = self.rewards.transpose(0, 1)  # [T, B]
-                replay_continues = (1.0 - self.terminated.float()).transpose(0, 1)  # [T, B]
+                replay_continues = (1.0 - self.terminated.float()).transpose(
+                    0, 1
+                )  # [T, B]
                 replay_mask = self.mask.transpose(0, 1)  # [T, B]
 
                 # Compute replay lambda-returns with annotations (continues are probabilities)
@@ -607,7 +622,9 @@ class WorldModelTrainer:
                 ).transpose(0, 1)  # [B, T]
 
                 # Critic logits on posterior states (gradients to critic only)
-                replay_logits = self.critic(replay_posterior.detach())  # [B, T, num_bins]
+                replay_logits = self.critic(
+                    replay_posterior.detach()
+                )  # [B, T, num_bins]
                 logits_flat = replay_logits.reshape(-1, replay_logits.size(-1))
                 targets_flat = replay_lambda_returns.detach().reshape(-1)
                 mask_flat = replay_mask.reshape(-1).float()
@@ -616,14 +633,14 @@ class WorldModelTrainer:
                 per_step_ce = -torch.sum(
                     targets_twohot * F.log_softmax(logits_flat, dim=-1), dim=-1
                 )
-                replay_loss = (per_step_ce * mask_flat).sum() / (
-                    mask_flat.sum() + 1e-8
-                )
+                replay_loss = (per_step_ce * mask_flat).sum() / (mask_flat.sum() + 1e-8)
 
                 # EMA regularizer for replay pass (distributional)
                 with torch.no_grad():
                     replay_logits_ema = self.critic_ema(replay_posterior.detach())
-                ema_logits_flat = replay_logits_ema.reshape(-1, replay_logits_ema.size(-1))
+                ema_logits_flat = replay_logits_ema.reshape(
+                    -1, replay_logits_ema.size(-1)
+                )
                 ema_probs = F.softmax(ema_logits_flat, dim=-1)
                 per_step_ema = -torch.sum(
                     ema_probs * F.log_softmax(logits_flat, dim=-1), dim=-1
@@ -632,13 +649,14 @@ class WorldModelTrainer:
                     mask_flat.sum() + 1e-8
                 )
 
-                replay_loss_total = replay_loss + self.critic_ema_regularizer * replay_ema_reg
-                total_critic_loss = total_critic_loss + self.critic_replay_scale * replay_loss_total  # type: ignore
+                replay_loss_total = (
+                    replay_loss + self.critic_ema_regularizer * replay_ema_reg
+                )
+                total_critic_loss = (
+                    total_critic_loss + self.critic_replay_scale * replay_loss_total
+                )  # type: ignore
 
-            # --- PROFILE: End forward, start backward ---
-            torch.cuda.synchronize()
-            timing.log_phase("forward", time.perf_counter() - t0)
-            t0 = time.perf_counter()
+            # End forward, start backward
 
             # Compute surprise BEFORE backward pass (proactive, not reactive)
             seq_len = self.states.shape[1] if hasattr(self, "states") else 1
@@ -663,17 +681,23 @@ class WorldModelTrainer:
                 lr_scale = self.get_ac_lr_scale()
                 if lr_scale < 1.0:
                     for pg in self.actor_optimizer.param_groups:
-                        pg['lr'] = self.base_actor_lr * lr_scale
+                        pg["lr"] = self.base_actor_lr * lr_scale
                     for pg in self.critic_optimizer.param_groups:
-                        pg['lr'] = self.base_critic_lr * lr_scale
+                        pg["lr"] = self.base_critic_lr * lr_scale
 
                 total_wm_loss.backward()
                 total_critic_loss.backward()
                 total_actor_loss.backward()
                 # AGC: clip gradients based on param/grad norm ratio (DreamerV3)
-                adaptive_gradient_clipping(self.wm_params)
-                adaptive_gradient_clipping(self.critic.parameters())
-                adaptive_gradient_clipping(self.actor.parameters())
+                # Use more aggressive clipping for pixel observations (prevent NaN)
+                agc_clip = 0.15 if self.use_pixels else 0.3
+                adaptive_gradient_clipping(self.wm_params, clip_factor=agc_clip)
+                adaptive_gradient_clipping(
+                    self.critic.parameters(), clip_factor=agc_clip
+                )
+                adaptive_gradient_clipping(
+                    self.actor.parameters(), clip_factor=agc_clip
+                )
                 self.wm_optimizer.step()
                 self.critic_optimizer.step()
                 self.actor_optimizer.step()
@@ -690,16 +714,11 @@ class WorldModelTrainer:
                     # Reset lr after step (for next iteration's scaling)
                     if lr_scale < 1.0:
                         for pg in self.actor_optimizer.param_groups:
-                            pg['lr'] = self.base_actor_lr
+                            pg["lr"] = self.base_actor_lr
                         for pg in self.critic_optimizer.param_groups:
-                            pg['lr'] = self.base_critic_lr
+                            pg["lr"] = self.base_critic_lr
 
-            # --- PROFILE: End backward ---
-            torch.cuda.synchronize()
-            timing.log_phase("backward", time.perf_counter() - t0)
-
-            # --- PROFILE: Print summary ---
-            timing.maybe_print(self.train_step)
+            # End backward
 
             log_step = self.train_step
             self.train_step += 1
@@ -771,14 +790,25 @@ class WorldModelTrainer:
                 and self.train_step > 0
                 and self.train_step % self.eval_every == 0
             ):
-                eval_avg_len = self.evaluate_policy(self.eval_episodes, step=self.train_step)
+                eval_avg_len = self.evaluate_policy(
+                    self.eval_episodes, step=self.train_step
+                )
                 # Early stopping based on eval (deterministic policy)
-                if self.early_stop_ep_length > 0 and eval_avg_len >= self.early_stop_ep_length:
-                    print(f"SOLVED! eval_avg_len={eval_avg_len:.1f} >= {self.early_stop_ep_length}")
+                if (
+                    self.early_stop_ep_length > 0
+                    and eval_avg_len >= self.early_stop_ep_length
+                ):
+                    print(
+                        f"SOLVED! eval_avg_len={eval_avg_len:.1f} >= {self.early_stop_ep_length}"
+                    )
                     break
 
             # Checkpoint every N steps (skip in dry_run)
-            if not self.dry_run and self.train_step > 0 and self.train_step % self.checkpoint_interval == 0:
+            if (
+                not self.dry_run
+                and self.train_step > 0
+                and self.train_step % self.checkpoint_interval == 0
+            ):
                 self.save_checkpoint()
 
         # Final save (skip in dry_run)
@@ -805,12 +835,13 @@ class WorldModelTrainer:
         if ema is None:
             self._wm_surprise_ema[key] = value
             return None
-        log_ratio = math.log((value + self._wm_surprise_eps) / (ema + self._wm_surprise_eps))
+        log_ratio = math.log(
+            (value + self._wm_surprise_eps) / (ema + self._wm_surprise_eps)
+        )
         self._wm_surprise_ema[key] = (
             self.surprise_ema_beta * ema + (1.0 - self.surprise_ema_beta) * value
         )
         return log_ratio
-
 
         """
         Cosine schedule from max_val to min_val over training.
@@ -825,9 +856,13 @@ class WorldModelTrainer:
             return self.wm_ac_ratio
         # Normal: max→min (8→2), Inverted: min→max (2→8)
         if self.wm_ac_ratio_invert:
-            ratio = self.get_cosine_schedule(float(self.wm_ac_ratio_min), float(self.wm_ac_ratio_max))
+            ratio = self.get_cosine_schedule(
+                float(self.wm_ac_ratio_min), float(self.wm_ac_ratio_max)
+            )
         else:
-            ratio = self.get_cosine_schedule(float(self.wm_ac_ratio_max), float(self.wm_ac_ratio_min))
+            ratio = self.get_cosine_schedule(
+                float(self.wm_ac_ratio_max), float(self.wm_ac_ratio_min)
+            )
         return max(1, round(ratio))
 
     def apply_lr_schedule(self):
@@ -836,11 +871,11 @@ class WorldModelTrainer:
             return
         scale = self.get_cosine_schedule(1.0, self.lr_cosine_min_factor)
         for pg in self.wm_optimizer.param_groups:
-            pg['lr'] = self.config.train.wm_lr * scale
+            pg["lr"] = self.config.wm_lr * scale
         for pg in self.actor_optimizer.param_groups:
-            pg['lr'] = self.base_actor_lr * scale
+            pg["lr"] = self.base_actor_lr * scale
         for pg in self.critic_optimizer.param_groups:
-            pg['lr'] = self.base_critic_lr * scale
+            pg["lr"] = self.base_critic_lr * scale
 
     def compute_surprise_for_batch(self, wm_loss: torch.Tensor, seq_len: int) -> float:
         """
@@ -888,15 +923,19 @@ class WorldModelTrainer:
         if num_episodes <= 0:
             return 0.0
 
-        was_training = (self.encoder.training, self.world_model.training, self.actor.training)
+        was_training = (
+            self.encoder.training,
+            self.world_model.training,
+            self.actor.training,
+        )
         self.encoder.eval()
         self.world_model.eval()
         self.actor.eval()
 
         h_prev_backup = self.world_model.h_prev.clone()
 
-        env = create_env(self.config.environment.environment_name, use_pixels=self.use_pixels)
-        target_size = self.config.models.encoder.cnn.target_size if self.use_pixels else None
+        env = create_env(self.config.environment_name, use_pixels=self.use_pixels)
+        target_size = self.config.encoder_cnn_target_size if self.use_pixels else None
 
         episode_lengths = []
         episode_rewards = []
@@ -906,7 +945,7 @@ class WorldModelTrainer:
                 obs, _info = env.reset()
                 h = torch.zeros(
                     1,
-                    self.config.models.d_hidden * self.config.models.rnn.n_blocks,
+                    self.config.d_hidden * self.config.rnn_n_blocks,
                     device=self.device,
                 )
                 action_onehot = torch.zeros(1, self.n_actions, device=self.device)
@@ -924,19 +963,32 @@ class WorldModelTrainer:
                             .unsqueeze(0)
                         )
                         if target_size and pixel_obs_t.shape[-2:] != tuple(target_size):
-                            pixel_obs_t = resize_pixels_to_target(pixel_obs_t, target_size)
-                        vec_obs_t = torch.from_numpy(obs["state"]).to(self.device).float().unsqueeze(0)
+                            pixel_obs_t = resize_pixels_to_target(
+                                pixel_obs_t, target_size
+                            )
+                        vec_obs_t = (
+                            torch.from_numpy(obs["state"])
+                            .to(self.device)
+                            .float()
+                            .unsqueeze(0)
+                        )
                         vec_obs_t = symlog(vec_obs_t)
                         encoder_input = {"pixels": pixel_obs_t, "state": vec_obs_t}
                     else:
-                        vec_obs_t = torch.from_numpy(obs).to(self.device).float().unsqueeze(0)
+                        vec_obs_t = (
+                            torch.from_numpy(obs).to(self.device).float().unsqueeze(0)
+                        )
                         vec_obs_t = symlog(vec_obs_t)
                         encoder_input = vec_obs_t
 
                     posterior_logits = self.encoder(encoder_input)
-                    posterior_logits_mixed = unimix_logits(posterior_logits, unimix_ratio=0.01)
+                    posterior_logits_mixed = unimix_logits(
+                        posterior_logits, unimix_ratio=0.01
+                    )
                     z_indices = posterior_logits_mixed.argmax(dim=-1)
-                    z_onehot = F.one_hot(z_indices, num_classes=self.d_hidden // 16).float()
+                    z_onehot = F.one_hot(
+                        z_indices, num_classes=self.d_hidden // 16
+                    ).float()
                     z_sample = z_onehot
 
                     z_flat = z_sample.view(1, -1)
@@ -946,7 +998,9 @@ class WorldModelTrainer:
                     actor_input = self.world_model.join_h_and_z(h, z_sample)
                     action_logits = self.actor(actor_input)
                     action = action_logits.argmax(dim=-1)
-                    action_onehot = F.one_hot(action, num_classes=self.n_actions).float()
+                    action_onehot = F.one_hot(
+                        action, num_classes=self.n_actions
+                    ).float()
 
                     obs, reward, terminated, truncated, _info = env.step(action.item())
                     total_reward += float(reward)
@@ -970,9 +1024,14 @@ class WorldModelTrainer:
 
         avg_len = sum(episode_lengths) / len(episode_lengths)
         avg_reward = sum(episode_rewards) / len(episode_rewards)
+        win_rate = sum(1 for r in episode_rewards if r > 0) / len(episode_rewards)
+
         self.logger.add_scalar("eval/episode_length", avg_len, step)
         self.logger.add_scalar("eval/episode_reward", avg_reward, step)
+        self.logger.add_scalar("eval/win_rate", win_rate, step)
         self.logger.add_scalar("_key/eval_episode_length", avg_len, step)
+        self.logger.add_scalar("_key/eval_episode_reward", avg_reward, step)
+        self.logger.add_scalar("_key/eval_win_rate", win_rate, step)
 
         return avg_len
 
@@ -1066,7 +1125,9 @@ class WorldModelTrainer:
                 self.wm_optimizer.load_state_dict(checkpoint["wm_optimizer"])
             except ValueError as e:
                 if "doesn't match the size" in str(e):
-                    print(f"Warning: Skipping WM optimizer state (architecture changed)")
+                    print(
+                        f"Warning: Skipping WM optimizer state (architecture changed)"
+                    )
                 else:
                     raise
         if "actor_optimizer" in checkpoint:
@@ -1075,9 +1136,7 @@ class WorldModelTrainer:
             self.critic_optimizer.load_state_dict(checkpoint["critic_optimizer"])
 
         self.train_step = checkpoint.get("step", 0)
-        print(
-            f"Resumed checkpoint from {checkpoint_path} at step {self.train_step}"
-        )
+        print(f"Resumed checkpoint from {checkpoint_path} at step {self.train_step}")
 
     def log_metrics(
         self,
@@ -1129,9 +1188,9 @@ class WorldModelTrainer:
             # All losses normalized to per-step for fair comparison
             if sequence_length > 0:
                 norm = 1.0 / sequence_length
-                beta_pred = self.config.train.beta_pred
-                beta_dyn = self.config.train.beta_dyn
-                beta_rep = self.config.train.beta_rep
+                beta_pred = self.config.beta_pred
+                beta_dyn = self.config.beta_dyn
+                beta_rep = self.config.beta_rep
 
                 # Convert tensor loss components to CPU floats (single sync for all 8 components)
                 wm_components_cpu = {k: v.item() for k, v in wm_loss_components.items()}
@@ -1151,8 +1210,12 @@ class WorldModelTrainer:
                 # Replay critic grounding (logged as raw masked average loss)
                 if replay_loss is not None:
                     replay_loss_value = float(replay_loss.item())
-                    self.logger.add_scalar("loss/critic/replay", replay_loss_value, step)
-                    self.logger.add_scalar("_key/loss_critic_replay", replay_loss_value, step)
+                    self.logger.add_scalar(
+                        "loss/critic/replay", replay_loss_value, step
+                    )
+                    self.logger.add_scalar(
+                        "_key/loss_critic_replay", replay_loss_value, step
+                    )
                 if replay_ema_reg is not None:
                     self.logger.add_scalar(
                         "loss/critic/replay_ema_reg", float(replay_ema_reg.item()), step
@@ -1246,10 +1309,20 @@ class WorldModelTrainer:
                     # delta_lr shows reduction: 0 = no change, 1 = fully scaled down
                     self.logger.add_scalar("_key/delta_lr", 1.0 - lr_scale, step)
                     # Log smoothed vs raw surprise for debugging
-                    self.logger.add_scalar("wm/surprise/smoothed", self._smoothed_surprise, step)
+                    self.logger.add_scalar(
+                        "wm/surprise/smoothed", self._smoothed_surprise, step
+                    )
                     # Log WM focus mode (1 = in focus, 0 = normal) and cooldown
-                    self.logger.add_scalar("ac/wm_focus_active", float(self._wm_focus_steps_remaining > 0), step)
-                    self.logger.add_scalar("ac/wm_focus_cooldown", float(self._wm_focus_cooldown_remaining > 0), step)
+                    self.logger.add_scalar(
+                        "ac/wm_focus_active",
+                        float(self._wm_focus_steps_remaining > 0),
+                        step,
+                    )
+                    self.logger.add_scalar(
+                        "ac/wm_focus_cooldown",
+                        float(self._wm_focus_cooldown_remaining > 0),
+                        step,
+                    )
 
                 # World model sub-component losses (grouped by module)
                 # Decoder losses (reconstruction)
@@ -1274,15 +1347,21 @@ class WorldModelTrainer:
                 kl_dyn_raw = wm_components_cpu["kl_dynamics_raw"] * norm
                 kl_rep_raw = wm_components_cpu["kl_representation_raw"] * norm
                 self.logger.add_scalar("wm/rssm/kl_dynamics_raw", kl_dyn_raw, step)
-                self.logger.add_scalar("wm/rssm/kl_representation_raw", kl_rep_raw, step)
+                self.logger.add_scalar(
+                    "wm/rssm/kl_representation_raw", kl_rep_raw, step
+                )
                 # Key metrics
                 self.logger.add_scalar("_key/kl_dyn_raw", kl_dyn_raw, step)
                 self.logger.add_scalar("_key/kl_rep_raw", kl_rep_raw, step)
             else:
                 # Fallback if no sequence
                 self.logger.add_scalar("loss/wm/total", total_wm_loss.item(), step)
-                self.logger.add_scalar("loss/actor/total", total_actor_loss.item(), step)
-                self.logger.add_scalar("loss/critic/total", total_critic_loss.item(), step)
+                self.logger.add_scalar(
+                    "loss/actor/total", total_actor_loss.item(), step
+                )
+                self.logger.add_scalar(
+                    "loss/critic/total", total_critic_loss.item(), step
+                )
 
             # Dreamed trajectory statistics (from world model imagination rollouts)
             # Batch stats computation and sync once to reduce GPU stalls
@@ -1424,7 +1503,9 @@ class WorldModelTrainer:
                 # Also add strip image for quick glance
                 n_show = min(5, dream_frames.shape[0])
                 dream_strip = torch.cat([dream_frames[i] for i in range(n_show)], dim=2)
-                self.logger.add_images("viz/wm/dream_strip", dream_strip.unsqueeze(0), step)
+                self.logger.add_images(
+                    "viz/wm/dream_strip", dream_strip.unsqueeze(0), step
+                )
 
             # 5. Original resolution image (environment frame)
             if last_obs_pixels_original is not None:
@@ -1458,7 +1539,9 @@ class WorldModelTrainer:
                 self.model_queue.get_nowait()
                 cleared += 1
             self.model_queue.put_nowait(models_to_send)
-            print(f"Trainer: Sent models at step {training_step} (cleared {cleared} old)")
+            print(
+                f"Trainer: Sent models at step {training_step} (cleared {cleared} old)"
+            )
         except Full:
             print("Trainer: Model queue was full. Skipping update.")
         except Exception as e:
@@ -1477,11 +1560,17 @@ def train_world_model(
     # Set MLflow tracking URI and join existing run in this child process (skip in dry_run)
     if mlflow_run_id and not dry_run:
         mlruns_dir = os.path.join(os.path.dirname(log_dir), "mlruns")
-        mlflow.set_tracking_uri(f"file://{mlruns_dir}")
+        mlflow.set_tracking_uri(f"file://{os.path.abspath(mlruns_dir)}")
         # Join the existing run (subprocess doesn't inherit active run from parent)
         mlflow.start_run(run_id=mlflow_run_id)
 
     trainer = WorldModelTrainer(
-        config, data_queue, model_queue, log_dir, checkpoint_path, mlflow_run_id, dry_run
+        config,
+        data_queue,
+        model_queue,
+        log_dir,
+        checkpoint_path,
+        mlflow_run_id,
+        dry_run,
     )
     trainer.train_models()

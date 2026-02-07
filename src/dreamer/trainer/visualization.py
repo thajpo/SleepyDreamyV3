@@ -113,9 +113,9 @@ def _log_scalar_metrics(
     # All losses normalized to per-step for fair comparison
     if sequence_length > 0:
         norm = 1.0 / sequence_length
-        beta_pred = config.train.beta_pred
-        beta_dyn = config.train.beta_dyn
-        beta_rep = config.train.beta_rep
+        beta_pred = config.beta_pred
+        beta_dyn = config.beta_dyn
+        beta_rep = config.beta_rep
 
         # Convert tensor loss components to CPU floats (single sync for all 8 components)
         wm_components_cpu = {k: v.item() for k, v in wm_loss_components.items()}
