@@ -592,3 +592,51 @@ The 4:1 ratio successfully keeps WM ahead of AC, preventing the "WM exploitation
 2. **Higher ratio (8:1)**: Even more WM-dominant training
 3. **Early stopping on KL spike**: Pause AC when dreams diverge
 4. **Adaptive ratio**: Start with high ratio, decrease as WM stabilizes
+
+### 01-26-26 LR Scaling Sweep (lr_scale_experiment)
+- Hypothesis: Higher LR accelerates early learning, but may destabilize policy basin.
+- Setup: CartPole state-only, d_hidden=128, batch_size=8, seq_len=16, num_dream_steps=10, 5k steps per run.
+- LRs tested so far (wm/actor/critic tied): 3e-4, 1e-3, 3e-3
+- Results (eval/episode_reward at 5k):
+  | LR   | Best Eval Reward | Last Eval Reward | Notes |
+  |------|------------------|------------------|-------|
+  | 3e-4 | 291              | 291              | Slow early gains |
+  | 1e-3 | 401              | 313              | Best early signal |
+  | 3e-3 | 271.6            | 177.2            | Degrades vs 1e-3 |
+- Conclusion: 1e-3 is best early; none solved by 5k (expected). Stability still unclear.
+
+### 01-26-26 Next Sweep Launched (lr_ratio_sweep_b)
+- Hypothesis: WM-AC lag is the main failure mode; increase WM:AC ratio and lower AC LR to stabilize.
+- Sweep: wm_ac_ratio ∈ {1, 4} × actor/critic LR ∈ {1e-3, 3e-4, 1e-4} with wm_lr=1e-3.
+- Steps: 10k per run. Primary metric: eval/episode_reward (target ≥475).
+- Status: Running.
+
+**Preliminary results (ratio=1 runs logged to MLflow)**:
+
+| wm_ac_ratio | actor/critic LR | Best Eval Reward | Last Eval Reward | Notes |
+|------------|-----------------|------------------|------------------|-------|
+| 1 | 1e-3 | **500.0** | 362.2 | Hit solve briefly, then declined |
+| 1 | 1e-3 | 451.4 | 151.0 | Peak then collapse |
+| 1 | 3e-4 | 486.6 | 139.4 | Near-solve peak, sharp collapse |
+| 1 | 1e-4 | 305.6 | 305.6 | Stable mid-performance plateau |
+| 1 | 1e-3 | 202.4 | 109.2 | Weak, inconsistent |
+
+- **Takeaway**: No config is stably solved at 10k; some runs briefly hit/approach solve but collapse, consistent with WM-AC lag/instability.
+- **Missing**: wm_ac_ratio=4 runs not yet visible in MLflow.
+
+### 01-26-26 Logging Update
+- Added cumulative episode count metric: env/episodes_total (and _key/episodes_total) to MLflow.
+
+### 01-26-26 Ratio Sweep (fixed LR = 5e-4)
+- **Hypothesis**: With fixed LR (wm/actor/critic = 5e-4), increasing WM:AC ratio will improve early stability by keeping the world model closer to the policy distribution, but too high a ratio may slow late learning.
+- **Config**: `src/dreamer/conf/ratio_sweep_5e4.yaml`
+- **Sweep**: wm_ac_ratio ∈ {1, 2, 4, 8}
+- **Steps**: 10k per run, primary metric: eval/episode_reward (target ≥475)
+- **Status**: Not started
+
+| wm_ac_ratio | Best Eval Reward | Last Eval Reward | Notes |
+|------------|------------------|------------------|-------|
+| 1 | TBD | TBD | |
+| 2 | TBD | TBD | |
+| 4 | TBD | TBD | |
+| 8 | TBD | TBD | |
