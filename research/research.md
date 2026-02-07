@@ -640,3 +640,22 @@ The 4:1 ratio successfully keeps WM ahead of AC, preventing the "WM exploitation
 | 2 | TBD | TBD | |
 | 4 | TBD | TBD | |
 | 8 | TBD | TBD | |
+
+### 02-06-26 Pong NaN Root Cause + Fix Validation
+- **Problem**: Pong runs showed `WM: nan` from early steps.
+- **Root cause**:
+  - Pong config is pixel-only with `n_observations=0`.
+  - World-model loss still computed vector/state reconstruction unconditionally.
+  - That path produced empty state tensors and `mean` over empty dimension -> NaN.
+- **Fixes implemented**:
+  1. `ObservationDecoder`: skip state head when `n_observations == 0` (output only `pixels`).
+  2. `compute_wm_loss`: gate state-vector loss; if no state target/features, set `prediction_vector=0` and continue.
+  3. Trainer guard: raise explicit error if WM loss is non-finite before backward.
+- **Tests added**:
+  - `tests/test_pixel_only_wm.py::test_compute_wm_loss_pixel_only_no_state_is_finite`
+  - `tests/test_pixel_only_wm.py::test_observation_decoder_skips_state_head_when_n_observations_zero`
+  - Also reran existing `tests/test_trainer_utils.py`.
+- **Test result**: `3 passed`.
+- **Smoke run**:
+  - Command: `uv run dreamer-train --config atari_pong --dry_run --max_train_steps 120 --num_collectors 1 --batch_size 4 --min_buffer_episodes 8`
+  - Result at step 100: `WM: 5.8695` (finite), no `WM: nan`, run completed cleanly.
