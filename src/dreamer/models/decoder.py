@@ -20,13 +20,15 @@ class ObservationDecoder(nn.Module):
         d_hidden,
     ):
         super().__init__()
-
-
-        self.MLP = ThreeLayerMLP(
-            d_in=d_in,
-            d_hidden=d_hidden,
-            d_out=env_config.n_observations,
-        )
+        self.use_state = env_config.n_observations > 0
+        if self.use_state:
+            self.MLP = ThreeLayerMLP(
+                d_in=d_in,
+                d_hidden=d_hidden,
+                d_out=env_config.n_observations,
+            )
+        else:
+            self.MLP = None
         self.CNN = ObservationCNNDecoder(
             d_in=d_in,
             in_channels=cnn_config.input_channels,
@@ -47,8 +49,10 @@ class ObservationDecoder(nn.Module):
         # Flatten z and concatenate with h to form the decoder input state
         # Reconstruct pixels and state vector
         pixels_rec = self.CNN(decoder_in)
-        state_rec = self.MLP(decoder_in)
-        return {"pixels": pixels_rec, "state": state_rec}
+        out = {"pixels": pixels_rec}
+        if self.use_state:
+            out["state"] = self.MLP(decoder_in)
+        return out
 
 
 class ObservationCNNDecoder(nn.Module):

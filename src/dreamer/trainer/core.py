@@ -668,6 +668,10 @@ class WorldModelTrainer:
                 and total_actor_loss is not None
                 and total_critic_loss is not None
             )
+            if not torch.isfinite(total_wm_loss):
+                raise RuntimeError(
+                    f"Non-finite WM loss at step {self.train_step}: {total_wm_loss.item()}"
+                )
 
             # Use the batch-level AC skip decision (or skip if no valid AC steps)
             if skip_ac_batch or not ac_any:

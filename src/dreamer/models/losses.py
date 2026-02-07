@@ -1,7 +1,6 @@
 """Loss computation functions for DreamerV3 world model training."""
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 
 from .math_utils import symlog, twohot_encode, unimix_logits
@@ -42,9 +41,6 @@ def compute_wm_loss(
     Returns:
         Tuple of (total_loss, loss_dict) where loss_dict contains individual components
     """
-    # Observation vectors use symlog squared loss (per-sample)
-    obs_pred = symlog(obs_reconstruction["state"])
-    obs_target = symlog(obs_t["state"])  # loss in symlog space
     beta_dyn = config.beta_dyn
     beta_rep = config.beta_rep
     beta_pred = config.beta_pred
@@ -53,8 +49,26 @@ def compute_wm_loss(
     # 1. Prediction loss: -ln p(x|z,h) - ln(p(r|z,h)) + ln(p(c|z,h))
     # a. dynamics representation
     # -ln p(x|z,h) is trained with symlog squared loss
-    pred_loss_vector = 1 / 2 * (obs_pred - obs_target) ** 2
-    pred_loss_vector = pred_loss_vector.mean(dim=-1)  # (B,)
+    # State-vector reconstruction loss is disabled for pixel-only envs (n_observations=0).
+    state_pred = obs_reconstruction.get("state")
+    state_target = obs_t.get("state")
+    has_state_targets = (
+        state_pred is not None
+        and state_target is not None
+        and state_pred.ndim >= 2
+        and state_target.ndim >= 2
+        and state_pred.shape[-1] > 0
+        and state_target.shape[-1] > 0
+    )
+    if has_state_targets:
+        obs_pred = symlog(state_pred)
+        obs_target = symlog(state_target)  # loss in symlog space
+        pred_loss_vector = 1 / 2 * (obs_pred - obs_target) ** 2
+        pred_loss_vector = pred_loss_vector.mean(dim=-1)  # (B,)
+    else:
+        pred_loss_vector = torch.zeros(
+            reward_t.shape[0], device=device, dtype=reward_t.dtype
+        )
 
     # Pixel loss (only when using pixels)
     if use_pixels and "pixels" in obs_reconstruction and "pixels" in obs_t:
