@@ -118,6 +118,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Dry run mode (no MLflow, no checkpoints)",
     )
+    parser.add_argument(
+        "--checkpoint_path",
+        type=str,
+        help="Path to checkpoint to resume from",
+    )
 
     # Flatten all Config fields into CLI arguments
     parser.add_argument("--device", help="Device (auto/cuda/mps/cpu)")
@@ -125,6 +130,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--profile", type=bool, help="Enable PyTorch profiler")
     parser.add_argument("--compile_models", type=bool, help="Use torch.compile")
     parser.add_argument("--experiment_name", type=str, help="MLflow experiment name")
+    parser.add_argument(
+        "--log_profile",
+        type=str,
+        help="Logging profile (lean/full)",
+    )
 
     # Environment
     parser.add_argument("--environment_name", type=str, help="Gym environment name")
@@ -281,6 +291,14 @@ def run_training(cfg: Config, checkpoint_path: str | None = None):
         git_commit = get_git_commit()
         if git_commit:
             mlflow.set_tag("git_commit", git_commit)
+        obs_mode = (
+            "hybrid"
+            if cfg.use_pixels and cfg.n_observations > 0
+            else "vision"
+            if cfg.use_pixels
+            else "vector"
+        )
+        mlflow.set_tag("obs_mode", obs_mode)
 
         start_mlflow_ui(str(mlruns_dir), port=5000)
 
@@ -356,7 +374,7 @@ def main():
     # Apply CLI overrides
     cfg = apply_cli_args(cfg, args)
 
-    run_training(cfg)
+    run_training(cfg, checkpoint_path=args.checkpoint_path)
 
 
 if __name__ == "__main__":

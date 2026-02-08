@@ -150,6 +150,22 @@ class WorldModelTrainer:
         self.logger = MLflowLogger(log_dir=log_dir, run_id=mlflow_run_id)
         self.log_dir = log_dir
         print(f"MLflow logging to: {log_dir}")
+        self.log_profile = getattr(config, "log_profile", "lean")
+        if self.log_profile not in ("lean", "full"):
+            print(
+                f"Warning: unknown log_profile={self.log_profile}, falling back to lean"
+            )
+            self.log_profile = "lean"
+        self.obs_mode = (
+            "hybrid"
+            if self.use_pixels and config.n_observations > 0
+            else "vision"
+            if self.use_pixels
+            else "vector"
+        )
+        self._has_pixel_obs = self.use_pixels
+        self._has_vector_obs = config.n_observations > 0
+        print(f"Logging profile: {self.log_profile} | obs_mode: {self.obs_mode}")
         self.log_every = 250
         self.image_log_every = 2500
         self.surprise_ema_beta = config.surprise_ema_beta
@@ -220,6 +236,7 @@ class WorldModelTrainer:
 
         # Timing
         self.step_times = []
+        self.train_start_time = time.time()
         self.last_log_time = time.time()
         self.steps_since_log = 0
 
@@ -775,15 +792,31 @@ class WorldModelTrainer:
                 self.logger.add_scalar(
                     "train/throughput", steps_per_sec, self.train_step
                 )
-                # Log avg episode length for convergence tracking (from real episodes)
+                # Universal progress axes (environment and wall-clock)
+                self.logger.add_scalar(
+                    "train/updates_total", float(self.train_step), self.train_step
+                )
+                self.logger.add_scalar(
+                    "env/frames_total",
+                    float(self.replay_buffer.total_env_steps),
+                    self.train_step,
+                )
+                self.logger.add_scalar(
+                    "env/episodes_total",
+                    float(self.replay_buffer.total_episodes_added),
+                    self.train_step,
+                )
+                self.logger.add_scalar(
+                    "time/elapsed_sec",
+                    time.time() - self.train_start_time,
+                    self.train_step,
+                )
+
+                # Log avg episode length for convergence context (not solved metric)
                 avg_ep_len = self.replay_buffer.recent_avg_episode_length
                 if avg_ep_len > 0:
                     self.logger.add_scalar(
                         "env/episode_length", avg_ep_len, self.train_step
-                    )
-                    # Key metric (sorted first in MLflow)
-                    self.logger.add_scalar(
-                        "_key/episode_length", avg_ep_len, self.train_step
                     )
                 self.last_log_time = time.time()
                 self.steps_since_log = 0
@@ -1033,9 +1066,6 @@ class WorldModelTrainer:
         self.logger.add_scalar("eval/episode_length", avg_len, step)
         self.logger.add_scalar("eval/episode_reward", avg_reward, step)
         self.logger.add_scalar("eval/win_rate", win_rate, step)
-        self.logger.add_scalar("_key/eval_episode_length", avg_len, step)
-        self.logger.add_scalar("_key/eval_episode_reward", avg_reward, step)
-        self.logger.add_scalar("_key/eval_win_rate", win_rate, step)
 
         return avg_len
 
@@ -1189,6 +1219,7 @@ class WorldModelTrainer:
             return
 
         if log_scalars:
+            is_full_profile = self.log_profile == "full"
             # All losses normalized to per-step for fair comparison
             if sequence_length > 0:
                 norm = 1.0 / sequence_length
@@ -1206,19 +1237,12 @@ class WorldModelTrainer:
                 self.logger.add_scalar("loss/wm/total", wm_per_step, step)
                 self.logger.add_scalar("loss/actor/total", actor_per_step, step)
                 self.logger.add_scalar("loss/critic/total", critic_per_step, step)
-                # Key metrics (sorted first in MLflow)
-                self.logger.add_scalar("_key/loss_wm", wm_per_step, step)
-                self.logger.add_scalar("_key/loss_actor", actor_per_step, step)
-                self.logger.add_scalar("_key/loss_critic", critic_per_step, step)
 
                 # Replay critic grounding (logged as raw masked average loss)
                 if replay_loss is not None:
                     replay_loss_value = float(replay_loss.item())
                     self.logger.add_scalar(
                         "loss/critic/replay", replay_loss_value, step
-                    )
-                    self.logger.add_scalar(
-                        "_key/loss_critic_replay", replay_loss_value, step
                     )
                 if replay_ema_reg is not None:
                     self.logger.add_scalar(
@@ -1251,55 +1275,53 @@ class WorldModelTrainer:
                         surprise_log_ratios[key] = log_ratio
 
                 # Log total surprise (already computed in compute_surprise_for_batch)
-                self.logger.add_scalar("wm/surprise/ready", 1.0, step)
-                self.logger.add_scalar(
-                    "wm/surprise/total_log_ratio",
-                    self._last_surprise_log_ratio,
-                    step,
-                )
-                self.logger.add_scalar(
-                    "_key/surprise", self._last_surprise_log_ratio, step
-                )
+                if is_full_profile:
+                    self.logger.add_scalar("wm/surprise/ready", 1.0, step)
+                    self.logger.add_scalar(
+                        "wm/surprise/total_log_ratio",
+                        self._last_surprise_log_ratio,
+                        step,
+                    )
 
                 # Log component surprises
-                if "reward" in surprise_log_ratios:
+                if is_full_profile and "reward" in surprise_log_ratios:
                     self.logger.add_scalar(
                         "wm/surprise/reward_log_ratio",
                         surprise_log_ratios["reward"],
                         step,
                     )
-                if "continue" in surprise_log_ratios:
+                if is_full_profile and "continue" in surprise_log_ratios:
                     self.logger.add_scalar(
                         "wm/surprise/continue_log_ratio",
                         surprise_log_ratios["continue"],
                         step,
                     )
-                if "pixel" in surprise_log_ratios:
+                if is_full_profile and "pixel" in surprise_log_ratios:
                     self.logger.add_scalar(
                         "wm/surprise/pixel_log_ratio",
                         surprise_log_ratios["pixel"],
                         step,
                     )
-                if "state" in surprise_log_ratios:
+                if is_full_profile and "state" in surprise_log_ratios:
                     self.logger.add_scalar(
                         "wm/surprise/state_log_ratio",
                         surprise_log_ratios["state"],
                         step,
                     )
-                if "kl_dyn" in surprise_log_ratios:
+                if is_full_profile and "kl_dyn" in surprise_log_ratios:
                     self.logger.add_scalar(
                         "wm/surprise/kl_dyn_log_ratio",
                         surprise_log_ratios["kl_dyn"],
                         step,
                     )
-                if "kl_rep" in surprise_log_ratios:
+                if is_full_profile and "kl_rep" in surprise_log_ratios:
                     self.logger.add_scalar(
                         "wm/surprise/kl_rep_log_ratio",
                         surprise_log_ratios["kl_rep"],
                         step,
                     )
                 component_vals = list(surprise_log_ratios.values())
-                if component_vals:
+                if is_full_profile and component_vals:
                     self.logger.add_scalar(
                         "wm/surprise/max_component_log_ratio",
                         max(component_vals),
@@ -1307,11 +1329,9 @@ class WorldModelTrainer:
                     )
 
                 # Log AC learning rate scale (based on surprise)
-                if self.surprise_scale_ac_lr:
+                if is_full_profile and self.surprise_scale_ac_lr:
                     lr_scale = self.get_ac_lr_scale()
                     self.logger.add_scalar("ac/lr_scale", lr_scale, step)
-                    # delta_lr shows reduction: 0 = no change, 1 = fully scaled down
-                    self.logger.add_scalar("_key/delta_lr", 1.0 - lr_scale, step)
                     # Log smoothed vs raw surprise for debugging
                     self.logger.add_scalar(
                         "wm/surprise/smoothed", self._smoothed_surprise, step
@@ -1330,8 +1350,10 @@ class WorldModelTrainer:
 
                 # World model sub-component losses (grouped by module)
                 # Decoder losses (reconstruction)
-                self.logger.add_scalar("wm/decoder/pixel_loss", pixel, step)
-                self.logger.add_scalar("wm/decoder/state_loss", state, step)
+                if self._has_pixel_obs:
+                    self.logger.add_scalar("wm/decoder/pixel_loss", pixel, step)
+                if self._has_vector_obs:
+                    self.logger.add_scalar("wm/decoder/state_loss", state, step)
                 # Predictor head losses
                 self.logger.add_scalar("wm/reward_head/loss", reward, step)
                 self.logger.add_scalar("wm/continue_head/loss", cont, step)
@@ -1341,11 +1363,14 @@ class WorldModelTrainer:
 
                 # Scaled contributions to total (these should sum to loss/wm/total)
                 pred_total = pixel + state + reward + cont
-                self.logger.add_scalar(
-                    "wm/scaled/prediction", beta_pred * pred_total, step
-                )
-                self.logger.add_scalar("wm/scaled/dynamics", beta_dyn * dyn, step)
-                self.logger.add_scalar("wm/scaled/representation", beta_rep * rep, step)
+                if is_full_profile:
+                    self.logger.add_scalar(
+                        "wm/scaled/prediction", beta_pred * pred_total, step
+                    )
+                    self.logger.add_scalar("wm/scaled/dynamics", beta_dyn * dyn, step)
+                    self.logger.add_scalar(
+                        "wm/scaled/representation", beta_rep * rep, step
+                    )
 
                 # Raw KL divergences (before free bits clipping, for debugging)
                 kl_dyn_raw = wm_components_cpu["kl_dynamics_raw"] * norm
@@ -1354,9 +1379,6 @@ class WorldModelTrainer:
                 self.logger.add_scalar(
                     "wm/rssm/kl_representation_raw", kl_rep_raw, step
                 )
-                # Key metrics
-                self.logger.add_scalar("_key/kl_dyn_raw", kl_dyn_raw, step)
-                self.logger.add_scalar("_key/kl_rep_raw", kl_rep_raw, step)
             else:
                 # Fallback if no sequence
                 self.logger.add_scalar("loss/wm/total", total_wm_loss.item(), step)
@@ -1386,12 +1408,13 @@ class WorldModelTrainer:
                 self.logger.add_scalar(
                     "dream/wm_reward/std", reward_stats[1].item(), step
                 )
-                self.logger.add_scalar(
-                    "dream/wm_reward/min", reward_stats[2].item(), step
-                )
-                self.logger.add_scalar(
-                    "dream/wm_reward/max", reward_stats[3].item(), step
-                )
+                if is_full_profile:
+                    self.logger.add_scalar(
+                        "dream/wm_reward/min", reward_stats[2].item(), step
+                    )
+                    self.logger.add_scalar(
+                        "dream/wm_reward/max", reward_stats[3].item(), step
+                    )
 
             if dreamed_values_list:
                 all_dreamed_values = torch.cat(dreamed_values_list, dim=0)
@@ -1421,29 +1444,31 @@ class WorldModelTrainer:
                 self.logger.add_scalar(
                     "actor/entropy/mean", entropy_stats[0].item(), step
                 )
-                self.logger.add_scalar(
-                    "actor/entropy/std", entropy_stats[1].item(), step
-                )
+                if is_full_profile:
+                    self.logger.add_scalar(
+                        "actor/entropy/std", entropy_stats[1].item(), step
+                    )
 
             # Learning rates
-            self.logger.add_scalar(
-                "train/lr/wm",
-                self.wm_optimizer.param_groups[0]["lr"],
-                step,
-            )
-            self.logger.add_scalar(
-                "train/lr/actor",
-                self.actor_optimizer.param_groups[0]["lr"],
-                step,
-            )
-            self.logger.add_scalar(
-                "train/lr/critic",
-                self.critic_optimizer.param_groups[0]["lr"],
-                step,
-            )
+            if is_full_profile:
+                self.logger.add_scalar(
+                    "train/lr/wm",
+                    self.wm_optimizer.param_groups[0]["lr"],
+                    step,
+                )
+                self.logger.add_scalar(
+                    "train/lr/actor",
+                    self.actor_optimizer.param_groups[0]["lr"],
+                    step,
+                )
+                self.logger.add_scalar(
+                    "train/lr/critic",
+                    self.critic_optimizer.param_groups[0]["lr"],
+                    step,
+                )
 
             # Log WM:AC ratio (if using cosine schedule)
-            if self.wm_ac_ratio_cosine:
+            if is_full_profile and self.wm_ac_ratio_cosine:
                 self.logger.add_scalar(
                     "train/wm_ac_ratio",
                     self.get_current_wm_ac_ratio(),

@@ -23,6 +23,7 @@ class Config:
     compile_models: bool = False
     dry_run: bool = False
     experiment_name: Optional[str] = None
+    log_profile: str = "lean"  # lean, full
 
     # ===== Environment =====
     environment_name: str = "CartPole-v1"
@@ -117,7 +118,7 @@ class Config:
 
     # ===== Training: data collection =====
     num_collectors: int = 1
-    replay_buffer_size: int = 100000
+    replay_buffer_size: int = 500
     min_buffer_episodes: int = 64
     steps_per_weight_sync: int = 5
 
@@ -225,7 +226,9 @@ def atari_pong_config() -> Config:
     cfg.wm_ac_ratio = 1
     cfg.b_start = -20  # Wider range for Atari rewards
     cfg.b_end = 20
-    cfg.replay_buffer_size = 100000  # Larger buffer for Atari
+    cfg.replay_buffer_size = (
+        1000  # Higher replay capacity while staying practical on 32 GiB RAM
+    )
     cfg.replay_ratio = 1.0
     cfg.min_buffer_episodes = 64
     cfg.recent_fraction = 0.0
