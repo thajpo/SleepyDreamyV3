@@ -659,3 +659,39 @@ The 4:1 ratio successfully keeps WM ahead of AC, preventing the "WM exploitation
 - **Smoke run**:
   - Command: `uv run dreamer-train --config atari_pong --dry_run --max_train_steps 120 --num_collectors 1 --batch_size 4 --min_buffer_episodes 8`
   - Result at step 100: `WM: 5.8695` (finite), no `WM: nan`, run completed cleanly.
+
+### 02-06-26 Next Session Plan (Pong Long Run)
+- **Status before stop**: Pixel-only NaN issue fixed and validated in smoke run; ready for longer Pong training.
+- **Available base configs**: `default`, `cartpole`, `ratio_sweep_5e4`, `paper_cartpole`, `atari_pong`.
+- **Pong base to use**: `--config atari_pong` (pixel-only, `n_observations=0`, Atari-safe defaults).
+- **If using strict paper LR override on Pong**:
+  - `--wm_lr 4e-5 --actor_lr 4e-5 --critic_lr 4e-5`
+- **Suggested longer run command for next time**:
+  - `uv run dreamer-train --config atari_pong --max_train_steps 500000`
+- **Strict-paper-LR variant**:
+  - `uv run dreamer-train --config atari_pong --wm_lr 4e-5 --actor_lr 4e-5 --critic_lr 4e-5 --max_train_steps 500000`
+
+### 02-07-26 Pong 50k Run (ROCm) - Stability Good, Replay Memory Risk
+- **Run**: detached training with strict-paper LR overrides
+  - `uv run dreamer-train --config atari_pong --wm_lr 4e-5 --actor_lr 4e-5 --critic_lr 4e-5 --max_train_steps 50000 --checkpoint_interval 5000`
+- **Status observed**:
+  - No WM NaNs through ~6k train steps.
+  - Checkpoint written: `runs/02-07_154650/checkpoints/checkpoint_step_5000.pt`.
+  - MLflow run ID: `f29bebfd421142eaa06bd491ca89aaba`.
+  - Pixel decoder loss dropped early then plateaued around ~0.490.
+  - Critic loss remained finite (no crash), but dreamed critic value scale remained very large-magnitude (pathology to monitor).
+- **Operational issue**:
+  - Replay/episode storage growth became the practical blocker (memory pressure at high episode counts).
+  - Current code interprets `replay_buffer_size` as number of episodes; for pixel Atari this must be much lower than vector tasks.
+- **Decision for next session**:
+  - Resume from 5k checkpoint with a much smaller replay cap (start with `replay_buffer_size=1000`, tune down to 500 if RAM pressure persists).
+  - Keep `checkpoint_interval=5000` for safe restart points.
+
+### 02-07-26 Next Session Resume Commands
+- **CLI resume (checkpoint support added)**:
+  - `uv run dreamer-train --config atari_pong --checkpoint_path runs/02-07_154650/checkpoints/checkpoint_step_5000.pt --wm_lr 4e-5 --actor_lr 4e-5 --critic_lr 4e-5 --max_train_steps 50000 --checkpoint_interval 5000 --replay_buffer_size 1000`
+- **If memory is still high**:
+  - rerun with `--replay_buffer_size 500`
+- **Primary metrics to judge continuation quality**:
+  - `eval/episode_reward`, `eval/win_rate` (Pong success signal)
+  - `loss/wm/total`, `wm/decoder/pixel_loss`, `dream/critic_value/mean` (training health)
