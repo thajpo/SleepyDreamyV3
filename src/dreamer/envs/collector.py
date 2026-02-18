@@ -24,7 +24,7 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
     Stops when stop_event is set by the trainer.
     """
     use_pixels = config.use_pixels
-    env = create_env(config.environment_name, use_pixels=use_pixels)
+    env = create_env(config.environment_name, use_pixels=use_pixels, config=config)
     device = "cpu"
     n_actions = config.n_actions
     action_repeat = getattr(config, "action_repeat", 1)

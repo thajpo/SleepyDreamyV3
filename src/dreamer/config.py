@@ -29,6 +29,14 @@ class Config:
     environment_name: str = "CartPole-v1"
     n_actions: int = 2
     n_observations: int = 4
+    # Atari compatibility controls (used when environment_name starts with "ALE/")
+    atari_compat_mode: bool = False
+    atari_noop_max: int = 30
+    atari_frame_skip: int = 4
+    atari_terminal_on_life_loss: bool = False
+    atari_sticky_action_prob: float = 0.25
+    atari_full_action_space: bool = False
+    atari_fire_reset: bool = True
 
     # ===== Model architecture =====
     d_hidden: int = 64
@@ -217,6 +225,7 @@ def atari_pong_config() -> Config:
     )
     cfg.n_observations = 0  # Pixel observations, not vector
     cfg.use_pixels = True
+    cfg.atari_compat_mode = True
     cfg.d_hidden = 256  # Your working value from Lunar Lander
     cfg.max_train_steps = 500000  # 500k steps for Atari
     cfg.batch_size = 8  # Your working value

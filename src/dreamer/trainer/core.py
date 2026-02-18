@@ -239,10 +239,22 @@ class WorldModelTrainer:
         self.train_start_time = time.time()
         self.last_log_time = time.time()
         self.steps_since_log = 0
+        # Resume-aware replay gating baseline.
+        # On fresh runs this stays 0. On resumed runs we seed a baseline so
+        # replay_ratio gating does not stall waiting for impossible new env steps.
+        self._resume_env_steps_offset = 0
 
         # Checkpoint loading
         if checkpoint_path:
             self.load_checkpoint(checkpoint_path)
+            denom = max(1e-8, self.replay_ratio)
+            self._resume_env_steps_offset = int(
+                self.train_step
+                * self.batch_size
+                * self.sequence_length
+                * self.action_repeat
+                / denom
+            )
 
     def get_data_from_buffer(self):
         """Sample batch from replay buffer (non-blocking after initial fill)."""
@@ -298,7 +310,9 @@ class WorldModelTrainer:
     def train_models(self):
         while self.train_step < self.max_train_steps:
             # Replay ratio gating: wait if we've trained too fast relative to env steps
-            env_steps = self.replay_buffer.total_env_steps
+            env_steps = (
+                self.replay_buffer.total_env_steps + self._resume_env_steps_offset
+            )
             target_train_steps = int(
                 env_steps
                 * self.replay_ratio
@@ -798,7 +812,10 @@ class WorldModelTrainer:
                 )
                 self.logger.add_scalar(
                     "env/frames_total",
-                    float(self.replay_buffer.total_env_steps),
+                    float(
+                        self.replay_buffer.total_env_steps
+                        + self._resume_env_steps_offset
+                    ),
                     self.train_step,
                 )
                 self.logger.add_scalar(
@@ -880,11 +897,9 @@ class WorldModelTrainer:
         )
         return log_ratio
 
-        """
-        Cosine schedule from max_val to min_val over training.
-        """
+    def get_cosine_schedule(self, max_val: float, min_val: float) -> float:
+        """Cosine schedule from max_val to min_val over training."""
         progress = min(1.0, self.train_step / max(1, self.max_train_steps))
-        # Cosine decay: starts at max, ends at min
         return min_val + 0.5 * (max_val - min_val) * (1 + math.cos(math.pi * progress))
 
     def get_current_wm_ac_ratio(self) -> int:
@@ -971,7 +986,11 @@ class WorldModelTrainer:
 
         h_prev_backup = self.world_model.h_prev.clone()
 
-        env = create_env(self.config.environment_name, use_pixels=self.use_pixels)
+        env = create_env(
+            self.config.environment_name,
+            use_pixels=self.use_pixels,
+            config=self.config,
+        )
         target_size = self.config.encoder_cnn_target_size if self.use_pixels else None
 
         episode_lengths = []
@@ -1124,9 +1143,13 @@ class WorldModelTrainer:
             },
             "actor": self._get_model(self.actor).state_dict(),
             "critic": self._get_model(self.critic).state_dict(),
+            "critic_ema": self._get_model(self.critic_ema).state_dict(),
             "wm_optimizer": self.wm_optimizer.state_dict(),
             "actor_optimizer": self.actor_optimizer.state_dict(),
             "critic_optimizer": self.critic_optimizer.state_dict(),
+            "return_scale": self.S,
+            "surprise_ema": self._wm_surprise_ema,
+            "smoothed_surprise": self._smoothed_surprise,
             "mlflow_run_id": self.mlflow_run_id,
         }
         path = os.path.join(self.checkpoint_dir, f"checkpoint_{suffix}.pt")
@@ -1152,6 +1175,15 @@ class WorldModelTrainer:
         if "actor" in checkpoint:
             self._get_model(self.actor).load_state_dict(checkpoint["actor"])
             self._get_model(self.critic).load_state_dict(checkpoint["critic"])
+            if "critic_ema" in checkpoint:
+                self._get_model(self.critic_ema).load_state_dict(
+                    checkpoint["critic_ema"]
+                )
+            else:
+                # Backward compatibility: old checkpoints did not save critic_ema.
+                self._get_model(self.critic_ema).load_state_dict(
+                    self._get_model(self.critic).state_dict()
+                )
 
         # Restore optimizers (skip if architecture changed)
         if "wm_optimizer" in checkpoint:
@@ -1168,6 +1200,15 @@ class WorldModelTrainer:
             self.actor_optimizer.load_state_dict(checkpoint["actor_optimizer"])
         if "critic_optimizer" in checkpoint:
             self.critic_optimizer.load_state_dict(checkpoint["critic_optimizer"])
+
+        # Restore auxiliary training state when available.
+        self.S = float(checkpoint.get("return_scale", self.S))
+        surprise_ema = checkpoint.get("surprise_ema")
+        if isinstance(surprise_ema, dict):
+            self._wm_surprise_ema = {str(k): float(v) for k, v in surprise_ema.items()}
+        self._smoothed_surprise = float(
+            checkpoint.get("smoothed_surprise", self._smoothed_surprise)
+        )
 
         self.train_step = checkpoint.get("step", 0)
         print(f"Resumed checkpoint from {checkpoint_path} at step {self.train_step}")

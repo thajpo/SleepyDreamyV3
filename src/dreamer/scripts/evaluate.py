@@ -23,7 +23,7 @@ def evaluate(
     print()
 
     # Create environment
-    env = create_env(config.environment_name, use_pixels=use_pixels)
+    env = create_env(config.environment_name, use_pixels=use_pixels, config=config)
     n_actions = config.n_actions
 
     # Initialize models

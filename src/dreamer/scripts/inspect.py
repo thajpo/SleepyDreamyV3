@@ -93,7 +93,7 @@ def run_inspection(
 ):
     actor, encoder, world_model, ckpt = load_models(checkpoint_path, cfg, device)
 
-    env = create_env(cfg.environment_name, use_pixels=cfg.use_pixels)
+    env = create_env(cfg.environment_name, use_pixels=cfg.use_pixels, config=cfg)
     action_meanings = None
     get_action_meanings = getattr(env.unwrapped, "get_action_meanings", None)
     if callable(get_action_meanings):
