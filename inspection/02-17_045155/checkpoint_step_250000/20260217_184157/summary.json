@@ -1,0 +1,25 @@
+{
+  "checkpoint": "/home/j/Projects/SleepyDreamyV3/runs/02-17_045155/checkpoints/checkpoint_step_250000.pt",
+  "checkpoint_step": 250000,
+  "episodes": 2,
+  "max_steps_per_episode": 1200,
+  "avg_return": -21.0,
+  "avg_length": 915.0,
+  "win_rate": 0.0,
+  "action_hist_fraction": {
+    "0": 0.8617486338797814,
+    "1": 0.000546448087431694,
+    "2": 0.036065573770491806,
+    "3": 0.09836065573770492,
+    "4": 0.003278688524590164,
+    "5": 0.0
+  },
+  "wm_reward_pred_abs_error_mean": 0.046574115930198924,
+  "wm_continue_pred_done_mean": 1.0,
+  "wm_continue_pred_not_done_mean": 0.9999992895700217,
+  "wm_recon_l1_mean": 0.009744501030428813,
+  "kl_dynamics_raw_mean": 1.7359085891505854,
+  "kl_representation_raw_mean": 2.060307108990734,
+  "posterior_entropy_mean": 0.11417168088949443,
+  "actor_entropy_mean": 1.3127863555983768
+}

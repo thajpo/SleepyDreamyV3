@@ -695,3 +695,169 @@ The 4:1 ratio successfully keeps WM ahead of AC, preventing the "WM exploitation
 - **Primary metrics to judge continuation quality**:
   - `eval/episode_reward`, `eval/win_rate` (Pong success signal)
   - `loss/wm/total`, `wm/decoder/pixel_loss`, `dream/critic_value/mean` (training health)
+
+### 02-17-26 Atari Compat Resume Attempt (225k -> 250k)
+- **Branch/commits**:
+  - branch: `fix/pong-atari-wrapper-compat`
+  - tooling commit: `bf5828f` (checkpoint inspector + debug video overlays)
+  - compat+resume commit: `5aef881` (Atari compatibility env mode + checkpoint resume-state fixes)
+- **A run (compat enabled)**:
+  - command: `uv run dreamer-train --config atari_pong --checkpoint_path runs/02-17_045155/checkpoints/checkpoint_step_225000.pt --wm_lr 4e-5 --actor_lr 4e-5 --critic_lr 4e-5 --max_train_steps 250000 --checkpoint_interval 5000 --replay_buffer_size 500 --log_profile lean`
+  - log: `runs/pong_ab_A_compat_225k_to_250k.log`
+  - output dir: `runs/02-17_195655`
+  - MLflow run ID: `99b4e8dfd8d94a12834e4451190ff32a`
+- **Observed status**:
+  - Run resumed and became ready (`Replay buffer ready: 16 episodes`) and emitted one post-resume metric point.
+  - Last seen metrics: `train.updates_total=225100`, `env.frames_total=57,631,994`, no eval metrics yet.
+  - This indicates minimal forward progress in this window (resume-save run logged; not a useful performance result).
+
+### 02-17-26 Next Experiment Plan (High Update Density, From Scratch)
+- **Hypothesis**: policy collapse is partly due to too-low update density (`replay_ratio=1.0` with `batch_size=8`, `sequence_length=32` gives only `1/256` updates per env step).
+- **Change**: raise update density to Atari100k-like level by setting `replay_ratio=64` (with `B=8, T=32` this is `0.25` updates/env step).
+- **Run target**: from scratch to `25,000` update steps.
+- **Command**:
+  - `uv run dreamer-train --config atari_pong --max_train_steps 25000 --replay_ratio 64 --wm_lr 4e-5 --actor_lr 4e-5 --critic_lr 4e-5 --replay_buffer_size 500 --checkpoint_interval 5000 --log_profile lean`
+- **Primary readout**:
+  - `eval/episode_reward`, `eval/win_rate`, action distribution collapse vs diversity (using `dreamer-inspect` videos).
+- **Run launched**:
+  - log: `runs/pong_high_density_scratch_25k.log`
+  - output dir: `runs/02-17_202530`
+  - MLflow run ID: `bd26136c3b9442a78ca37a96db8fbb58`
+  - status at launch: replay buffer initialized and ready (`16 episodes`).
+- **Relaunch (active)**:
+  - initial detached run exited unexpectedly shortly after startup with only init logs.
+  - restarted with same command:
+    - log: `runs/pong_high_density_scratch_25k_v2.log`
+    - output dir: `runs/02-17_212108`
+    - MLflow run ID: `c5981ea056144d1fbe5e6ca9dadd1a7a`
+  - status: active, replay buffer ready; first training point logged at step 0.
+
+### 02-17-26 Findings: High-Density 25k + No-Sticky
+- **Final run used for analysis**:
+  - command base: `--config atari_pong --max_train_steps 25000 --replay_ratio 64 --wm_lr 4e-5 --actor_lr 4e-5 --critic_lr 4e-5 --replay_buffer_size 500 --checkpoint_interval 5000 --log_profile lean`
+  - sticky disabled via config (`atari_sticky_action_prob=0.0` in `atari_pong_config`)
+  - log: `runs/pong_high_density_scratch_25k_nosticky_v3.log`
+  - output dir: `runs/02-17_213334`
+  - MLflow run ID: `f6e37d88c87b43f2b74b7ebe3b20a6d5`
+- **Outcome**:
+  - Training completed to 25k updates.
+  - Eval did not improve: `eval/episode_reward=-21.0` at 10k and 20k; `eval/win_rate=0.0`.
+- **Policy behavior (checkpoint inspector, argmax, 5 episodes)**:
+  - 5k checkpoint: action distribution collapsed to `NOOP` (action 0 = 100%).
+  - 15k checkpoint: still `NOOP` (action 0 = 100%).
+  - 25k checkpoint: collapsed to `LEFTFIRE` (action 5 = 100%).
+  - Inspector outputs:
+    - `inspection/02-17_213334/step_5000/argmax/summary.json`
+    - `inspection/02-17_213334/step_15000/argmax/summary.json`
+    - `inspection/02-17_213334/step_25000/argmax/summary.json`
+- **Critic/KL diagnostics**:
+  - `dream.critic_value.mean` very large in magnitude early (min ~`-3.05e7`), ending ~`-3.6e3` by 24.75k.
+  - `dream.critic_value.std` peaked ~`8.27e5`, ending ~`41.3`.
+  - Raw KL is very low (`wm.rssm.kl_dynamics_raw` last ~`0.0099`), while clipped KL logs are always 1.0 (`wm.rssm.kl_dynamics` / `wm.rssm.kl_representation`).
+  - Note: free-bits uses straight-through estimator, so gradients are not zero below the threshold; however, clipped KL metrics are not informative for diagnosing collapse.
+
+### 02-17-26 Hypothesis to Review
+- **Hypothesis**: Pong failure is driven by value-scale miscalibration + weak latent pressure signal, not WM NaN or low update density.
+  - Value decode bins (`b_start=-20, b_end=20` with symexp) produce extreme critic magnitudes and unstable policy gradients.
+  - KL clipped metrics at 1.0 hide whether representation dynamics are meaningfully improving.
+- **Proposed next run (single-hypothesis test)**:
+  1. Narrow value bin range for Pong from `[-20, 20]` to `[-8, 8]`.
+  2. Keep high update density (`replay_ratio=64`) and no sticky actions.
+  3. Compare with current run at 5k/15k/25k using the same inspector protocol.
+- **Expected effect**:
+  - `dream.critic_value.mean/std` stays in a sane range (orders of magnitude lower).
+  - Action collapse weakens (less 100% single-action occupancy).
+  - Early eval moves off floor (`-21`) by 25k if critic calibration is the blocker.
+- **Primary metric**:
+  - `eval/episode_reward` (target: improvement above `-21` by 25k).
+- **Secondary checks**:
+  - action distribution entropy from `steps.csv` in inspector outputs,
+  - `dream.critic_value.mean/std` trend,
+  - raw KL trend (`wm.rssm.kl_dynamics_raw`, `wm.rssm.kl_representation_raw`).
+
+### 02-18-26 Additional Findings (Sim/Eval + Policy Collapse Diagnostics)
+- **Important clarification from video debugging**:
+  - The repeated "same rally" pattern is mostly deterministic policy/environment behavior, not corrupted video encoding.
+  - In argmax eval, policy can collapse to one action and produce near-identical post-point trajectories.
+  - Pong does not hard reset the env between points (only between episodes), so repeated in-episode rally starts are expected under deterministic action loops.
+- **But eval instrumentation can be misleading if interpreted naively**:
+  - Inspector video capture was on pre-step observation timeline, which can make point boundaries look like a mid-rally cut.
+  - Added safer frame copying in inspector to avoid buffer alias confusion.
+- **Key diagnostic result requested in this session**:
+  - On latest analyzed checkpoints, `policy_mode=argmax` often collapses to near single-action occupancy,
+  - while `policy_mode=sample` is materially more diverse (does not fully collapse), even when return remains poor.
+  - This means logits are biased and brittle; deterministic evaluation amplifies collapse appearance.
+
+### 02-18-26 Core Implementation Fixes Applied (Not Just Hyperparams)
+- **RSSM temporal order fix (major)**:
+  - Updated world model transition logic to step dynamics with previous stochastic state before conditioning on current posterior sample.
+  - This was aligned in training path, collector policy rollout path, and inspector path.
+- **Actor/Critic imagination weighting fix**:
+  - Added Dreamer-style cumulative discount/continue weighting in actor and critic per-step losses (`gamma * continue` prefix product).
+- **Continue target semantics fix**:
+  - Collector now stores terminal flag as `terminated OR truncated` for replay targets.
+  - Continue head target (`1 - terminal`) now reflects true episode end semantics.
+- **Experiment control fix**:
+  - Added missing Atari compat CLI knobs to `dreamer-train` parser (frame skip, sticky prob, fire reset, etc.).
+
+### 02-18-26 High-Entropy Resume/Fresh Runs (Current Direction)
+- **Resume-from-250k run launched**:
+  - `runs/02-18_202505`, MLflow `a3b871f67bb549e0824b98b5927ebcc1`
+  - settings included higher actor entropy (`actor_entropy_coef=0.001`) with replay_ratio 8.
+- **Fresh high-entropy run launched**:
+  - `runs/02-18_224015`, MLflow `1aed708e72a843f0887c1e29e52bff92`
+  - settings: fresh from scratch, `max_train_steps=150000`, `replay_ratio=64`, `actor_entropy_coef=0.01`, `b_start=-8`, `b_end=8`, eval every 2500.
+- **Most recent checkpoint eval suite run (20k)**:
+  - checkpoint: `runs/02-18_224015/checkpoints/checkpoint_step_20000.pt`
+  - videos/artifacts:
+    - `videos/02-18_224015/step_20000/argmax/`
+    - `videos/02-18_224015/step_20000/sample/`
+  - result snapshot:
+    - argmax: avg return `-21.0` (collapsed behavior)
+    - sample: avg return `-20.0` (more diverse actions, still not winning)
+
+### 02-19-26 Logging Contract Update (Env-Frame First)
+- **Change**: added env-frame keyed eval metrics and critic symlog diagnostics.
+  - New metrics:
+    - `eval_frames/episode_reward`
+    - `eval_frames/win_rate`
+    - `eval_frames/episode_length`
+    - `train/updates_per_env_step`
+    - `dream/critic_value_symlog/mean`
+    - `dream/critic_value_symlog/std`
+- **Rationale**:
+  - Primary learning curves should be sample-efficiency aligned (`env_frames` x-axis), not update-only.
+  - Symlog critic stats avoid linear-scale explosion artifacts from wide value bins.
+
+### 02-19-26 Pong Experiment Queue (Incremental, 5 Runs)
+- **Note**: observation from latest eval suite confirms `sample` policy is more diverse than `argmax` (not fully collapsed), so deterministic collapse is part policy-mode amplified.
+
+#### Exp 1 - Higher Visual Fidelity
+- **Hypothesis**: 64x64 under-resolves ball dynamics; increasing input resolution improves control-relevant representation.
+- **Change**: `encoder_cnn_target_size` from `64x64` -> `84x84` (or `96x96`), keep other knobs fixed.
+- **Primary metric**: `eval_frames/episode_reward` by 25k updates.
+- **Secondary**: debug video ball/paddle reconstruction quality at 5k/15k/25k.
+
+#### Exp 2 - Motion-Weighted Reconstruction
+- **Hypothesis**: BCE is dominated by static background; weighting moving pixels improves ball tracking.
+- **Change**: add frame-diff/foreground weighting to pixel reconstruction loss.
+- **Primary metric**: `eval_frames/episode_reward` vs Exp 1 at equal env frames.
+- **Secondary**: reduced error on ball/paddle regions in debug overlays.
+
+#### Exp 3 - RSSM Capacity Increase
+- **Hypothesis**: current latent/dynamics capacity is too low for Pong temporal precision.
+- **Change**: increase capacity (e.g., `d_hidden`, `num_latents`, optionally `rnn_n_blocks`) with same training dynamics.
+- **Primary metric**: `eval_frames/episode_reward` by 25k/50k.
+- **Secondary**: action collapse reduction (argmax top-1 action fraction).
+
+#### Exp 4 - WM-First Scheduling
+- **Hypothesis**: actor outruns WM and locks into bad basins; more WM pressure early should stabilize policy learning.
+- **Change**: increase `wm_ac_ratio` (e.g., 2 or 4) for early phase while keeping high entropy.
+- **Primary metric**: first non-floor eval (`>-21`) at minimal env frames.
+- **Secondary**: smoother `dream/critic_value_symlog/*` and less argmax collapse.
+
+#### Exp 5 - Atari Protocol Sanity A/B
+- **Hypothesis**: residual wrapper/protocol mismatch contributes to poor control transfer.
+- **Change**: controlled A/B on `atari_fire_reset`, frame skip (eval-side sanity), and action-set assumptions.
+- **Primary metric**: `eval_frames/episode_reward` and win-rate trend consistency across seeds/checkpoints.
+- **Secondary**: qualitative serve/rally behavior stability in debug videos.

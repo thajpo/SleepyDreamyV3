@@ -339,6 +339,12 @@ class WorldModelTrainer:
             self.world_model.h_prev = torch.zeros(
                 actual_batch_size, h_dim, device=self.device
             )
+            self.world_model.z_prev = torch.zeros(
+                actual_batch_size,
+                self.num_latents,
+                self.num_classes,
+                device=self.device,
+            )
 
             # Zero gradients before accumulating losses
             self.wm_optimizer.zero_grad()
@@ -567,10 +573,12 @@ class WorldModelTrainer:
                         dreamed_values_logits,
                         dreamed_values,
                         lambda_returns,
+                        dreamed_continues,
                         dreamed_actions_logits,
                         dreamed_actions_sampled,
                         self.B,
                         self.S,
+                        self.gamma,
                         actor_entropy_coef=self.actor_entropy_coef,
                         dreamed_values_logits_ema=dreamed_values_logits_ema,
                         critic_ema_coef=self.critic_ema_regularizer,
@@ -818,6 +826,14 @@ class WorldModelTrainer:
                     ),
                     self.train_step,
                 )
+                env_frames_total = float(
+                    self.replay_buffer.total_env_steps + self._resume_env_steps_offset
+                )
+                self.logger.add_scalar(
+                    "train/updates_per_env_step",
+                    float(self.train_step) / max(1.0, env_frames_total),
+                    self.train_step,
+                )
                 self.logger.add_scalar(
                     "env/episodes_total",
                     float(self.replay_buffer.total_episodes_added),
@@ -1005,6 +1021,10 @@ class WorldModelTrainer:
                     device=self.device,
                 )
                 action_onehot = torch.zeros(1, self.n_actions, device=self.device)
+                z_prev = torch.zeros(
+                    1, self.num_latents, self.num_classes, device=self.device
+                )
+                z_prev_embed = self.world_model.z_embedding(z_prev.view(1, -1))
 
                 total_reward = 0.0
                 steps = 0
@@ -1037,6 +1057,10 @@ class WorldModelTrainer:
                         vec_obs_t = symlog(vec_obs_t)
                         encoder_input = vec_obs_t
 
+                    h, _ = self.world_model.step_dynamics(
+                        z_prev_embed, action_onehot, h
+                    )
+
                     posterior_logits = self.encoder(encoder_input)
                     posterior_logits_mixed = unimix_logits(
                         posterior_logits, unimix_ratio=0.01
@@ -1047,16 +1071,13 @@ class WorldModelTrainer:
                     ).float()
                     z_sample = z_onehot
 
-                    z_flat = z_sample.view(1, -1)
-                    z_embed = self.world_model.z_embedding(z_flat)
-                    h, _ = self.world_model.step_dynamics(z_embed, action_onehot, h)
-
                     actor_input = self.world_model.join_h_and_z(h, z_sample)
                     action_logits = self.actor(actor_input)
                     action = action_logits.argmax(dim=-1)
                     action_onehot = F.one_hot(
                         action, num_classes=self.n_actions
                     ).float()
+                    z_prev_embed = self.world_model.z_embedding(z_sample.view(1, -1))
 
                     obs, reward, terminated, truncated, _info = env.step(action.item())
                     total_reward += float(reward)
@@ -1085,6 +1106,16 @@ class WorldModelTrainer:
         self.logger.add_scalar("eval/episode_length", avg_len, step)
         self.logger.add_scalar("eval/episode_reward", avg_reward, step)
         self.logger.add_scalar("eval/win_rate", win_rate, step)
+
+        # Duplicate eval metrics with env-frame step for apples-to-apples sample-efficiency plots.
+        env_frames_total = int(
+            self.replay_buffer.total_env_steps + self._resume_env_steps_offset
+        )
+        self.logger.add_scalar("eval_frames/episode_length", avg_len, env_frames_total)
+        self.logger.add_scalar(
+            "eval_frames/episode_reward", avg_reward, env_frames_total
+        )
+        self.logger.add_scalar("eval_frames/win_rate", win_rate, env_frames_total)
 
         return avg_len
 
@@ -1471,6 +1502,19 @@ class WorldModelTrainer:
                 )
                 self.logger.add_scalar(
                     "dream/critic_value/std", value_stats[1].item(), step
+                )
+                symlog_values = symlog(all_dreamed_values)
+                symlog_stats = torch.stack(
+                    [
+                        symlog_values.mean(),
+                        symlog_values.std(),
+                    ]
+                ).cpu()
+                self.logger.add_scalar(
+                    "dream/critic_value_symlog/mean", symlog_stats[0].item(), step
+                )
+                self.logger.add_scalar(
+                    "dream/critic_value_symlog/std", symlog_stats[1].item(), step
                 )
 
             # Actor entropy (important for monitoring exploration)
