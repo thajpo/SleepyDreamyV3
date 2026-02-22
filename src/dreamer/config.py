@@ -241,7 +241,7 @@ def atari_pong_config() -> Config:
         1000  # Higher replay capacity while staying practical on 32 GiB RAM
     )
     cfg.replay_ratio = 1.0
-    cfg.min_buffer_episodes = 64
+    cfg.min_buffer_episodes = 16
     cfg.recent_fraction = 0.0
     cfg.surprise_scale_ac_lr = False
     cfg.surprise_wm_focus_threshold = 1e9
