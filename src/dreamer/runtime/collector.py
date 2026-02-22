@@ -70,8 +70,9 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
             episode_vec_obs,
             episode_actions,
             episode_rewards,
-            episode_terminated,
-        ) = ([], [], [], [], [])
+            episode_is_last,
+            episode_is_terminal,
+        ) = ([], [], [], [], [], [])
 
         # Initialize world model state for learned policy
         if not use_random_actions:
@@ -169,7 +170,8 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
 
             episode_actions.append(action_onehot_np)
             episode_rewards.append(total_reward)
-            episode_terminated.append(terminated or truncated)
+            episode_is_last.append(terminated or truncated)
+            episode_is_terminal.append(terminated)
 
             if terminated or truncated:
                 break
@@ -184,7 +186,8 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
             vec_obs_np = np.array(episode_vec_obs, dtype=np.float32)
             actions_np = np.array(episode_actions, dtype=np.float32)
             rewards_np = np.array(episode_rewards, dtype=np.float32)
-            terminated_np = np.array(episode_terminated, dtype=bool)
+            is_last_np = np.array(episode_is_last, dtype=bool)
+            is_terminal_np = np.array(episode_is_terminal, dtype=bool)
 
             episode_length = env_steps_in_episode
             data_queue.put(
@@ -193,7 +196,8 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
                     vec_obs_np,
                     actions_np,
                     rewards_np,
-                    terminated_np,
+                    is_last_np,
+                    is_terminal_np,
                     episode_length,
                 )
             )

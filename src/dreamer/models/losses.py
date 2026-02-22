@@ -199,6 +199,7 @@ def compute_actor_critic_losses(
     """
     num_bins = dreamed_values_logits.size(-1)
     H, Bsz = lambda_returns.shape[:2]
+    H_train = max(1, H - 1)
     continue_probs = torch.sigmoid(dreamed_continues).detach()
     discount = gamma * continue_probs
     # Weight timestep t by product_{i < t} (gamma * continue_i), matching Dreamer weighting.
@@ -208,23 +209,25 @@ def compute_actor_critic_losses(
     else:
         weights = weight_prefix
 
-    dreamed_values_logits_flat = dreamed_values_logits.view(-1, num_bins)
+    dreamed_values_logits_train = dreamed_values_logits[:H_train]
+    dreamed_values_logits_flat = dreamed_values_logits_train.view(-1, num_bins)
     # Detach lambda_returns: critic targets should not have gradients flowing back
     # through dreamed_values (which is part of lambda_returns). This matches
     # DreamerV3's use of sg() (stop_gradient) on value targets.
-    lambda_returns_flat = lambda_returns.detach().reshape(-1)
+    lambda_returns_train = lambda_returns[:H_train]
+    lambda_returns_flat = lambda_returns_train.detach().reshape(-1)
     critic_targets = twohot_encode(lambda_returns_flat, B)
 
     # Use soft cross-entropy for soft targets (twohot encoding)
     # -sum(targets * log_softmax(logits))
     per_step_ce = -torch.sum(
         critic_targets * F.log_softmax(dreamed_values_logits_flat, dim=-1), dim=-1
-    ).view(H, Bsz)
-    per_step_ce = per_step_ce * weights
+    ).view(H_train, Bsz)
+    per_step_ce = per_step_ce * weights[:H_train]
 
     if sample_mask is not None:
         mask = sample_mask.float().view(1, Bsz)
-        critic_loss = (per_step_ce * mask).sum() / (mask.sum() * H + 1e-8)
+        critic_loss = (per_step_ce * mask).sum() / (mask.sum() * H_train + 1e-8)
     else:
         critic_loss = per_step_ce.mean()
 
@@ -239,11 +242,11 @@ def compute_actor_critic_losses(
         # Note: P_ema is fixed target (detached), P_current has gradients
         per_step_ema = -torch.sum(
             ema_probs * F.log_softmax(dreamed_values_logits_flat, dim=-1), dim=-1
-        ).view(H, Bsz)
-        per_step_ema = per_step_ema * weights
+        ).view(H_train, Bsz)
+        per_step_ema = per_step_ema * weights[:H_train]
         if sample_mask is not None:
             mask = sample_mask.float().view(1, Bsz)
-            ema_reg_loss = (per_step_ema * mask).sum() / (mask.sum() * H + 1e-8)
+            ema_reg_loss = (per_step_ema * mask).sum() / (mask.sum() * H_train + 1e-8)
         else:
             ema_reg_loss = per_step_ema.mean()
 
@@ -256,21 +259,22 @@ def compute_actor_critic_losses(
     # Normalize advantages for training stability
     # if normalize_advantages and advantage.numel() > 1:
     # advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
-    advantage = ((lambda_returns - dreamed_values) / max(1, S)).detach()
+    dreamed_values_train = dreamed_values[:H_train]
+    advantage = ((lambda_returns_train - dreamed_values_train) / max(1, S)).detach()
 
     action_dist = torch.distributions.Categorical(
         logits=dreamed_actions_logits, validate_args=False
     )
-    entropy = action_dist.entropy()  # (H, B)
-    log_probs = action_dist.log_prob(dreamed_actions_sampled)  # (H, B)
+    entropy = action_dist.entropy()[:H_train]  # (H-1, B)
+    log_probs = action_dist.log_prob(dreamed_actions_sampled)[:H_train]  # (H-1, B)
 
     # Reinforce algorithm: log_prob * advantage + entropy bonus for exploration
     per_step_actor = -(log_probs * advantage) - actor_entropy_coef * entropy
-    per_step_actor = per_step_actor * weights
+    per_step_actor = per_step_actor * weights[:H_train]
     if sample_mask is not None:
         mask = sample_mask.float().view(1, Bsz)
-        actor_loss = (per_step_actor * mask).sum() / (mask.sum() * H + 1e-8)
-        entropy = (entropy * mask).sum() / (mask.sum() * H + 1e-8)
+        actor_loss = (per_step_actor * mask).sum() / (mask.sum() * H_train + 1e-8)
+        entropy = (entropy * mask).sum() / (mask.sum() * H_train + 1e-8)
     else:
         actor_loss = per_step_actor.mean()
         entropy = entropy.mean()

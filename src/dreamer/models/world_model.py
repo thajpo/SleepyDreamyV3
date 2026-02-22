@@ -184,6 +184,7 @@ class RSSMWorldModel(nn.Module):
             reward_logits,
             continue_logits,
             h_z_joined,
+            z_sample,
             prior_logits,
         )
 

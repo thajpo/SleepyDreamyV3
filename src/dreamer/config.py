@@ -129,6 +129,7 @@ class Config:
     replay_buffer_size: int = 500
     min_buffer_episodes: int = 64
     steps_per_weight_sync: int = 5
+    replay_burn_in: int = 8
 
     # ===== Training: replay ratio gating =====
     replay_ratio: float = 1.0

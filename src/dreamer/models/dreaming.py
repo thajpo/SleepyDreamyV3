@@ -56,7 +56,9 @@ def dream_sequence(
     for _ in range(num_dream_steps):
         dreamed_recurrent_states.append(dream_h_z.detach())
         action_logits = actor(dream_h_z.detach())
-        action_logits = unimix_logits(action_logits, unimix_ratio=0.01)  # Actor unimix (1%)
+        action_logits = unimix_logits(
+            action_logits, unimix_ratio=0.01
+        )  # Actor unimix (1%)
         dreamed_actions_logits.append(action_logits)
 
         action_dist = dist.Categorical(logits=action_logits, validate_args=False)
@@ -126,26 +128,31 @@ def calculate_lambda_returns(
     """
     lambda_returns = []
     if value_annotations is None:
-        next_lambda_return = dreamed_values[-1]
+        value_source = dreamed_values
     else:
-        next_lambda_return = value_annotations[-1]
+        value_source = value_annotations
 
-    # Iterate backwards through the trajectory
+    next_lambda_return = value_source[-1]
+
+    # Iterate backwards through the trajectory.
+    # TD(lambda) uses next-step value in the (1-lambda) branch:
+    # G_t = r_t + gamma*c_t*((1-lambda)V_{t+1} + lambda*G_{t+1})
     for i in reversed(range(num_dream_steps)):
         reward_t = dreamed_rewards[i]
         if continues_are_logits:
             continue_prob_t = torch.sigmoid(dreamed_continues[i])
         else:
             continue_prob_t = dreamed_continues[i]
-        if value_annotations is None:
-            value_t = dreamed_values[i]
+
+        if i + 1 < num_dream_steps:
+            next_value = value_source[i + 1]
         else:
-            value_t = value_annotations[i]
+            next_value = value_source[-1]
 
         next_lambda_return = reward_t + gamma * continue_prob_t * (
-            (1 - lam) * value_t + lam * next_lambda_return
+            (1 - lam) * next_value + lam * next_lambda_return
         )
         lambda_returns.append(next_lambda_return)
 
-    # The returns are calculated backwards, so we reverse them
+    # The returns are calculated backwards, so reverse to [t=0..H-1].
     return torch.stack(lambda_returns).flip(0)

@@ -258,7 +258,7 @@ class WorldModelTrainer:
 
     def get_data_from_buffer(self):
         """Sample batch from replay buffer (non-blocking after initial fill)."""
-        # Sample returns list of (pixels, states, actions, rewards, terminated, mask) tuples
+        # Sample returns list of (pixels, states, actions, rewards, is_last, is_terminal, mask) tuples
         # Each already has fixed sequence_length from buffer's _sample_subsequence
         batch = self.replay_buffer.sample(self.batch_size)
 
@@ -267,10 +267,11 @@ class WorldModelTrainer:
         batch_states = []
         batch_actions = []
         batch_rewards = []
-        batch_terminated = []
+        batch_is_last = []
+        batch_is_terminal = []
         batch_mask = []
 
-        for pixels, states, actions, rewards, terminated, mask in batch:
+        for pixels, states, actions, rewards, is_last, is_terminal, mask in batch:
             if self.use_pixels and pixels is not None:
                 target_size = self.config.encoder_cnn_target_size
                 # Convert pixels from (T, H, W, C) to (T, C, H, W)
@@ -283,7 +284,8 @@ class WorldModelTrainer:
             batch_states.append(torch.from_numpy(states))
             batch_actions.append(torch.from_numpy(actions))
             batch_rewards.append(torch.from_numpy(rewards))
-            batch_terminated.append(torch.from_numpy(terminated))
+            batch_is_last.append(torch.from_numpy(is_last))
+            batch_is_terminal.append(torch.from_numpy(is_terminal))
             batch_mask.append(torch.from_numpy(mask))
 
         # Stack into batch tensors: (B, T, ...)
@@ -304,7 +306,8 @@ class WorldModelTrainer:
         )  # (B, T, state_dim)
         self.actions = torch.stack(batch_actions).to(self.device)  # (B, T, n_actions)
         self.rewards = torch.stack(batch_rewards).to(self.device)  # (B, T)
-        self.terminated = torch.stack(batch_terminated).to(self.device)  # (B, T)
+        self.is_last = torch.stack(batch_is_last).to(self.device)  # (B, T)
+        self.is_terminal = torch.stack(batch_is_terminal).to(self.device)  # (B, T)
         self.mask = torch.stack(batch_mask).to(self.device)  # (B, T) - 1=real, 0=padded
 
     def train_models(self):
@@ -390,6 +393,11 @@ class WorldModelTrainer:
 
             # Phase 2: Batch encode all timesteps at once (single encoder forward pass)
             B, T = self.states.shape[:2]
+            burn_in_steps = min(
+                getattr(self.config, "replay_burn_in", 8), max(0, T - 1)
+            )
+            train_start_t = burn_in_steps
+            effective_train_steps = T - train_start_t
             states_flat = self.states.view(B * T, self.states.shape[-1])  # (B*T, n_obs)
 
             if self.use_pixels and self.pixels is not None:
@@ -430,7 +438,7 @@ class WorldModelTrainer:
                     obs_t = {"state": self.states[:, t_step]}  # State-only mode
                 action_t = self.actions[:, t_step]
                 reward_t = self.rewards[:, t_step]
-                terminated_t = self.terminated[:, t_step]
+                is_terminal_t = self.is_terminal[:, t_step]
                 sample_mask = self.mask[:, t_step]
 
                 # Use pre-computed encoder output with unimix (DreamerV3 Section 4)
@@ -447,6 +455,7 @@ class WorldModelTrainer:
                     reward_dist,
                     continue_logits,
                     h_z_joined,
+                    posterior_z_sample,
                     prior_logits,
                 ) = self.world_model(posterior_dist, action_t)
 
@@ -470,7 +479,7 @@ class WorldModelTrainer:
                     obs_t,
                     reward_dist,
                     reward_t,
-                    terminated_t,
+                    is_terminal_t,
                     continue_logits,
                     posterior_dist,
                     prior_logits,
@@ -506,6 +515,9 @@ class WorldModelTrainer:
 
                 # --- Dream Sequence for Actor-Critic ---
                 # Skip AC for this timestep if batch-level skip is active or no valid samples.
+                if t_step < train_start_t:
+                    continue
+
                 valid_ac_step = sample_mask.sum() > 0
                 if not skip_ac_batch and valid_ac_step:
                     h_prev_backup = self.world_model.h_prev.clone()
@@ -516,7 +528,7 @@ class WorldModelTrainer:
                     ) = dream_sequence(
                         h_z_joined,
                         self.world_model.z_embedding(
-                            posterior_dist.probs.view(actual_batch_size, -1)
+                            posterior_z_sample.view(actual_batch_size, -1)
                         ),
                         self.n_dream_steps,
                         self.actor,
@@ -631,8 +643,8 @@ class WorldModelTrainer:
                 self.critic_replay_scale > 0.0
                 and not skip_ac_batch
                 and ac_any
-                and len(replay_value_annotations) == T
-                and len(replay_posterior_states) == T
+                and len(replay_value_annotations) == effective_train_steps
+                and len(replay_posterior_states) == effective_train_steps
             ):
                 # Stack replay data
                 replay_posterior = torch.stack(
@@ -642,11 +654,13 @@ class WorldModelTrainer:
                     replay_value_annotations, dim=0
                 )  # [T, B]
 
-                replay_rewards = self.rewards.transpose(0, 1)  # [T, B]
-                replay_continues = (1.0 - self.terminated.float()).transpose(
+                replay_rewards = self.rewards[:, train_start_t:].transpose(
                     0, 1
-                )  # [T, B]
-                replay_mask = self.mask.transpose(0, 1)  # [T, B]
+                )  # [T', B]
+                replay_continues = (1.0 - self.is_terminal.float()).transpose(0, 1)[
+                    train_start_t:
+                ]  # [T', B]
+                replay_mask = self.mask[:, train_start_t:].transpose(0, 1)  # [T', B]
 
                 # Compute replay lambda-returns with annotations (continues are probabilities)
                 replay_lambda_returns = calculate_lambda_returns(
@@ -655,7 +669,7 @@ class WorldModelTrainer:
                     replay_continues,
                     self.gamma,
                     self.lam,
-                    T,
+                    effective_train_steps,
                     value_annotations=replay_annotations,
                     continues_are_logits=False,
                 ).transpose(0, 1)  # [B, T]
@@ -767,7 +781,7 @@ class WorldModelTrainer:
             self.train_step += 1
 
             # Log metrics to MLflow
-            sequence_length = self.states.shape[1] if hasattr(self, "states") else 0
+            sequence_length = effective_train_steps if hasattr(self, "states") else 0
             self.log_metrics(
                 total_wm_loss,
                 total_actor_loss,

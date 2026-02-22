@@ -70,8 +70,8 @@ class EpisodeReplayBuffer:
                 with self.lock:
                     self.buffer.append(episode)
                     self._episodes_added += 1
-                    # Episode length is now passed as 6th element, fallback to states length
-                    ep_len = episode[5] if len(episode) > 5 else len(episode[1])
+                    # Episode length is now passed as 7th element, fallback to states length
+                    ep_len = episode[6] if len(episode) > 6 else len(episode[1])
                     self._total_steps += ep_len
                     self._recent_ep_lengths.append(ep_len)
                     if (
@@ -93,9 +93,9 @@ class EpisodeReplayBuffer:
         If episode is shorter than sequence_length, pads with zeros and
         marks as terminated. Returns mask indicating real (1) vs padded (0) steps.
         """
-        # Episode tuple: (pixels, states, actions, rewards, terminated, episode_length)
+        # Episode tuple: (pixels, states, actions, rewards, is_last, is_terminal, episode_length)
         # episode_length is for tracking only, not needed for subsequence sampling
-        pixels, states, actions, rewards, terminated = episode[:5]
+        pixels, states, actions, rewards, is_last, is_terminal = episode[:6]
         # Use states for length - pixels may be None in state-only mode
         ep_len = len(states)
         seq_len = self.sequence_length
@@ -109,7 +109,8 @@ class EpisodeReplayBuffer:
                 states[start : start + seq_len],
                 actions[start : start + seq_len],
                 rewards[start : start + seq_len],
-                terminated[start : start + seq_len],
+                is_last[start : start + seq_len],
+                is_terminal[start : start + seq_len],
                 mask,
             )
         else:
@@ -126,9 +127,12 @@ class EpisodeReplayBuffer:
             states_pad = np.zeros((pad_len,) + states.shape[1:], dtype=states.dtype)
             actions_pad = np.zeros((pad_len,) + actions.shape[1:], dtype=actions.dtype)
             rewards_pad = np.zeros(pad_len, dtype=rewards.dtype)
-            terminated_pad = np.ones(
-                pad_len, dtype=terminated.dtype
+            is_last_pad = np.ones(
+                pad_len, dtype=is_last.dtype
             )  # Mark padded as terminated
+            is_terminal_pad = np.ones(
+                pad_len, dtype=is_terminal.dtype
+            )  # Padded steps should not bootstrap
 
             # Mask: 1 for real steps, 0 for padded
             mask = np.concatenate(
@@ -140,7 +144,8 @@ class EpisodeReplayBuffer:
                 np.concatenate([states, states_pad], axis=0),
                 np.concatenate([actions, actions_pad], axis=0),
                 np.concatenate([rewards, rewards_pad], axis=0),
-                np.concatenate([terminated, terminated_pad], axis=0),
+                np.concatenate([is_last, is_last_pad], axis=0),
+                np.concatenate([is_terminal, is_terminal_pad], axis=0),
                 mask,
             )
 
@@ -156,7 +161,7 @@ class EpisodeReplayBuffer:
             recent_fraction: Fraction of batch to sample from recent episodes (default 0.2)
 
         Returns:
-            List of (pixels, states, actions, rewards, terminated, mask) tuples,
+            List of (pixels, states, actions, rewards, is_last, is_terminal, mask) tuples,
             each with shape (sequence_length, ...)
         """
         # Wait for buffer to have enough episodes (only blocks on startup)

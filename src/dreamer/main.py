@@ -253,6 +253,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--steps_per_weight_sync", type=int, help="Steps per weight sync"
     )
+    parser.add_argument(
+        "--replay_burn_in", type=int, help="Replay burn-in steps per sequence"
+    )
     parser.add_argument("--replay_ratio", type=float, help="Replay ratio")
     parser.add_argument("--action_repeat", type=int, help="Action repeat")
     parser.add_argument("--recent_fraction", type=float, help="Recent fraction")
