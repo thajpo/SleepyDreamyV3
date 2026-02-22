@@ -165,8 +165,13 @@ class WorldModelTrainer:
         self._has_pixel_obs = self.use_pixels
         self._has_vector_obs = config.n_observations > 0
         print(f"Logging profile: {self.log_profile} | obs_mode: {self.obs_mode}")
-        self.log_every = 250
-        self.image_log_every = 2500
+        if self.log_profile == "full":
+            self.log_every = 10
+            self.image_log_every = 100
+        else:
+            # Lean mode still needs responsive MLflow curves on slow Atari runs.
+            self.log_every = 25
+            self.image_log_every = 250
         self.surprise_ema_beta = config.surprise_ema_beta
         self._wm_surprise_ema = {}
         self._last_surprise_log_ratio = 0.0  # Raw surprise (log ratio)
