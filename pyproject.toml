@@ -22,9 +22,9 @@ dependencies = [
 
 [project.scripts]
 dreamer-train = "dreamer.main:main"
-dreamer-eval = "dreamer.scripts.evaluate:main"
-dreamer-viz = "dreamer.scripts.visualize:main"
-dreamer-inspect = "dreamer.scripts.inspect:main"
+dreamer-eval = "dreamer.evaluate:main"
+dreamer-viz = "dreamer.visualize:main"
+dreamer-inspect = "dreamer.inspect:main"
 
 [tool.uv.sources]
 torch = [

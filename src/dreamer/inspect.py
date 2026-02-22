@@ -18,7 +18,7 @@ import torch
 import torch.nn.functional as F
 
 from dreamer.config import Config, atari_pong_config, default_config
-from dreamer.envs.utils import create_env
+from dreamer.runtime.env import create_env
 from dreamer.models import (
     initialize_actor,
     initialize_world_model,

@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 from dreamer.config import default_config
 from dreamer.models import initialize_actor, initialize_world_model, symlog
-from dreamer.envs.utils import create_env
+from dreamer.runtime.env import create_env
 
 
 def evaluate(

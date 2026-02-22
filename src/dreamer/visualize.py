@@ -7,13 +7,13 @@ import torch.distributions as dist
 import numpy as np
 from pathlib import Path
 
-from ..models import (
+from .models import (
     initialize_actor,
     initialize_world_model,
     symlog,
     resize_pixels_to_target,
 )
-from ..envs.utils import create_env
+from .runtime.env import create_env
 
 
 def load_models(config, checkpoint_path, device, load_actor=False):

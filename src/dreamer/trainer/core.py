@@ -10,7 +10,7 @@ import mlflow
 import os
 import time
 
-from ..data.replay_buffer import EpisodeReplayBuffer
+from ..runtime.replay_buffer import EpisodeReplayBuffer
 from ..models import (
     symlog,
     symexp,
@@ -28,7 +28,7 @@ from ..models import (
     adaptive_gradient_clipping,
 )
 from .mlflow_logger import MLflowLogger
-from ..envs.utils import create_env
+from ..runtime.env import create_env
 
 
 class WorldModelTrainer:

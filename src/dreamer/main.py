@@ -40,7 +40,7 @@ from dreamer.config import (
     dump_config_json,
 )
 from dreamer.trainer import train_world_model
-from dreamer.envs.collector import collect_experiences
+from dreamer.runtime.collector import collect_experiences
 
 
 def resolve_device(device_str: str) -> str:

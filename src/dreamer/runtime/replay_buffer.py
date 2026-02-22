@@ -131,10 +131,9 @@ class EpisodeReplayBuffer:
             )  # Mark padded as terminated
 
             # Mask: 1 for real steps, 0 for padded
-            mask = np.concatenate([
-                np.ones(ep_len, dtype=np.float32),
-                np.zeros(pad_len, dtype=np.float32)
-            ])
+            mask = np.concatenate(
+                [np.ones(ep_len, dtype=np.float32), np.zeros(pad_len, dtype=np.float32)]
+            )
 
             return (
                 pixels_out,
@@ -175,9 +174,13 @@ class EpisodeReplayBuffer:
 
             # Sample indices: n_recent from recent, n_uniform from all
             if recent_count < n_recent:
-                recent_indices = random.choices(range(recent_start, buffer_len), k=n_recent)
+                recent_indices = random.choices(
+                    range(recent_start, buffer_len), k=n_recent
+                )
             else:
-                recent_indices = random.sample(range(recent_start, buffer_len), k=n_recent)
+                recent_indices = random.sample(
+                    range(recent_start, buffer_len), k=n_recent
+                )
 
             if buffer_len < n_uniform:
                 uniform_indices = random.choices(range(buffer_len), k=n_uniform)
