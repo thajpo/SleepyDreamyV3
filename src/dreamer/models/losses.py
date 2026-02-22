@@ -233,7 +233,8 @@ def compute_actor_critic_losses(
 
     # --- Critic EMA Regularizer (Distributional) ---
     if dreamed_values_logits_ema is not None:
-        ema_logits_flat = dreamed_values_logits_ema.view(-1, num_bins).detach()
+        ema_logits_train = dreamed_values_logits_ema[:H_train]
+        ema_logits_flat = ema_logits_train.view(-1, num_bins).detach()
 
         # Target distribution from EMA critic
         ema_probs = F.softmax(ema_logits_flat, dim=-1)
