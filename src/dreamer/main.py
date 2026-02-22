@@ -21,6 +21,7 @@ import os
 import subprocess
 import socket
 import tempfile
+from typing import List, Tuple
 from datetime import datetime
 from pathlib import Path
 
@@ -74,6 +75,60 @@ def get_git_commit() -> str | None:
     except Exception:
         pass
     return None
+
+
+def _list_other_trainers() -> List[Tuple[int, str]]:
+    """Return running Dreamer trainer processes excluding current/parent process.
+
+    We intentionally block concurrent trainer launches to avoid resource contention
+    and orphaned multiprocessing trees.
+    """
+    current_pid = os.getpid()
+    parent_pid = os.getppid()
+    ignore_pids = {current_pid, parent_pid}
+    matches: list[tuple[int, str]] = []
+
+    proc_root = Path("/proc")
+    if not proc_root.exists():
+        return matches
+
+    for proc_dir in proc_root.iterdir():
+        if not proc_dir.name.isdigit():
+            continue
+        pid = int(proc_dir.name)
+        if pid in ignore_pids:
+            continue
+
+        cmdline_path = proc_dir / "cmdline"
+        try:
+            raw = cmdline_path.read_bytes()
+        except (FileNotFoundError, PermissionError, ProcessLookupError):
+            continue
+        if not raw:
+            continue
+
+        cmd = raw.replace(b"\x00", b" ").decode("utf-8", errors="ignore").strip()
+        if not cmd:
+            continue
+
+        if "dreamer-train" in cmd or "dreamer.main" in cmd:
+            matches.append((pid, cmd))
+
+    return matches
+
+
+def ensure_single_trainer() -> None:
+    """Fail fast if another trainer process is already active."""
+    others = _list_other_trainers()
+    if not others:
+        return
+
+    print("Refusing to start: another Dreamer trainer process is already running:")
+    for pid, cmd in others[:5]:
+        print(f"  PID {pid}: {cmd}")
+    if len(others) > 5:
+        print(f"  ... and {len(others) - 5} more")
+    raise SystemExit(1)
 
 
 def start_mlflow_ui(mlruns_dir: str, port: int = 5000) -> subprocess.Popen | None:
@@ -275,6 +330,7 @@ def apply_cli_args(cfg: Config, args: argparse.Namespace) -> Config:
 
 def run_training(cfg: Config, checkpoint_path: str | None = None):
     """Run training with the given configuration."""
+    ensure_single_trainer()
     device = resolve_device(cfg.device)
 
     if cfg.dry_run:
