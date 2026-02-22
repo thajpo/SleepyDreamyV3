@@ -346,10 +346,13 @@ def run_training(cfg: Config, checkpoint_path: str | None = None):
         model_queue = mp_ctx.Queue(maxsize=1)
         stop_event = mp_ctx.Event()
 
-        experience_loop = mp_ctx.Process(
-            target=collect_experiences,
-            args=(data_queue, model_queue, cfg, stop_event, str(log_dir)),
-        )
+        experience_loops = []
+        for _ in range(max(1, cfg.num_collectors)):
+            p = mp_ctx.Process(
+                target=collect_experiences,
+                args=(data_queue, model_queue, cfg, stop_event, str(log_dir)),
+            )
+            experience_loops.append(p)
         trainer_loop = mp_ctx.Process(
             target=train_world_model,
             args=(
@@ -363,18 +366,20 @@ def run_training(cfg: Config, checkpoint_path: str | None = None):
             ),
         )
 
-        experience_loop.start()
+        for p in experience_loops:
+            p.start()
         trainer_loop.start()
 
         trainer_loop.join()
         if trainer_loop.exitcode not in (0, None):
             print(f"Trainer exited with code {trainer_loop.exitcode}")
         stop_event.set()
-        experience_loop.join(timeout=5.0)
-        if experience_loop.is_alive():
-            experience_loop.terminate()
-        if experience_loop.exitcode not in (0, None):
-            print(f"Collector exited with code {experience_loop.exitcode}")
+        for idx, p in enumerate(experience_loops):
+            p.join(timeout=5.0)
+            if p.is_alive():
+                p.terminate()
+            if p.exitcode not in (0, None):
+                print(f"Collector[{idx}] exited with code {p.exitcode}")
 
         print("Training complete.")
     finally:

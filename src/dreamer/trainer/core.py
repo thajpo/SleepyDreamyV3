@@ -138,8 +138,7 @@ class WorldModelTrainer:
         self.replay_buffer = EpisodeReplayBuffer(
             data_queue=data_queue,
             max_episodes=config.replay_buffer_size,
-            min_episodes=config.batch_size
-            * 2,  # Wait for 2 batches worth before starting
+            min_episodes=config.min_buffer_episodes,
             sequence_length=config.sequence_length,
         )
         self.replay_buffer.start()
