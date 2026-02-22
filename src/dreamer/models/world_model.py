@@ -160,16 +160,20 @@ class RSSMWorldModel(nn.Module):
         Performs a full world model step for training.
         This involves encoding, stepping dynamics, and making predictions.
         """
-        # Apply straight-through method to sample z while keeping gradients
+        # Dreamer-style observe step:
+        # 1) transition deterministic state using previous stochastic state z_{t-1} and action
+        # 2) infer posterior z_t from current observation
+        # 3) predict heads from (h_t, z_t)
+        z_prev_flat = self.z_prev.view(self.z_prev.size(0), -1)
+        z_prev_embed = self.z_embedding(z_prev_flat)
+        h, prior_logits = self.step_dynamics(z_prev_embed, action, self.h_prev)
+
+        # Apply straight-through method to sample current posterior z_t while keeping gradients
         z_indices = posterior_dist.sample()  # (batch_size, latents)
         z_onehot = F.one_hot(z_indices, num_classes=self.n_classes).float()
         z_sample = z_onehot + (posterior_dist.probs - posterior_dist.probs.detach())
-        bsz = z_onehot.shape[0]
-        z_flat = z_sample.view(bsz, -1)
-        z_embed = self.z_embedding(z_flat)
-
-        # Step the dynamics to get the new hidden state and prior
-        h, prior_logits = self.step_dynamics(z_embed, action, self.h_prev)
+        # Cache z_t for the next transition step.
+        self.z_prev = z_sample.detach().clone()
 
         # Generate predictions using the new state
         (obs_reconstruction, reward_logits, continue_logits, h_z_joined) = (

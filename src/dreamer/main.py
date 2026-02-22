@@ -140,6 +140,35 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--environment_name", type=str, help="Gym environment name")
     parser.add_argument("--n_actions", type=int, help="Action space size")
     parser.add_argument("--n_observations", type=int, help="Observation vector size")
+    parser.add_argument(
+        "--atari_compat_mode",
+        type=bool,
+        help="Enable Atari compatibility wrapper stack",
+    )
+    parser.add_argument("--atari_noop_max", type=int, help="Atari reset no-op max")
+    parser.add_argument(
+        "--atari_frame_skip", type=int, help="Atari frame skip in preprocessing"
+    )
+    parser.add_argument(
+        "--atari_terminal_on_life_loss",
+        type=bool,
+        help="Atari terminal-on-life-loss setting",
+    )
+    parser.add_argument(
+        "--atari_sticky_action_prob",
+        type=float,
+        help="Atari sticky action probability",
+    )
+    parser.add_argument(
+        "--atari_full_action_space",
+        type=bool,
+        help="Use full Atari action space",
+    )
+    parser.add_argument(
+        "--atari_fire_reset",
+        type=bool,
+        help="Press FIRE once on Atari reset",
+    )
 
     # Model architecture
     parser.add_argument("--d_hidden", type=int, help="RSSM hidden size")

@@ -77,6 +77,10 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
         if not use_random_actions:
             h = torch.zeros(1, config.d_hidden * config.rnn_n_blocks, device=device)
             action_onehot = torch.zeros(1, n_actions, device=device)
+            z_prev = torch.zeros(
+                1, world_model.n_latents, world_model.n_classes, device=device
+            )
+            z_prev_embed = world_model.z_embedding(z_prev.view(1, -1))
             print(f"Collecting episode {episode_count} (learned policy)...")
         else:
             print(f"Collecting episode {episode_count} (random)...")
@@ -114,6 +118,8 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
                     encoder_input = vec_obs_t
 
                 with torch.no_grad():
+                    h, _ = world_model.step_dynamics(z_prev_embed, action_onehot, h)
+
                     posterior_logits = encoder(encoder_input)
                     posterior_logits_mixed = unimix_logits(
                         posterior_logits, unimix_ratio=0.01
@@ -127,10 +133,6 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
                     z_sample = z_onehot + (
                         posterior_dist.probs - posterior_dist.probs.detach()
                     )
-                    z_flat = z_sample.view(1, -1)
-
-                    z_embed = world_model.z_embedding(z_flat)
-                    h, _ = world_model.step_dynamics(z_embed, action_onehot, h)
 
                     actor_input = world_model.join_h_and_z(h, z_sample)
                     action_dist = torch.distributions.Categorical(
@@ -140,6 +142,7 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
 
                 action_np = action.item()
                 action_onehot = F.one_hot(action, num_classes=n_actions).float()
+                z_prev_embed = world_model.z_embedding(z_sample.view(1, -1))
                 action_onehot_np = action_onehot.cpu().numpy().squeeze()
 
             # Execute action with repeat
@@ -166,7 +169,7 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
 
             episode_actions.append(action_onehot_np)
             episode_rewards.append(total_reward)
-            episode_terminated.append(terminated)
+            episode_terminated.append(terminated or truncated)
 
             if terminated or truncated:
                 break

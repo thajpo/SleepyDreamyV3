@@ -140,6 +140,10 @@ def run_inspection(
         obs, _ = env.reset()
         h = torch.zeros(1, cfg.d_hidden * cfg.rnn_n_blocks, device=device)
         action_onehot = torch.zeros(1, cfg.n_actions, device=device)
+        z_prev = torch.zeros(
+            1, world_model.n_latents, world_model.n_classes, device=device
+        )
+        z_prev_embed = world_model.z_embedding(z_prev.view(1, -1))
         prior_logits_prev = None
         ep_return = 0.0
         ep_steps = 0
@@ -170,6 +174,10 @@ def run_inspection(
                 pixels = None
 
             with torch.no_grad():
+                h, prior_logits = world_model.step_dynamics(
+                    z_prev_embed, action_onehot, h
+                )
+
                 posterior_logits = encoder(encoder_input)
                 posterior_mixed = unimix_logits(posterior_logits, unimix_ratio=0.01)
                 posterior_probs = F.softmax(posterior_mixed, dim=-1)
@@ -206,7 +214,6 @@ def run_inspection(
                 z_flat = z_sample.view(1, -1)
                 z_embed = world_model.z_embedding(z_flat)
 
-                h, prior_logits = world_model.step_dynamics(z_embed, action_onehot, h)
                 prior_logits_prev = prior_logits
 
                 obs_recon, reward_logits, continue_logits, actor_input = (
@@ -232,6 +239,7 @@ def run_inspection(
                 action_idx = int(action.item())
                 action_counter[action_idx] += 1
                 action_onehot = F.one_hot(action, num_classes=cfg.n_actions).float()
+                z_prev_embed = world_model.z_embedding(z_sample.view(1, -1))
 
                 reward_pred = decode_twohot_expectation(reward_logits, b_tensor).item()
                 continue_pred = torch.sigmoid(continue_logits).item()
@@ -274,7 +282,8 @@ def run_inspection(
 
             next_obs, reward, terminated, truncated, _ = env.step(action_idx)
             if save_video and ep < video_episodes and cfg.use_pixels:
-                frames.append(obs["pixels"])
+                # Copy frame data to avoid aliasing if env reuses observation buffers.
+                frames.append(np.array(obs["pixels"], copy=True))
                 debug_rows.append(
                     {
                         "action": action_idx,
@@ -676,6 +685,12 @@ def main():
     parser.add_argument(
         "--video_episodes", type=int, default=1, help="How many episodes to save as mp4"
     )
+    parser.add_argument(
+        "--atari_frame_skip_override",
+        type=int,
+        default=None,
+        help="Override Atari frame skip for inspection videos (e.g. 1)",
+    )
     args = parser.parse_args()
 
     checkpoint_path = Path(args.checkpoint).resolve()
@@ -684,6 +699,8 @@ def main():
 
     device = resolve_device(args.device)
     cfg = infer_config_from_checkpoint(checkpoint_path, args.config_name)
+    if args.atari_frame_skip_override is not None:
+        cfg.atari_frame_skip = int(args.atari_frame_skip_override)
 
     run_name = checkpoint_path.parent.parent.name
     m = re.search(r"checkpoint_step_(\d+)$", checkpoint_path.stem)

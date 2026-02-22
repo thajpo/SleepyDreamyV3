@@ -226,6 +226,7 @@ def atari_pong_config() -> Config:
     cfg.n_observations = 0  # Pixel observations, not vector
     cfg.use_pixels = True
     cfg.atari_compat_mode = True
+    cfg.atari_sticky_action_prob = 0.0
     cfg.d_hidden = 256  # Your working value from Lunar Lander
     cfg.max_train_steps = 500000  # 500k steps for Atari
     cfg.batch_size = 8  # Your working value

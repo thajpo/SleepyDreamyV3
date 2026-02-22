@@ -166,10 +166,12 @@ def compute_actor_critic_losses(
     dreamed_values_logits,
     dreamed_values,
     lambda_returns,
+    dreamed_continues,
     dreamed_actions_logits,
     dreamed_actions_sampled,
     B,
     S,  # EMA for returns
+    gamma,
     actor_entropy_coef=0.003,
     dreamed_values_logits_ema=None,
     critic_ema_coef=1.0,
@@ -182,10 +184,12 @@ def compute_actor_critic_losses(
         dreamed_values_logits: Value function logits from critic
         dreamed_values: Decoded value estimates
         lambda_returns: Computed lambda returns
+        dreamed_continues: Continue logits from world model
         dreamed_actions_logits: Action logits from actor
         dreamed_actions_sampled: Sampled actions
         B: Bin tensor for twohot encoding
         S: EMA for returns
+        gamma: Discount factor
         actor_entropy_coef: Entropy regularization coefficient
         dreamed_values_logits_ema: Logits from EMA critic (for regularization)
         critic_ema_coef: Coefficient for EMA regularization
@@ -195,6 +199,15 @@ def compute_actor_critic_losses(
     """
     num_bins = dreamed_values_logits.size(-1)
     H, Bsz = lambda_returns.shape[:2]
+    continue_probs = torch.sigmoid(dreamed_continues).detach()
+    discount = gamma * continue_probs
+    # Weight timestep t by product_{i < t} (gamma * continue_i), matching Dreamer weighting.
+    weight_prefix = torch.ones(1, Bsz, device=discount.device, dtype=discount.dtype)
+    if H > 1:
+        weights = torch.cumprod(torch.cat([weight_prefix, discount[:-1]], dim=0), dim=0)
+    else:
+        weights = weight_prefix
+
     dreamed_values_logits_flat = dreamed_values_logits.view(-1, num_bins)
     # Detach lambda_returns: critic targets should not have gradients flowing back
     # through dreamed_values (which is part of lambda_returns). This matches
@@ -207,6 +220,7 @@ def compute_actor_critic_losses(
     per_step_ce = -torch.sum(
         critic_targets * F.log_softmax(dreamed_values_logits_flat, dim=-1), dim=-1
     ).view(H, Bsz)
+    per_step_ce = per_step_ce * weights
 
     if sample_mask is not None:
         mask = sample_mask.float().view(1, Bsz)
@@ -226,6 +240,7 @@ def compute_actor_critic_losses(
         per_step_ema = -torch.sum(
             ema_probs * F.log_softmax(dreamed_values_logits_flat, dim=-1), dim=-1
         ).view(H, Bsz)
+        per_step_ema = per_step_ema * weights
         if sample_mask is not None:
             mask = sample_mask.float().view(1, Bsz)
             ema_reg_loss = (per_step_ema * mask).sum() / (mask.sum() * H + 1e-8)
@@ -251,6 +266,7 @@ def compute_actor_critic_losses(
 
     # Reinforce algorithm: log_prob * advantage + entropy bonus for exploration
     per_step_actor = -(log_probs * advantage) - actor_entropy_coef * entropy
+    per_step_actor = per_step_actor * weights
     if sample_mask is not None:
         mask = sample_mask.float().view(1, Bsz)
         actor_loss = (per_step_actor * mask).sum() / (mask.sum() * H + 1e-8)

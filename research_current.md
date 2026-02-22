@@ -861,3 +861,80 @@ The 4:1 ratio successfully keeps WM ahead of AC, preventing the "WM exploitation
 - **Change**: controlled A/B on `atari_fire_reset`, frame skip (eval-side sanity), and action-set assumptions.
 - **Primary metric**: `eval_frames/episode_reward` and win-rate trend consistency across seeds/checkpoints.
 - **Secondary**: qualitative serve/rally behavior stability in debug videos.
+
+### 02-19-26 Monitoring Update (Run `02-18_224015`, Step 20k)
+- **Run status**:
+  - active background training process still running (`~20.8k/150k` at time of check).
+  - MLflow UI still active on port `5000`.
+- **Checkpoint inspection rerun (3 episodes, both policy modes)**:
+  - checkpoint: `runs/02-18_224015/checkpoints/checkpoint_step_20000.pt`
+  - artifacts:
+    - `inspection/02-18_224015/step_20000/argmax/summary.json`
+    - `inspection/02-18_224015/step_20000/sample/summary.json`
+  - argmax: avg return `-21.0`, win-rate `0.0`, top action occupancy `~80.0%` (action `1`).
+  - sample: avg return `-18.67`, win-rate `0.0`, near-uniform action mix (`~16-17%` per action).
+- **Interpretation**:
+  - policy-mode gap persists: `sample` remains behaviorally diverse while `argmax` remains collapsed.
+  - return floor persists despite healthy WM reconstruction/reward proxy metrics, supporting the current plan to prioritize representation/dynamics experiments (Exp 1-3) before more actor-only tuning.
+
+### 02-19-26 Run Stop + Latest Checkpoint Eval (`02-18_224015`)
+- **Action**:
+  - stopped the background training run after non-convergence report.
+  - attempted `dreamer.scripts.evaluate` on latest checkpoint (`step_45000`).
+- **Eval script result**:
+  - script failed due config mismatch: it always builds `default_config()` (`CartPole-v1`, `d_hidden=64`, 2 actions), which is incompatible with Atari Pong checkpoint (`d_hidden=256`, 6 actions).
+  - this is a tooling bug/limitation in evaluate CLI for non-default configs.
+- **Fallback evaluation (inspector, 10 episodes)**:
+  - checkpoint: `runs/02-18_224015/checkpoints/checkpoint_step_45000.pt`
+  - argmax: avg return `-21.0`, win-rate `0.0`
+  - sample: avg return `-20.5`, win-rate `0.0`
+  - artifacts:
+    - `inspection/02-18_224015/step_45000/argmax/summary.json`
+    - `inspection/02-18_224015/step_45000/sample/summary.json`
+
+### 02-19-26 Finding Logged (User Assessment: Best Time-to-Learn So Far)
+- **Finding**:
+  - despite non-convergence by win-rate, this latest run (`02-18_224015`) is currently the best observed run on **time-to-first-meaningful scoring behavior**.
+  - qualitative playback review shows the sample policy earning points earlier/more consistently than prior baselines.
+- **Metric interpretation update**:
+  - win-rate is too coarse in early Pong learning (stays at `0` for a long time).
+  - track `points per game` as a primary early-learning metric, alongside return and win-rate.
+- **Action for next experiment cycle**:
+  - keep reporting:
+    - `points_for_per_game`
+    - `points_against_per_game`
+    - `point_diff_per_game` (existing return)
+    - `win_rate`
+  - use these to rank experiments by **time-to-learn**, not just final convergence.
+
+### 02-20-26 Policy-Recovery Probe from 250k Checkpoint (Launched)
+- **Hypothesis**: from a mature checkpoint, sharply increasing exploration pressure (`actor_entropy_coef=0.15`) plus higher actor step size (`actor_lr=1e-4`) can break deterministic policy collapse and improve early scoring behavior faster than low-entropy continuation.
+- **Run type**: resume policy-recovery test (not WM-speed test).
+- **Command**:
+  - `uv run dreamer-train --config atari_pong --checkpoint_path runs/02-17_195655/checkpoints/checkpoint_step_250000.pt --max_train_steps 260000 --checkpoint_interval 2500 --eval_every 2500 --wm_lr 4e-5 --critic_lr 4e-5 --actor_lr 1e-4 --actor_entropy_coef 0.15 --log_profile lean`
+- **Artifacts/logging**:
+  - log: `runs/pong_resume_250k_entropy015_actor1e4.log`
+  - output dir: `runs/02-20_193655`
+  - MLflow run ID: `0eb06b49aa1747abb51a913fb02178ad`
+- **Primary metric**:
+  - `points_for_per_game` (time-to-first-meaningful-scoring behavior).
+- **Secondary metrics**:
+  - `points_against_per_game`, `point_diff_per_game`, `win_rate`, argmax top-1 action occupancy.
+- **Launch correction**:
+  - initial launch used a stale checkpoint path under `runs/02-17_195655/...` and exited.
+  - corrected resume path: `runs/02-17_045155/checkpoints/checkpoint_step_250000.pt`.
+  - active rerun log: `runs/pong_resume_250k_entropy015_actor1e4_v2.log`
+  - active output dir: `runs/02-20_213134`
+  - active MLflow run ID: `6a731d7853d043cc983be9031d874412`
+
+### 02-20-26 Queued Follow-Up (260k -> 300k, Lower Actor LR)
+- **Intent**:
+  - after current `250k -> 260k` high-entropy probe completes, continue to `300k` while lowering actor step size.
+- **Queued change**:
+  - `actor_lr: 1e-4 -> 4e-5` (entropy held at `0.15`).
+- **Queue watcher log**:
+  - `runs/pong_queue_260k_to_300k.log`
+- **Queued run log (starts automatically when watcher triggers)**:
+  - `runs/pong_resume_260k_to_300k_actor4e5.log`
+- **Queued run command (effective)**:
+  - `uv run dreamer-train --config atari_pong --checkpoint_path <260k checkpoint from runs/02-20_213134/checkpoints> --max_train_steps 300000 --checkpoint_interval 2500 --eval_every 2500 --wm_lr 4e-5 --critic_lr 4e-5 --actor_lr 4e-5 --actor_entropy_coef 0.15 --log_profile lean`
