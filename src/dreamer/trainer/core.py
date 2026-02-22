@@ -320,10 +320,15 @@ class WorldModelTrainer:
             env_steps = (
                 self.replay_buffer.total_env_steps + self._resume_env_steps_offset
             )
+            burn_in_for_gate = min(
+                getattr(self.config, "replay_burn_in", 0),
+                max(0, self.sequence_length - 1),
+            )
+            effective_seq_for_gate = max(1, self.sequence_length - burn_in_for_gate)
             target_train_steps = int(
                 env_steps
                 * self.replay_ratio
-                / (self.batch_size * self.sequence_length * self.action_repeat)
+                / (self.batch_size * effective_seq_for_gate * self.action_repeat)
             )
             if self.train_step >= target_train_steps and env_steps > 0:
                 time.sleep(0.01)  # Brief wait for more data
