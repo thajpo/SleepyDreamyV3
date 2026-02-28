@@ -60,6 +60,8 @@ def evaluate(
         # Initialize hidden state
         h = torch.zeros(1, config.d_hidden * config.rnn_n_blocks, device=device)
         action_onehot = torch.zeros(1, n_actions, device=device)
+        num_classes = config.d_hidden // 16
+        z_flat = torch.zeros(1, config.num_latents * num_classes, device=device)
 
         total_reward = 0.0
         steps = 0
@@ -80,23 +82,27 @@ def evaluate(
                 current_obs = vec_obs_t
 
             with torch.no_grad():
-                # Encode observation
-                posterior_logits = encoder(current_obs)
+                # Step GRU first with previous z and action
+                z_embed = world_model.z_embedding(z_flat)
+                h, _ = world_model.step_dynamics(z_embed, action_onehot, h)
+
+                # Encode observation into tokens
+                tokens = encoder(current_obs)
+
+                # Posterior conditioned on h_t: q(z_t | h_t, tokens)
+                posterior_logits = world_model.compute_posterior(h, tokens)
+                posterior_probs = F.softmax(posterior_logits, dim=-1)
                 posterior_dist = torch.distributions.Categorical(
-                    logits=posterior_logits
+                    probs=posterior_probs
                 )
                 z_indices = posterior_dist.sample()
                 z_onehot = F.one_hot(
                     z_indices, num_classes=config.d_hidden // 16
                 ).float()
                 z_sample = z_onehot + (
-                    posterior_dist.probs - posterior_dist.probs.detach()
+                    posterior_probs - posterior_probs.detach()
                 )
                 z_flat = z_sample.view(1, -1)
-
-                # Step dynamics
-                z_embed = world_model.z_embedding(z_flat)
-                h, _ = world_model.step_dynamics(z_embed, action_onehot, h)
 
                 # Get action from actor
                 actor_input = world_model.join_h_and_z(h, z_sample)

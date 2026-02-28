@@ -13,7 +13,7 @@ def compute_wm_loss(
     reward_t,
     terminated_t,
     continue_logits,
-    posterior_dist,
+    posterior_logits,
     prior_logits,
     B,
     config,
@@ -31,7 +31,7 @@ def compute_wm_loss(
         reward_t: Target rewards
         terminated_t: Termination flags
         continue_logits: Continue predictor logits
-        posterior_dist: Posterior distribution from encoder
+        posterior_logits: Raw posterior logits from world model (B, num_latents, num_classes)
         prior_logits: Prior logits from dynamics model
         B: Bin tensor for twohot encoding
         config: Config object with beta coefficients
@@ -108,7 +108,7 @@ def compute_wm_loss(
     free_bits = 1.0
     # Manual categorical KL to avoid distribution overhead.
     prior_logits_mixed = unimix_logits(prior_logits, unimix_ratio=0.01)
-    posterior_logits_detached = posterior_dist.logits.detach()
+    posterior_logits_detached = posterior_logits.detach()
     log_posterior_detached = F.log_softmax(posterior_logits_detached, dim=-1)
     log_prior = F.log_softmax(prior_logits_mixed, dim=-1)
     posterior_probs_detached = log_posterior_detached.exp()
@@ -118,7 +118,7 @@ def compute_wm_loss(
         .mean(dim=-1)
     )  # (B,)
 
-    log_posterior = F.log_softmax(posterior_dist.logits, dim=-1)
+    log_posterior = F.log_softmax(posterior_logits, dim=-1)
     log_prior_detached = F.log_softmax(prior_logits_mixed.detach(), dim=-1)
     posterior_probs = log_posterior.exp()
     l_rep_raw = (

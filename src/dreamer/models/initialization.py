@@ -124,6 +124,7 @@ def initialize_world_model(device, cfg, batch_size=1):
         batch_size=batch_size,
         b_start=cfg.b_start,
         b_end=cfg.b_end,
+        encoder_token_dim=encoder.token_dim,
         use_pixels=use_pixels,
     ).to(device)
     return encoder, world_model

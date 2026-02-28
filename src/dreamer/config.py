@@ -251,7 +251,7 @@ def atari_pong_config() -> Config:
     cfg.num_collectors = 4  # Reduced from 8 to prevent memory crash
     cfg.eval_every = 10000  # Eval less frequently for Atari
     cfg.checkpoint_interval = 50000  # Checkpoint every 50k steps
-    cfg.experiment_name = "atari_pong_v2"
+    cfg.experiment_name = "post-fix"
     # Pixel-specific settings
     cfg.encoder_cnn_target_size = (64, 64)  # Resize to 64x64 for model
     # Safer hyperparameters for pixel training (prevent NaN)

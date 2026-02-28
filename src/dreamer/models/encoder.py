@@ -4,6 +4,15 @@ import torch.nn.functional as F
 
 
 class ObservationEncoder(nn.Module):
+    """
+    Encodes observations (pixels and/or state vectors) into a token vector.
+
+    This is the first stage of the RSSM posterior path. The encoder extracts
+    features from raw observations. The posterior logits are produced separately
+    by the world model, conditioned on both these tokens AND the deterministic
+    state h_t, implementing q(z_t | h_t, x_t) as specified in the paper.
+    """
+
     def __init__(
         self,
         mlp_config,
@@ -37,19 +46,27 @@ class ObservationEncoder(nn.Module):
         ) * cnn_config.final_feature_size**2
 
         if self.use_state:
-            encoder_out = cnn_out_features + d_hidden  # CNN + MLP
+            self.token_dim = cnn_out_features + d_hidden  # CNN + MLP
         else:
-            encoder_out = cnn_out_features  # CNN only
+            self.token_dim = cnn_out_features  # CNN only
 
+        # num_latents and num_classes are stored for reference but the
+        # posterior logit layer now lives in the world model.
         num_classes = d_hidden // 16
         self.num_latents = num_latents
         self.num_classes = num_classes
 
-        # Output logits: L * K
-        logit_out = num_latents * num_classes
-        self.logit_layer = nn.Linear(in_features=encoder_out, out_features=logit_out)
-
     def forward(self, x):
+        """
+        Encode observations into token vectors.
+
+        Args:
+            x: Dict with "pixels" (B, C, H, W) and optionally "state" (B, n_obs),
+               OR a raw state tensor for StateOnlyEncoder compat.
+
+        Returns:
+            tokens: (B, token_dim) feature vector
+        """
         # x is passed as a dict of ['state', 'pixels']
         # Expect pixels in (B, C, H, W) format - conversion happens once when loading data
         image_obs = x["pixels"] / 255.0
@@ -60,17 +77,11 @@ class ObservationEncoder(nn.Module):
         if self.use_state:
             vec_obs = x["state"]
             x2 = self.MLP(vec_obs)
-            x = torch.cat((x1, x2), dim=1)  # Join outputs along feature dimension
+            tokens = torch.cat((x1, x2), dim=1)  # Join outputs along feature dimension
         else:
-            x = x1  # CNN only
+            tokens = x1  # CNN only
 
-        # feed this through a network to get out code * latent size
-        # feed this through a network to get out code * classes
-        x = self.logit_layer(x)
-        x = x.view(x.shape[0], self.num_latents, self.num_classes)
-
-        # Return logits directly. The Categorical distribution will handle the softmax.
-        return x
+        return tokens
 
 
 class ObservationCNNEncoder(nn.Module):
@@ -179,6 +190,9 @@ class StateOnlyEncoder(nn.Module):
     """
     Encoder for state-vector-only observations (no pixels).
     Used for simple environments like CartPole where state is sufficient.
+
+    Like ObservationEncoder, this now returns tokens (not posterior logits).
+    The posterior logit layer lives in the world model.
     """
 
     def __init__(
@@ -194,15 +208,9 @@ class StateOnlyEncoder(nn.Module):
         num_classes = d_hidden // 16
         self.num_latents = num_latents
         self.num_classes = num_classes
-
-        # Output: latents * classes logits
-        logit_out = num_latents * num_classes
-        self.logit_layer = nn.Linear(in_features=d_hidden, out_features=logit_out)
+        self.token_dim = d_hidden
 
     def forward(self, x):
         # x is the state vector directly (not a dict)
-        out = self.MLP(x)
-        logits = self.logit_layer(out)
-        logits = logits.view(logits.shape[0], self.num_latents, self.num_classes)
-
-        return logits
+        tokens = self.MLP(x)
+        return tokens

@@ -8,9 +8,11 @@ class RSSMWorldModel(nn.Module):
     """
     World model architecture from Dreamerv3, called a 'Recurrent State Space Model'
 
-    1. Encode scene (image, observation vector) -> Returns binned distribution of states 'z'
-    2. Pass encoded states into GRU
-    3. Estimate encoded distribution, hat{z}, a learned prior of the encoded representation
+    The observe step follows the paper's graphical model:
+      1. Step GRU: h_t = GRU(h_{t-1}, z_{t-1}, a_{t-1})
+      2. Compute posterior: q(z_t | h_t, x_t) from concat(h_t, encoder_tokens)
+      3. Compute prior: p(z_t | h_t) from h_t alone
+      4. Sample z_t from posterior, predict heads from (h_t, z_t)
     """
 
     def __init__(
@@ -20,6 +22,7 @@ class RSSMWorldModel(nn.Module):
         batch_size,
         b_start,
         b_end,
+        encoder_token_dim,
         use_pixels=True,
     ):
         super().__init__()
@@ -62,6 +65,14 @@ class RSSMWorldModel(nn.Module):
 
         self.n_latents = models_config.num_latents
         self.n_classes = num_classes
+
+        # --- Posterior head: q(z_t | h_t, x_t) ---
+        # Takes concat(h_t, encoder_tokens) and produces posterior logits.
+        # This is the key architectural requirement from the paper.
+        h_dim = self.d_hidden * n_gru_blocks
+        posterior_in_dim = h_dim + encoder_token_dim
+        posterior_out_dim = self.n_latents * self.n_classes
+        self.posterior_head = nn.Linear(posterior_in_dim, posterior_out_dim)
 
         # Initalizing network params for t=0 ; h_0 is the zero matrix
         h_prev = torch.zeros(batch_size, self.d_hidden * n_gru_blocks)
@@ -143,6 +154,22 @@ class RSSMWorldModel(nn.Module):
         prior_logits = self.dynamics_predictor(h)
         return h, prior_logits
 
+    def compute_posterior(self, h, tokens):
+        """
+        Compute posterior logits q(z_t | h_t, x_t) by conditioning on both
+        the deterministic state and the encoder tokens.
+
+        Args:
+            h: Deterministic state h_t. Shape: (B, n_blocks * d_hidden)
+            tokens: Encoder token features. Shape: (B, token_dim)
+
+        Returns:
+            posterior_logits: Shape (B, num_latents, num_classes)
+        """
+        x = torch.cat([h, tokens], dim=-1)
+        logits = self.posterior_head(x)
+        return logits.view(logits.shape[0], self.n_latents, self.n_classes)
+
     def predict_heads(self, h, z_sample):
         """
         Generates predictions from the model's state (h, z).
@@ -155,27 +182,44 @@ class RSSMWorldModel(nn.Module):
         continue_logits = self.continue_predictor(h_z_joined)
         return obs_reconstruction, reward_logits, continue_logits, h_z_joined
 
-    def forward(self, posterior_dist, action):
+    def forward(self, tokens, action):
         """
-        Performs a full world model step for training.
-        This involves encoding, stepping dynamics, and making predictions.
+        Performs a full world model observe step for training.
+
+        Follows the paper's graphical model:
+          1. Step GRU with (z_{t-1}, a_{t-1}) -> h_t
+          2. Compute posterior q(z_t | h_t, tokens) -> posterior_logits
+          3. Sample z_t from posterior (straight-through)
+          4. Predict heads from (h_t, z_t)
+
+        Args:
+            tokens: Encoder token features for current observation. Shape: (B, token_dim)
+            action: One-hot action. Shape: (B, n_actions)
+
+        Returns:
+            obs_reconstruction, reward_logits, continue_logits, h_z_joined,
+            z_sample, prior_logits, posterior_logits
         """
-        # Dreamer-style observe step:
-        # 1) transition deterministic state using previous stochastic state z_{t-1} and action
-        # 2) infer posterior z_t from current observation
-        # 3) predict heads from (h_t, z_t)
+        # 1. Step GRU using PREVIOUS z and action
         z_prev_flat = self.z_prev.view(self.z_prev.size(0), -1)
         z_prev_embed = self.z_embedding(z_prev_flat)
         h, prior_logits = self.step_dynamics(z_prev_embed, action, self.h_prev)
 
-        # Apply straight-through method to sample current posterior z_t while keeping gradients
+        # 2. Compute posterior conditioned on h_t AND observation tokens
+        posterior_logits = self.compute_posterior(h, tokens)
+
+        # 3. Sample z_t from posterior using straight-through estimator
+        posterior_probs = F.softmax(posterior_logits, dim=-1)
+        posterior_dist = torch.distributions.Categorical(
+            probs=posterior_probs, validate_args=False
+        )
         z_indices = posterior_dist.sample()  # (batch_size, latents)
         z_onehot = F.one_hot(z_indices, num_classes=self.n_classes).float()
-        z_sample = z_onehot + (posterior_dist.probs - posterior_dist.probs.detach())
+        z_sample = z_onehot + (posterior_probs - posterior_probs.detach())
         # Cache z_t for the next transition step.
         self.z_prev = z_sample.detach().clone()
 
-        # Generate predictions using the new state
+        # 4. Generate predictions using the new state
         (obs_reconstruction, reward_logits, continue_logits, h_z_joined) = (
             self.predict_heads(h, z_sample)
         )
@@ -186,6 +230,7 @@ class RSSMWorldModel(nn.Module):
             h_z_joined,
             z_sample,
             prior_logits,
+            posterior_logits,
         )
 
     def join_h_and_z(self, h, z):

@@ -15,7 +15,6 @@ from ..models import (
     symlog,
     symexp,
     resize_pixels_to_target,
-    unimix_logits,
     twohot_encode,
     initialize_actor,
     initialize_critic,
@@ -401,6 +400,8 @@ class WorldModelTrainer:
             t0 = time.perf_counter()
 
             # Phase 2: Batch encode all timesteps at once (single encoder forward pass)
+            # The encoder now returns tokens (feature vectors), not posterior logits.
+            # The posterior q(z|h,x) is computed inside the world model, conditioned on h_t.
             B, T = self.states.shape[:2]
             burn_in_steps = min(
                 getattr(self.config, "replay_burn_in", 8), max(0, T - 1)
@@ -417,13 +418,11 @@ class WorldModelTrainer:
             else:
                 encoder_input = states_flat  # State-only mode
 
-            all_posterior_logits = self.encoder(
+            all_tokens = self.encoder(
                 encoder_input
-            )  # (B*T, d_hidden, categories)
-            # Reshape back to (B, T, d_hidden, categories)
-            all_posterior_logits = all_posterior_logits.view(
-                B, T, *all_posterior_logits.shape[1:]
-            )
+            )  # (B*T, token_dim)
+            # Reshape back to (B, T, token_dim)
+            all_tokens = all_tokens.view(B, T, -1)
 
             # Decide AC update once per batch (ratio + focus), then mask per timestep
             skip_ac_batch = False
@@ -450,15 +449,11 @@ class WorldModelTrainer:
                 is_terminal_t = self.is_terminal[:, t_step]
                 sample_mask = self.mask[:, t_step]
 
-                # Use pre-computed encoder output with unimix (DreamerV3 Section 4)
-                posterior_logits = all_posterior_logits[:, t_step]
-                posterior_logits_mixed = unimix_logits(
-                    posterior_logits, unimix_ratio=0.01
-                )
-                posterior_dist = dist.Categorical(
-                    logits=posterior_logits_mixed, validate_args=False
-                )
+                # Get pre-computed encoder tokens for this timestep
+                tokens_t = all_tokens[:, t_step]  # (B, token_dim)
 
+                # World model now handles posterior computation internally,
+                # conditioning on h_t: q(z_t | h_t, tokens_t)
                 (
                     obs_reconstruction,
                     reward_dist,
@@ -466,7 +461,8 @@ class WorldModelTrainer:
                     h_z_joined,
                     posterior_z_sample,
                     prior_logits,
-                ) = self.world_model(posterior_dist, action_t)
+                    posterior_logits,
+                ) = self.world_model(tokens_t, action_t)
 
                 # Shape verification (DreamerV3 paper alignment)
                 if t_step == 0:  # Check once per batch
@@ -490,7 +486,7 @@ class WorldModelTrainer:
                     reward_t,
                     is_terminal_t,
                     continue_logits,
-                    posterior_dist,
+                    posterior_logits,
                     prior_logits,
                     self.B,
                     self.config,
@@ -519,7 +515,7 @@ class WorldModelTrainer:
                     last_obs_pixels_original = None
                     last_reconstruction_pixels = None
                 last_posterior_probs = (
-                    posterior_dist.probs.detach()
+                    F.softmax(posterior_logits, dim=-1).detach()
                 )  # (batch, d_hidden, d_hidden/16)
 
                 # --- Dream Sequence for Actor-Critic ---
@@ -1084,11 +1080,10 @@ class WorldModelTrainer:
                         z_prev_embed, action_onehot, h
                     )
 
-                    posterior_logits = self.encoder(encoder_input)
-                    posterior_logits_mixed = unimix_logits(
-                        posterior_logits, unimix_ratio=0.01
-                    )
-                    z_indices = posterior_logits_mixed.argmax(dim=-1)
+                    # Encoder returns tokens, posterior conditioned on h_t
+                    tokens = self.encoder(encoder_input)
+                    posterior_logits = self.world_model.compute_posterior(h, tokens)
+                    z_indices = posterior_logits.argmax(dim=-1)
                     z_onehot = F.one_hot(
                         z_indices, num_classes=self.d_hidden // 16
                     ).float()

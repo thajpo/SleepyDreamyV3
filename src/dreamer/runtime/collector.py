@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from queue import Empty
 import cv2
 
-from ..models import initialize_actor, initialize_world_model, symlog, unimix_logits
+from ..models import initialize_actor, initialize_world_model, symlog
 from .env import create_env
 
 
@@ -121,18 +121,20 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
                 with torch.no_grad():
                     h, _ = world_model.step_dynamics(z_prev_embed, action_onehot, h)
 
-                    posterior_logits = encoder(encoder_input)
-                    posterior_logits_mixed = unimix_logits(
-                        posterior_logits, unimix_ratio=0.01
-                    )
+                    # Encoder now returns tokens, not logits
+                    tokens = encoder(encoder_input)
+
+                    # Posterior is conditioned on h_t: q(z_t | h_t, tokens)
+                    posterior_logits = world_model.compute_posterior(h, tokens)
+                    posterior_probs = F.softmax(posterior_logits, dim=-1)
                     posterior_dist = torch.distributions.Categorical(
-                        logits=posterior_logits_mixed
+                        probs=posterior_probs
                     )
                     z_indices = posterior_dist.sample()
                     num_classes = config.d_hidden // 16
                     z_onehot = F.one_hot(z_indices, num_classes=num_classes).float()
                     z_sample = z_onehot + (
-                        posterior_dist.probs - posterior_dist.probs.detach()
+                        posterior_probs - posterior_probs.detach()
                     )
 
                     actor_input = world_model.join_h_and_z(h, z_sample)

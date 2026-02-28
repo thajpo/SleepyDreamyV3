@@ -63,23 +63,29 @@ def encode_observation(config, obs, encoder, world_model, device):
     obs_dict = {"pixels": pixels, "state": state}
 
     with torch.no_grad():
-        # Encode to get posterior
-        posterior_logits = encoder(obs_dict)
-        posterior_dist = dist.Categorical(logits=posterior_logits, validate_args=False)
-
-        # Sample z
-        z_indices = posterior_dist.sample()
-        z_onehot = F.one_hot(z_indices, num_classes=config.d_hidden // 16).float()
-        z_sample = z_onehot + (posterior_dist.probs - posterior_dist.probs.detach())
-
-        # Get z embedding
-        z_flat = z_sample.view(1, -1)
-        z_embed = world_model.z_embedding(z_flat)
+        # Encode to get tokens
+        tokens = encoder(obs_dict)
 
         # Initialize h and step dynamics once to get initial state
         h = torch.zeros(1, config.d_hidden * 4, device=device)
         action_zero = torch.zeros(1, 2, device=device)
+        z_prev = torch.zeros(1, config.num_latents * (config.d_hidden // 16), device=device)
+        z_embed = world_model.z_embedding(z_prev)
         h, _ = world_model.step_dynamics(z_embed, action_zero, h)
+
+        # Posterior conditioned on h_t: q(z_t | h_t, tokens)
+        posterior_logits = world_model.compute_posterior(h, tokens)
+        posterior_probs = F.softmax(posterior_logits, dim=-1)
+        posterior_dist = dist.Categorical(probs=posterior_probs, validate_args=False)
+
+        # Sample z
+        z_indices = posterior_dist.sample()
+        z_onehot = F.one_hot(z_indices, num_classes=config.d_hidden // 16).float()
+        z_sample = z_onehot + (posterior_probs - posterior_probs.detach())
+
+        # Get z embedding
+        z_flat = z_sample.view(1, -1)
+        z_embed = world_model.z_embedding(z_flat)
 
     return h, z_sample, z_embed, pixels
 
