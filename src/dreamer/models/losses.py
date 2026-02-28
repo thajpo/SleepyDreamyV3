@@ -107,22 +107,29 @@ def compute_wm_loss(
     # The "free bits" technique provides a minimum budget for the KL divergence.
     free_bits = 1.0
     # Manual categorical KL to avoid distribution overhead.
+    # Paper: "we parameterize the categorical distributions of the encoder AND
+    # dynamics predictor as mixtures of 1% uniform and 99% neural network output"
+    # → unimix must be applied to BOTH posterior and prior.
     prior_logits_mixed = unimix_logits(prior_logits, unimix_ratio=0.01)
-    posterior_logits_detached = posterior_logits.detach()
-    log_posterior_detached = F.log_softmax(posterior_logits_detached, dim=-1)
+    posterior_logits_mixed = unimix_logits(posterior_logits, unimix_ratio=0.01)
+
+    # Dynamics loss: KL[sg(q) || p] — trains the prior to match the posterior
+    posterior_logits_sg = posterior_logits_mixed.detach()
+    log_posterior_sg = F.log_softmax(posterior_logits_sg, dim=-1)
     log_prior = F.log_softmax(prior_logits_mixed, dim=-1)
-    posterior_probs_detached = log_posterior_detached.exp()
+    posterior_probs_sg = log_posterior_sg.exp()
     l_dyn_raw = (
-        (posterior_probs_detached * (log_posterior_detached - log_prior))
+        (posterior_probs_sg * (log_posterior_sg - log_prior))
         .sum(dim=-1)
         .mean(dim=-1)
     )  # (B,)
 
-    log_posterior = F.log_softmax(posterior_logits, dim=-1)
-    log_prior_detached = F.log_softmax(prior_logits_mixed.detach(), dim=-1)
+    # Representation loss: KL[q || sg(p)] — trains the posterior to be predictable
+    log_posterior = F.log_softmax(posterior_logits_mixed, dim=-1)
+    log_prior_sg = F.log_softmax(prior_logits_mixed.detach(), dim=-1)
     posterior_probs = log_posterior.exp()
     l_rep_raw = (
-        (posterior_probs * (log_posterior - log_prior_detached))
+        (posterior_probs * (log_posterior - log_prior_sg))
         .sum(dim=-1)
         .mean(dim=-1)
     )  # (B,)
