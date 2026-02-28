@@ -96,7 +96,7 @@ class ObservationCNNDecoder(nn.Module):
             else:
                 out_ch = in_channels  # Final layer outputs logits for each channel
 
-            deconv_layers.append(nn.ReLU())
+            deconv_layers.append(nn.SiLU())
             deconv_layers.append(
                 nn.ConvTranspose2d(
                     in_channels=in_ch,

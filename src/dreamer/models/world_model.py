@@ -304,11 +304,14 @@ class DynamicsPredictor(nn.Module):
         self.num_latents = num_latents
         self.num_classes = num_classes
 
+        # Paper: "RMSNorm normalization, SiLU activation"
         self.layers = nn.Sequential(
             nn.Linear(d_in, d_hidden, bias=True),
-            nn.ReLU(),
+            nn.RMSNorm(d_hidden),
+            nn.SiLU(),
             nn.Linear(d_hidden, d_hidden),
-            nn.ReLU(),
+            nn.RMSNorm(d_hidden),
+            nn.SiLU(),
             nn.Linear(d_hidden, d_out),
         )
 
@@ -317,3 +320,4 @@ class DynamicsPredictor(nn.Module):
         out = out.view(out.shape[0], self.num_latents, self.num_classes)
 
         return out
+
