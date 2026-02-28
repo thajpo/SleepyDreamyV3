@@ -77,15 +77,67 @@ def get_git_commit() -> str | None:
     return None
 
 
+def _parse_cmdline_argv(raw: bytes) -> list[str]:
+    """Parse /proc/<pid>/cmdline bytes into argv tokens."""
+    return [tok for tok in raw.decode("utf-8", errors="ignore").split("\x00") if tok]
+
+
+def _is_trainer_argv(argv: list[str]) -> bool:
+    """Return True only for real trainer invocations, not shell wrappers."""
+    if not argv:
+        return False
+
+    exe_name = Path(argv[0]).name
+    if exe_name == "dreamer-train":
+        return True
+
+    if exe_name == "uv" and "dreamer-train" in argv[1:]:
+        return True
+
+    # python -m dreamer.main
+    for i in range(len(argv) - 1):
+        if argv[i] == "-m" and argv[i + 1] == "dreamer.main":
+            return True
+
+    # python path/to/dreamer/main.py
+    for arg in argv[1:]:
+        norm = arg.replace("\\", "/")
+        if norm.endswith("/dreamer/main.py") or norm.endswith("dreamer/main.py"):
+            return True
+
+    return False
+
+
+def _list_ancestor_pids(start_pid: int) -> set[int]:
+    """Return parent chain for PID (including start_pid)."""
+    ancestors: set[int] = set()
+    pid = start_pid
+    proc_root = Path("/proc")
+    while pid > 0 and pid not in ancestors:
+        ancestors.add(pid)
+        stat_path = proc_root / str(pid) / "stat"
+        try:
+            stat_text = stat_path.read_text()
+        except (FileNotFoundError, PermissionError, ProcessLookupError):
+            break
+        fields = stat_text.split()
+        if len(fields) < 4:
+            break
+        try:
+            pid = int(fields[3])  # PPID
+        except ValueError:
+            break
+    return ancestors
+
+
 def _list_other_trainers() -> List[Tuple[int, str]]:
-    """Return running Dreamer trainer processes excluding current/parent process.
+    """Return running Dreamer trainers excluding current process ancestry.
 
     We intentionally block concurrent trainer launches to avoid resource contention
     and orphaned multiprocessing trees.
     """
     current_pid = os.getpid()
-    parent_pid = os.getppid()
-    ignore_pids = {current_pid, parent_pid}
+    ignore_pids = _list_ancestor_pids(current_pid)
     matches: list[tuple[int, str]] = []
 
     proc_root = Path("/proc")
@@ -107,12 +159,12 @@ def _list_other_trainers() -> List[Tuple[int, str]]:
         if not raw:
             continue
 
-        cmd = raw.replace(b"\x00", b" ").decode("utf-8", errors="ignore").strip()
-        if not cmd:
+        argv = _parse_cmdline_argv(raw)
+        if not argv or not _is_trainer_argv(argv):
             continue
 
-        if "dreamer-train" in cmd or "dreamer.main" in cmd:
-            matches.append((pid, cmd))
+        cmd = " ".join(argv)
+        matches.append((pid, cmd))
 
     return matches
 

@@ -22,6 +22,9 @@ wheels/
 DreamerPaper.pdf
 *.h5
 *.pt
+source/
+videos/
+.uv_cache/
 
 # MLflow tracking and Hydra outputs
 runs/

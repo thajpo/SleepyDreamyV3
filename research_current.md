@@ -938,3 +938,39 @@ The 4:1 ratio successfully keeps WM ahead of AC, preventing the "WM exploitation
   - `runs/pong_resume_260k_to_300k_actor4e5.log`
 - **Queued run command (effective)**:
   - `uv run dreamer-train --config atari_pong --checkpoint_path <260k checkpoint from runs/02-20_213134/checkpoints> --max_train_steps 300000 --checkpoint_interval 2500 --eval_every 2500 --wm_lr 4e-5 --critic_lr 4e-5 --actor_lr 4e-5 --actor_entropy_coef 0.15 --log_profile lean`
+
+### 02-22-26 Pong Throughput-Unblock Run (Launched)
+- **Hypothesis**:
+  - increasing replay allowance while reducing per-update data/computation load will reduce replay-gate stalls and improve wall-clock training throughput.
+- **One-change bundle for speed stress-test**:
+  - `replay_ratio: 1 -> 4`
+  - `sequence_length: 32 -> 16`
+  - `num_dream_steps: 15 -> 12`
+  - `batch_size: 8 -> 4`
+- **Command**:
+  - `uv run dreamer-train --config atari_pong --replay_ratio 4 --sequence_length 16 --num_dream_steps 12 --batch_size 4`
+- **Artifacts/logging**:
+  - log: `runs/pong_speed_probe_r4_seq16_h12_b4.log`
+  - output dir: `runs/02-22_171253`
+  - MLflow run ID: `fb355e604e194a0a85603a95c6461a75`
+- **Primary metric**:
+  - `train/throughput` stability (especially past step 600 where prior runs stalled).
+- **Secondary metrics**:
+  - `train/updates_total`, `env/frames_total`, `train/updates_per_env_step`.
+
+### 02-28-26 Fresh Run: Lower Actor LR from Scratch (Launched)
+- **Hypothesis**:
+  - policy collapse is currently more about brittle/overconfident actor updates than missing entropy; lowering actor LR should reduce argmax action lock-in while preserving sampled-policy diversity.
+- **Change**:
+  - from the current fast-throughput Pong setup (`replay_ratio=4`, `sequence_length=16`, `num_dream_steps=12`, `batch_size=4`), lower only:
+    - `actor_lr: 3e-5 -> 1.5e-5`
+- **Command**:
+  - `uv run dreamer-train --config atari_pong --replay_ratio 4 --sequence_length 16 --num_dream_steps 12 --batch_size 4 --actor_lr 1.5e-5 --checkpoint_interval 5000`
+- **Artifacts/logging**:
+  - log: `runs/pong_fresh_r4_seq16_h12_b4_actor1p5e5.log`
+  - output dir: `runs/02-28_062432`
+  - MLflow run ID: `32d79407e63249ecb915a08395607f9b`
+- **Primary metric**:
+  - `points_for_per_game` at matched env-frame checkpoints.
+- **Secondary metrics**:
+  - `point_diff_per_game`, `win_rate`, argmax top-1 action occupancy, `train/throughput` stability.
