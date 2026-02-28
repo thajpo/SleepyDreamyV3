@@ -6,22 +6,26 @@ from torch.optim import Optimizer
 
 class LaProp(Optimizer):
     """
-    LaProp optimizer (Ziyin et al., 2020).
+    LaProp optimizer as described in DreamerV3.
 
-    Key difference from Adam: uses max() for second moment instead of EMA,
-    which provides more stable updates for RL training.
+    The paper describes this as "RMSProp followed by momentum":
+      1. Compute second moment via EMA: v_t = β₂ * v_{t-1} + (1-β₂) * g_t²
+      2. Normalize gradient: g_norm = g / sqrt(v_t + ε)
+      3. Apply momentum to normalized gradient: m_t = β₁ * m_{t-1} + (1-β₁) * g_norm
+      4. Update: θ -= lr * m_t
 
-    v_t = max(β₂ * v_{t-1}, g_t²)  instead of  v_t = β₂ * v_{t-1} + (1-β₂) * g_t²
+    Key insight: the momentum is applied to the NORMALIZED gradient, not the
+    raw gradient. This means the first moment tracks a smoothed version of
+    the gradient direction (unit-scale), not the raw gradient magnitude.
 
-    Paper: https://arxiv.org/abs/2002.04839
-    Used in DreamerV3 with ε=1e-20.
+    Used in DreamerV3 with β₁=0.9, β₂=0.999, ε=1e-20, AGC=0.3.
     """
 
     def __init__(
         self,
         params,
         lr: float = 4e-5,
-        betas: tuple = (0.9, 0.99),
+        betas: tuple = (0.9, 0.999),
         eps: float = 1e-20,
         weight_decay: float = 0.0,
     ):
@@ -73,27 +77,21 @@ class LaProp(Optimizer):
                 if weight_decay != 0:
                     p.mul_(1 - lr * weight_decay)
 
-                # LaProp: max-based second moment (key difference from Adam)
-                # v_t = max(β₂ * v_{t-1}, g_t²)
-                exp_avg_sq.mul_(beta2).clamp_(min=grad.square())
+                # Standard EMA second moment (NOT max-based)
+                # v_t = β₂ * v_{t-1} + (1-β₂) * g_t²
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
 
-                # Bias correction for second moment
-                bias_correction2 = 1 - beta2 ** state["step"]
-                corrected_exp_avg_sq = exp_avg_sq / bias_correction2
-
-                # Compute normalized gradient
-                denom = corrected_exp_avg_sq.sqrt().add_(eps)
+                # Compute normalized gradient (RMSProp-style)
+                # No bias correction on second moment — matches source's scale_by_rms
+                denom = exp_avg_sq.sqrt().add_(eps)
                 normalized_grad = grad / denom
 
-                # Update first moment with normalized gradient
+                # Momentum on the normalized gradient (not the raw gradient)
+                # m_t = β₁ * m_{t-1} + (1-β₁) * g_norm
                 exp_avg.mul_(beta1).add_(normalized_grad, alpha=1 - beta1)
 
-                # Bias correction for first moment
-                bias_correction1 = 1 - beta1 ** state["step"]
-                step_size = lr / bias_correction1
-
                 # Update parameters
-                p.add_(exp_avg, alpha=-step_size)
+                p.add_(exp_avg, alpha=-lr)
 
 
 def adaptive_gradient_clipping(parameters, clip_factor: float = 0.3, eps: float = 1e-3):
