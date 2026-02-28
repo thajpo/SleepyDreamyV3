@@ -141,11 +141,19 @@ class RSSMWorldModel(nn.Module):
         hz = torch.einsum("bki,kji->bkj", h_blocks, self._W_hz) + self._b_hz
         hn = torch.einsum("bki,kji->bkj", h_blocks, self._W_hn) + self._b_hn
 
-        # GRU equations (batched element-wise)
+        # GRU equations with repo-matching modifications:
+        # 1. Reset gate: standard sigmoid
         r = torch.sigmoid(ir + hr)
-        z = torch.sigmoid(iz + hz)
-        n = torch.tanh(in_ + r * hn)
-        h_new = (1 - z) * n + z * h_blocks
+        # 2. Candidate: reset gates the candidate directly (source convention)
+        #    tanh(reset * raw_candidate) rather than tanh(input + reset * hidden)
+        n = torch.tanh(r * (in_ + hn))
+        # 3. Update gate: bias of -1 makes sigmoid(x-1) ≈ 0.27 at init,
+        #    causing the GRU to default to RETAINING the old state.
+        #    This is the GRU analogue of the LSTM forget gate bias trick.
+        z = torch.sigmoid(iz + hz - 1.0)
+        # 4. Blend: update * candidate + (1-update) * old
+        #    With z≈0.27 at init: mostly keeps old state, small correction from candidate
+        h_new = z * n + (1 - z) * h_blocks
 
         h = h_new.view(B, -1)  # (B, n_blocks * d_hidden)
         # Detach and clone before storing to avoid in-place modification of computation graph
@@ -277,9 +285,9 @@ class GatedRecurrentUnit(nn.Module):
             )
 
         r = torch.sigmoid(self.W_ir(x) + self.W_hr(h_prev))
-        z = torch.sigmoid(self.W_iz(x) + self.W_hz(h_prev))
-        n = torch.tanh(self.W_in(x) + r * self.W_hn(h_prev))
-        h = (1 - z) * n + z * h_prev
+        n = torch.tanh(r * (self.W_in(x) + self.W_hn(h_prev)))
+        z = torch.sigmoid(self.W_iz(x) + self.W_hz(h_prev) - 1.0)
+        h = z * n + (1 - z) * h_prev
         return h
 
 
