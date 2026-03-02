@@ -54,7 +54,6 @@ def dream_sequence(
     dream_z_embed = initial_z_embed.detach()
 
     for _ in range(num_dream_steps):
-        dreamed_recurrent_states.append(dream_h_z.detach())
         action_logits = actor(dream_h_z.detach())
         action_logits = unimix_logits(
             action_logits, unimix_ratio=0.01
@@ -81,9 +80,11 @@ def dream_sequence(
             dream_z_sample_indices, num_classes=world_model.n_classes
         ).float()
 
-        # 3. Update both state representations for next iteration
+        # 3. Update both state representations for next iteration.
+        # Record post-transition state so reward/value heads align with sampled action.
         dream_h_state = dream_h_dyn.detach()
         dream_h_z = world_model.join_h_and_z(dream_h_dyn, dream_z_sample).detach()
+        dreamed_recurrent_states.append(dream_h_z)
         dream_z_embed = world_model.z_embedding(
             dream_z_sample.view(dream_z_sample.size(0), -1)
         ).detach()
