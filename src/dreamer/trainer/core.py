@@ -61,9 +61,12 @@ class WorldModelTrainer:
         self.actor_entropy_coef = config.actor_entropy_coef
         b_start = config.b_start
         b_end = config.b_end
-        beta_range = torch.arange(
+        # Keep bin count unchanged for head compatibility, but make support symmetric.
+        n_bins = abs(int(b_end - b_start))
+        beta_range = torch.linspace(
             start=b_start,
             end=b_end,
+            steps=n_bins,
             device=self.device,
         )
         self.B = symexp(beta_range)
@@ -314,6 +317,10 @@ class WorldModelTrainer:
         self.mask = torch.stack(batch_mask).to(self.device)  # (B, T) - 1=real, 0=padded
 
     def train_models(self):
+        # Push current weights immediately so collectors do not spend startup
+        # episodes in random-action mode when resuming from checkpoint.
+        self.send_models_to_collector(self.train_step)
+
         while self.train_step < self.max_train_steps:
             # Replay ratio gating: wait if we've trained too fast relative to env steps
             env_steps = (
@@ -418,9 +425,7 @@ class WorldModelTrainer:
             else:
                 encoder_input = states_flat  # State-only mode
 
-            all_tokens = self.encoder(
-                encoder_input
-            )  # (B*T, token_dim)
+            all_tokens = self.encoder(encoder_input)  # (B*T, token_dim)
             # Reshape back to (B, T, token_dim)
             all_tokens = all_tokens.view(B, T, -1)
 
@@ -514,9 +519,9 @@ class WorldModelTrainer:
                     last_obs_pixels = None
                     last_obs_pixels_original = None
                     last_reconstruction_pixels = None
-                last_posterior_probs = (
-                    F.softmax(posterior_logits, dim=-1).detach()
-                )  # (batch, d_hidden, d_hidden/16)
+                last_posterior_probs = F.softmax(
+                    posterior_logits, dim=-1
+                ).detach()  # (batch, d_hidden, d_hidden/16)
 
                 # --- Dream Sequence for Actor-Critic ---
                 # Skip AC for this timestep if batch-level skip is active or no valid samples.
