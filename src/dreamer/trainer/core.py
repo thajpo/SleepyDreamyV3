@@ -61,13 +61,12 @@ class WorldModelTrainer:
         self.actor_entropy_coef = config.actor_entropy_coef
         b_start = config.b_start
         b_end = config.b_end
-        # Keep bin count unchanged for head compatibility, but make support symmetric.
-        n_bins = abs(int(b_end - b_start))
-        beta_range = torch.linspace(
+        # Keep head compatibility and preserve an exact zero-centered support.
+        beta_range = torch.arange(
             start=b_start,
             end=b_end,
-            steps=n_bins,
             device=self.device,
+            dtype=torch.float32,
         )
         self.B = symexp(beta_range)
         self.S = 0.0
