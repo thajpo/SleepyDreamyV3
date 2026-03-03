@@ -33,7 +33,8 @@ def dream_sequence(
 
     Returns:
         Tuple of:
-            - dreamed_recurrent_states: (num_steps, batch, h_z_dim) - full joined states
+            - dreamed_recurrent_states: (num_steps + 1, batch, h_z_dim)
+              where index 0 is the initial state and index t+1 is post-action state
             - dreamed_actions_logits: (num_steps, batch, n_actions)
             - dreamed_actions_sampled: (num_steps, batch)
     """
@@ -52,6 +53,9 @@ def dream_sequence(
     dream_h_z = initial_h_z.detach()
     dream_h_state = dream_h_z[:, :h_dim]  # Extract h from joined state
     dream_z_embed = initial_z_embed.detach()
+
+    # Include the starting state so values align with actions at the same index.
+    dreamed_recurrent_states.append(dream_h_z)
 
     for _ in range(num_dream_steps):
         action_logits = actor(dream_h_z.detach())

@@ -548,8 +548,11 @@ class WorldModelTrainer:
                     )
                     self.world_model.h_prev = h_prev_backup
 
+                    # dreamed_recurrent_states includes initial state at index 0.
+                    # Reward/continue predictions correspond to transitions and are
+                    # therefore taken from post-action states [1:].
                     dreamed_rewards_logits = self.world_model.reward_predictor(
-                        dreamed_recurrent_states
+                        dreamed_recurrent_states[1:]
                     ).detach()
                     dreamed_rewards_probs = F.softmax(dreamed_rewards_logits, dim=-1)
                     dreamed_rewards = torch.sum(
@@ -558,7 +561,9 @@ class WorldModelTrainer:
                     dreamed_rewards_list.append(dreamed_rewards.detach().cpu())
 
                     dreamed_continues = (
-                        self.world_model.continue_predictor(dreamed_recurrent_states)
+                        self.world_model.continue_predictor(
+                            dreamed_recurrent_states[1:]
+                        )
                         .detach()
                         .squeeze(-1)
                     )  # Remove trailing (1,) dimension
