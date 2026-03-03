@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from .decoder import ObservationDecoder, StateOnlyDecoder
+from .math_utils import unimix_logits
 
 
 class RSSMWorldModel(nn.Module):
@@ -31,35 +32,7 @@ class RSSMWorldModel(nn.Module):
 
         # GatedRecurrentUnit | Uses n_blocks independent GRUs computed in parallel
         self.n_blocks = models_config.rnn.n_blocks
-        n_gru_blocks = self.n_blocks
-
-        # --- GRU input preprocessing (repo: dynin0/1/2) ---
-        # Each input (deter, stoch, action) gets its own Linear→RMSNorm→SiLU,
-        # projecting to hidden dim. This normalizes scales before gating.
-        h_dim = self.d_hidden * n_gru_blocks
-        stoch_dim = models_config.num_latents * (self.d_hidden // 16)
-        act_dim = env_config.n_actions
-
-        self.dynin_deter = nn.Sequential(
-            nn.Linear(h_dim, self.d_hidden),
-            nn.RMSNorm(self.d_hidden),
-            nn.SiLU(),
-        )
-        self.dynin_stoch = nn.Sequential(
-            nn.Linear(stoch_dim, self.d_hidden),
-            nn.RMSNorm(self.d_hidden),
-            nn.SiLU(),
-        )
-        self.dynin_action = nn.Sequential(
-            nn.Linear(act_dim, self.d_hidden),
-            nn.RMSNorm(self.d_hidden),
-            nn.SiLU(),
-        )
-
-        # The GRU input per block is: (deter_per_block + 3*d_hidden)
-        # where the 3*d_hidden comes from the preprocessed inputs tiled across blocks,
-        # and deter_per_block is the block's slice of h_prev.
-        gru_d_in = self.d_hidden + 3 * self.d_hidden  # per-block deter + tiled preprocessed
+        gru_d_in = self.d_hidden + env_config.n_actions
 
         # Create temporary blocks to initialize weights, then stack for batched computation
         blocks = nn.ModuleList()
@@ -83,6 +56,7 @@ class RSSMWorldModel(nn.Module):
         self._b_hn = nn.Parameter(torch.stack([b.W_hn.bias for b in blocks]))
 
         # Outputs prior distribution \hat{z} from the sequence model
+        n_gru_blocks = models_config.rnn.n_blocks
         self.dynamics_predictor = DynamicsPredictor(
             d_in=self.d_hidden * n_gru_blocks,
             d_hidden=self.d_hidden,
@@ -96,6 +70,7 @@ class RSSMWorldModel(nn.Module):
         # --- Posterior head: q(z_t | h_t, x_t) ---
         # Takes concat(h_t, encoder_tokens) and produces posterior logits.
         # This is the key architectural requirement from the paper.
+        h_dim = self.d_hidden * n_gru_blocks
         posterior_in_dim = h_dim + encoder_token_dim
         posterior_out_dim = self.n_latents * self.n_classes
         self.posterior_head = nn.Linear(posterior_in_dim, posterior_out_dim)
@@ -106,9 +81,8 @@ class RSSMWorldModel(nn.Module):
         z_prev = torch.zeros((batch_size, self.n_latents, self.n_classes))
         self.register_buffer("z_prev", z_prev)
 
-        # z_embedding is now handled by dynin_stoch (the stoch input preprocessor).
-        # We keep a reference so callers (collector, evaluate) don't break.
-        self.z_embedding = self.dynin_stoch
+        # Linear layer to project categorical sample to embedding dimension
+        self.z_embedding = nn.Linear(self.n_latents * self.n_classes, self.d_hidden)
 
         # Takes 2D categorical samples and projects to d_hidden for GRU input
         h_z_dim = (self.d_hidden * n_gru_blocks) + (self.n_latents * self.n_classes)
@@ -139,13 +113,12 @@ class RSSMWorldModel(nn.Module):
         """
         Steps the recurrent dynamics forward one step using batched GRU computation.
 
-        Matches the reference repo's _core method:
-        1. Preprocess each input through Linear→RMSNorm→SiLU
-        2. Tile preprocessed features across blocks, concat with per-block deter
-        3. Apply block-diagonal GRU gates
+        All n_blocks GRUs are computed in parallel via einsum over stacked weights.
+        The input x = cat(z_embed, action) is identical for all blocks, while
+        h_prev differs per block.
 
         Args:
-            z_embed: The preprocessed stoch embedding. Shape: (B, d_hidden)
+            z_embed: The embedded latent state z_t. Shape: (B, d_hidden)
             action: The one-hot encoded action a_t. Shape: (B, n_actions)
             h_prev: The previous hidden state h_{t-1}. Shape: (B, n_blocks * d_hidden)
 
@@ -154,37 +127,38 @@ class RSSMWorldModel(nn.Module):
             prior_logits: The predicted logits for the next latent state.
         """
         B = z_embed.shape[0]
+        x = torch.cat((z_embed, action), dim=1)  # (B, d_in)
+        h_blocks = h_prev.view(
+            B, self.n_blocks, self.d_hidden
+        )  # (B, n_blocks, d_hidden)
 
-        # Input preprocessing: separate Linear→RMSNorm→SiLU per input
-        x0 = self.dynin_deter(h_prev)     # (B, d_hidden)
-        x1 = z_embed                       # Already preprocessed by dynin_stoch
-        x2 = self.dynin_action(action)     # (B, d_hidden)
+        # Input projections: (B, d_in) @ (n_blocks, d_hidden, d_in).T -> (B, n_blocks, d_hidden)
+        ir = torch.einsum("bi,kji->bkj", x, self._W_ir) + self._b_ir
+        iz = torch.einsum("bi,kji->bkj", x, self._W_iz) + self._b_iz
+        in_ = torch.einsum("bi,kji->bkj", x, self._W_in) + self._b_in
 
-        # Concat preprocessed inputs and tile across blocks
-        x_cat = torch.cat([x0, x1, x2], dim=1)   # (B, 3*d_hidden)
-        x_tiled = x_cat.unsqueeze(1).expand(-1, self.n_blocks, -1)  # (B, n_blocks, 3*d_hidden)
-
-        # Per-block: concat (block's deter slice, tiled preprocessed)
-        h_blocks = h_prev.view(B, self.n_blocks, self.d_hidden)  # (B, n_blocks, d_hidden)
-        x = torch.cat([h_blocks, x_tiled], dim=-1)  # (B, n_blocks, d_hidden + 3*d_hidden)
-
-        # Input projections per block: (B, n_blocks, gru_d_in) @ (n_blocks, d_hidden, gru_d_in).T
-        ir = torch.einsum("bki,kji->bkj", x, self._W_ir) + self._b_ir
-        iz = torch.einsum("bki,kji->bkj", x, self._W_iz) + self._b_iz
-        in_ = torch.einsum("bki,kji->bkj", x, self._W_in) + self._b_in
-
-        # Hidden projections: (B, n_blocks, d_hidden) @ (n_blocks, d_hidden, d_hidden).T
+        # Hidden projections: (B, n_blocks, d_hidden) @ (n_blocks, d_hidden, d_hidden).T -> (B, n_blocks, d_hidden)
         hr = torch.einsum("bki,kji->bkj", h_blocks, self._W_hr) + self._b_hr
         hz = torch.einsum("bki,kji->bkj", h_blocks, self._W_hz) + self._b_hz
         hn = torch.einsum("bki,kji->bkj", h_blocks, self._W_hn) + self._b_hn
 
         # GRU equations with repo-matching modifications:
+        # 1. Reset gate: standard sigmoid
         r = torch.sigmoid(ir + hr)
+        # 2. Candidate: reset gates the candidate directly (source convention)
+        #    tanh(reset * raw_candidate) rather than tanh(input + reset * hidden)
         n = torch.tanh(r * (in_ + hn))
+        # 3. Update gate: bias of -1 makes sigmoid(x-1) ≈ 0.27 at init,
+        #    causing the GRU to default to RETAINING the old state.
+        #    This is the GRU analogue of the LSTM forget gate bias trick.
         z = torch.sigmoid(iz + hz - 1.0)
+        # 4. Blend: update * candidate + (1-update) * old
+        #    With z≈0.27 at init: mostly keeps old state, small correction from candidate
         h_new = z * n + (1 - z) * h_blocks
 
-        h = h_new.reshape(B, -1)  # (B, n_blocks * d_hidden)
+        h = h_new.view(B, -1)  # (B, n_blocks * d_hidden)
+        # Detach and clone before storing to avoid in-place modification of computation graph
+        # Gradients flow through h directly, not through stored h_prev
         self.h_prev = h.detach().clone()
         prior_logits = self.dynamics_predictor(h)
         return h, prior_logits
@@ -244,6 +218,7 @@ class RSSMWorldModel(nn.Module):
         posterior_logits = self.compute_posterior(h, tokens)
 
         # 3. Sample z_t from posterior using straight-through estimator
+        posterior_logits = unimix_logits(posterior_logits, unimix_ratio=0.01)
         posterior_probs = F.softmax(posterior_logits, dim=-1)
         posterior_dist = torch.distributions.Categorical(
             probs=posterior_probs, validate_args=False
@@ -347,4 +322,3 @@ class DynamicsPredictor(nn.Module):
         out = out.view(out.shape[0], self.num_latents, self.num_classes)
 
         return out
-
