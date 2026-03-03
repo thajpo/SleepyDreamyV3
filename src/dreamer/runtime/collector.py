@@ -35,32 +35,46 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
     encoder = None
     world_model = None
 
+    def pull_latest_models() -> int:
+        """Drain model queue and apply only the newest update."""
+        nonlocal actor, encoder, world_model, use_random_actions
+        latest_model_states = None
+        updates = 0
+        while True:
+            try:
+                latest_model_states = model_queue.get_nowait()
+                updates += 1
+            except Empty:
+                break
+
+        if latest_model_states is None:
+            return 0
+
+        if actor is None:
+            actor = initialize_actor(device=device, cfg=config)
+            encoder, world_model = initialize_world_model(
+                device, batch_size=1, cfg=config
+            )
+
+        actor.load_state_dict(latest_model_states["actor"])
+        encoder.load_state_dict(latest_model_states["encoder"])
+        # strict=False: ignore h_prev/z_prev buffer shape mismatch (batch size differs)
+        world_model.load_state_dict(latest_model_states["world_model"], strict=False)
+        actor.eval()
+        encoder.eval()
+        world_model.eval()
+
+        if use_random_actions:
+            print("Collector: Received models, switching to learned policy.")
+            use_random_actions = False
+        else:
+            print("Collector: Updated models from trainer.")
+        return updates
+
     episode_count = 0
 
     while not stop_event.is_set():
-        # Check for model updates from trainer
-        try:
-            new_model_states = model_queue.get_nowait()
-            # First update: initialize models
-            if actor is None:
-                actor = initialize_actor(device=device, cfg=config)
-                encoder, world_model = initialize_world_model(
-                    device, batch_size=1, cfg=config
-                )
-            actor.load_state_dict(new_model_states["actor"])
-            encoder.load_state_dict(new_model_states["encoder"])
-            # strict=False: ignore h_prev/z_prev buffer shape mismatch (batch size differs)
-            world_model.load_state_dict(new_model_states["world_model"], strict=False)
-            actor.eval()
-            encoder.eval()
-            world_model.eval()
-            if use_random_actions:
-                print("Collector: Received models, switching to learned policy.")
-                use_random_actions = False
-            else:
-                print("Collector: Updated models from trainer.")
-        except Empty:
-            pass
+        pull_latest_models()
 
         episode_count += 1
         obs, info = env.reset()
@@ -73,6 +87,10 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
             episode_is_last,
             episode_is_terminal,
         ) = ([], [], [], [], [], [])
+
+        h = None
+        action_onehot = None
+        z_prev_embed = None
 
         # Initialize world model state for learned policy
         if not use_random_actions:
@@ -89,11 +107,23 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
         env_steps_in_episode = 0
 
         while not stop_event.is_set():
+            pull_latest_models()
+
             if use_random_actions:
                 # Fast path: random action, no model inference
                 action_np = env.action_space.sample()
                 action_onehot_np = np.eye(n_actions, dtype=np.float32)[action_np]
             else:
+                if h is None or action_onehot is None or z_prev_embed is None:
+                    h = torch.zeros(
+                        1, config.d_hidden * config.rnn_n_blocks, device=device
+                    )
+                    action_onehot = torch.zeros(1, n_actions, device=device)
+                    z_prev = torch.zeros(
+                        1, world_model.n_latents, world_model.n_classes, device=device
+                    )
+                    z_prev_embed = world_model.z_embedding(z_prev.view(1, -1))
+
                 # Learned policy path
                 if use_pixels:
                     # Pixel mode: resize and prepare dict input
