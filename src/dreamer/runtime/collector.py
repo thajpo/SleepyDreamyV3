@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from queue import Empty
 import cv2
 
-from ..models import initialize_actor, initialize_world_model, symlog
+from ..models import initialize_actor, initialize_world_model, symlog, unimix_logits
 from .env import create_env
 
 
@@ -126,6 +126,9 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
 
                     # Posterior is conditioned on h_t: q(z_t | h_t, tokens)
                     posterior_logits = world_model.compute_posterior(h, tokens)
+                    posterior_logits = unimix_logits(
+                        posterior_logits, unimix_ratio=0.01
+                    )
                     posterior_probs = F.softmax(posterior_logits, dim=-1)
                     posterior_dist = torch.distributions.Categorical(
                         probs=posterior_probs
@@ -133,14 +136,12 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
                     z_indices = posterior_dist.sample()
                     num_classes = config.d_hidden // 16
                     z_onehot = F.one_hot(z_indices, num_classes=num_classes).float()
-                    z_sample = z_onehot + (
-                        posterior_probs - posterior_probs.detach()
-                    )
+                    z_sample = z_onehot + (posterior_probs - posterior_probs.detach())
 
                     actor_input = world_model.join_h_and_z(h, z_sample)
-                    action_dist = torch.distributions.Categorical(
-                        logits=actor(actor_input)
-                    )
+                    action_logits = actor(actor_input)
+                    action_logits = unimix_logits(action_logits, unimix_ratio=0.01)
+                    action_dist = torch.distributions.Categorical(logits=action_logits)
                     action = action_dist.sample()
 
                 action_np = action.item()
