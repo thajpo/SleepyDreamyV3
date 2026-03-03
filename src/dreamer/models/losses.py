@@ -119,9 +119,7 @@ def compute_wm_loss(
     log_prior = F.log_softmax(prior_logits_mixed, dim=-1)
     posterior_probs_sg = log_posterior_sg.exp()
     l_dyn_raw = (
-        (posterior_probs_sg * (log_posterior_sg - log_prior))
-        .sum(dim=-1)
-        .mean(dim=-1)
+        (posterior_probs_sg * (log_posterior_sg - log_prior)).sum(dim=-1).mean(dim=-1)
     )  # (B,)
 
     # Representation loss: KL[q || sg(p)] — trains the posterior to be predictable
@@ -129,9 +127,7 @@ def compute_wm_loss(
     log_prior_sg = F.log_softmax(prior_logits_mixed.detach(), dim=-1)
     posterior_probs = log_posterior.exp()
     l_rep_raw = (
-        (posterior_probs * (log_posterior - log_prior_sg))
-        .sum(dim=-1)
-        .mean(dim=-1)
+        (posterior_probs * (log_posterior - log_prior_sg)).sum(dim=-1).mean(dim=-1)
     )  # (B,)
 
     # Straight-through estimator for free bits:
@@ -206,7 +202,7 @@ def compute_actor_critic_losses(
     """
     num_bins = dreamed_values_logits.size(-1)
     H, Bsz = lambda_returns.shape[:2]
-    H_train = max(1, H - 1)
+    H_train = max(1, H)
     continue_probs = torch.sigmoid(dreamed_continues).detach()
     discount = gamma * continue_probs
     # Weight timestep t by product_{i < t} (gamma * continue_i), matching Dreamer weighting.
@@ -273,8 +269,8 @@ def compute_actor_critic_losses(
     action_dist = torch.distributions.Categorical(
         logits=dreamed_actions_logits, validate_args=False
     )
-    entropy = action_dist.entropy()[:H_train]  # (H-1, B)
-    log_probs = action_dist.log_prob(dreamed_actions_sampled)[:H_train]  # (H-1, B)
+    entropy = action_dist.entropy()[:H_train]  # (H, B)
+    log_probs = action_dist.log_prob(dreamed_actions_sampled)[:H_train]  # (H, B)
 
     # Reinforce algorithm: log_prob * advantage + entropy bonus for exploration
     per_step_actor = -(log_probs * advantage) - actor_entropy_coef * entropy
