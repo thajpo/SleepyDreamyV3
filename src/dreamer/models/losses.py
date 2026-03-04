@@ -130,11 +130,10 @@ def compute_wm_loss(
         (posterior_probs * (log_posterior - log_prior_sg)).sum(dim=-1).sum(dim=-1)
     )  # (B,)
 
-    # Straight-through estimator for free bits:
-    # Forward: loss = max(free_bits, raw) for reporting/scaling
-    # Backward: gradient flows through raw value (not killed by max)
-    l_dyn = l_dyn_raw + (free_bits - l_dyn_raw).clamp(min=0).detach()
-    l_rep = l_rep_raw + (free_bits - l_rep_raw).clamp(min=0).detach()
+    # Free-bits clamp: stop pushing KL lower once below the threshold.
+    # This matches DreamerV3's max(free_nats, KL) behavior.
+    l_dyn = torch.clamp(l_dyn_raw, min=free_bits)
+    l_rep = torch.clamp(l_rep_raw, min=free_bits)
 
     total_loss_per_sample = beta_pred * l_pred + beta_dyn * l_dyn + beta_rep * l_rep
 
