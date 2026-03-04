@@ -119,7 +119,7 @@ def compute_wm_loss(
     log_prior = F.log_softmax(prior_logits_mixed, dim=-1)
     posterior_probs_sg = log_posterior_sg.exp()
     l_dyn_raw = (
-        (posterior_probs_sg * (log_posterior_sg - log_prior)).sum(dim=-1).mean(dim=-1)
+        (posterior_probs_sg * (log_posterior_sg - log_prior)).sum(dim=-1).sum(dim=-1)
     )  # (B,)
 
     # Representation loss: KL[q || sg(p)] — trains the posterior to be predictable
@@ -127,7 +127,7 @@ def compute_wm_loss(
     log_prior_sg = F.log_softmax(prior_logits_mixed.detach(), dim=-1)
     posterior_probs = log_posterior.exp()
     l_rep_raw = (
-        (posterior_probs * (log_posterior - log_prior_sg)).sum(dim=-1).mean(dim=-1)
+        (posterior_probs * (log_posterior - log_prior_sg)).sum(dim=-1).sum(dim=-1)
     )  # (B,)
 
     # Straight-through estimator for free bits:
