@@ -499,12 +499,6 @@ class WorldModelTrainer:
                     sample_mask=sample_mask,
                 )
 
-                # Accumulate individual loss components (tensor addition, no GPU sync)
-                for key in wm_loss_components:
-                    wm_loss_components[key] = (
-                        wm_loss_components[key] + wm_loss_dict[key].detach()
-                    )
-
                 # Store visualization data
                 if self.use_pixels and "pixels" in obs_t:
                     last_obs_pixels = obs_t["pixels"]
@@ -527,6 +521,13 @@ class WorldModelTrainer:
                 # post-burn-in window as replay value annotations.
                 if self.critic_replay_scale > 0.0:
                     replay_posterior_states.append(h_z_joined.detach())
+
+                # Accumulate individual WM components on the same optimization
+                # window used for total_wm_loss (post-burn-in timesteps only).
+                for key in wm_loss_components:
+                    wm_loss_components[key] = (
+                        wm_loss_components[key] + wm_loss_dict[key].detach()
+                    )
 
                 valid_ac_step = sample_mask.sum() > 0
                 if not skip_ac_batch and valid_ac_step:
