@@ -25,7 +25,7 @@ class EpisodeReplayBuffer:
     """
 
     def __init__(
-        self, data_queue, max_episodes=1000, min_episodes=64, sequence_length=25
+        self, data_queue=None, max_episodes=1000, min_episodes=64, sequence_length=25
     ):
         """
         Args:
@@ -52,6 +52,8 @@ class EpisodeReplayBuffer:
 
     def start(self):
         """Start background queue draining thread."""
+        if self.data_queue is None:
+            return
         self._thread = threading.Thread(target=self._drain_loop, daemon=True)
         self._thread.start()
 
@@ -67,24 +69,25 @@ class EpisodeReplayBuffer:
             try:
                 # Short timeout so we can check stop flag regularly
                 episode = self.data_queue.get(timeout=0.1)
-                with self.lock:
-                    self.buffer.append(episode)
-                    self._episodes_added += 1
-                    # Episode length is now passed as 7th element, fallback to states length
-                    ep_len = episode[6] if len(episode) > 6 else len(episode[1])
-                    self._total_steps += ep_len
-                    self._recent_ep_lengths.append(ep_len)
-                    if (
-                        len(self.buffer) >= self.min_episodes
-                        and not self.ready_event.is_set()
-                    ):
-                        self.ready_event.set()
-                        print(
-                            f"Replay buffer ready: {len(self.buffer)} episodes collected",
-                            flush=True,
-                        )
+                self.add_episode(episode)
             except Empty:
                 continue
+
+    def add_episode(self, episode):
+        """Insert one complete episode into the replay buffer."""
+        with self.lock:
+            self.buffer.append(episode)
+            self._episodes_added += 1
+            # Episode length is now passed as 7th element, fallback to states length
+            ep_len = episode[6] if len(episode) > 6 else len(episode[1])
+            self._total_steps += ep_len
+            self._recent_ep_lengths.append(ep_len)
+            if len(self.buffer) >= self.min_episodes and not self.ready_event.is_set():
+                self.ready_event.set()
+                print(
+                    f"Replay buffer ready: {len(self.buffer)} episodes collected",
+                    flush=True,
+                )
 
     def _sample_subsequence(self, episode):
         """

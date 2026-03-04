@@ -2,6 +2,7 @@ import math
 import copy
 import json
 from dataclasses import asdict
+import numpy as np
 import torch
 import torch.distributions as dist
 import torch.nn.functional as F
@@ -14,6 +15,7 @@ from ..runtime.replay_buffer import EpisodeReplayBuffer
 from ..models import (
     symlog,
     symexp,
+    unimix_logits,
     resize_pixels_to_target,
     twohot_encode,
     initialize_actor,
@@ -124,6 +126,9 @@ class WorldModelTrainer:
         self.train_step = 0
         self.data_queue = data_queue
         self.model_queue = model_queue
+        self.single_process_collection = data_queue is None
+        self.collect_env = None
+        self.collect_episode_count = 0
         self.d_hidden = config.d_hidden
         self.num_latents = config.num_latents  # L
         self.num_classes = config.d_hidden // 16  # K
@@ -315,12 +320,151 @@ class WorldModelTrainer:
         self.is_terminal = torch.stack(batch_is_terminal).to(self.device)  # (B, T)
         self.mask = torch.stack(batch_mask).to(self.device)  # (B, T) - 1=real, 0=padded
 
+    def _build_encoder_input(self, obs):
+        """Build encoder inputs for one observation."""
+        if self.use_pixels:
+            pixel_obs_t = (
+                torch.from_numpy(obs["pixels"])
+                .to(self.device)
+                .float()
+                .permute(2, 0, 1)
+                .unsqueeze(0)
+            )
+            target_size = self.config.encoder_cnn_target_size
+            if target_size and pixel_obs_t.shape[-2:] != tuple(target_size):
+                pixel_obs_t = resize_pixels_to_target(pixel_obs_t, target_size)
+
+            encoder_input = {"pixels": pixel_obs_t}
+            if self.config.n_observations > 0 and "state" in obs:
+                vec_obs_t = (
+                    torch.from_numpy(obs["state"]).to(self.device).float().unsqueeze(0)
+                )
+                encoder_input["state"] = symlog(vec_obs_t)
+            return encoder_input
+
+        vec_obs_t = torch.from_numpy(obs).to(self.device).float().unsqueeze(0)
+        return symlog(vec_obs_t)
+
+    def collect_episode_single_process(self):
+        """Collect one full episode and insert it directly into replay."""
+        if self.collect_env is None:
+            self.collect_env = create_env(
+                self.config.environment_name,
+                use_pixels=self.use_pixels,
+                config=self.config,
+            )
+
+        obs, _ = self.collect_env.reset()
+        episode_pixels, episode_vec_obs, episode_actions = [], [], []
+        episode_rewards, episode_is_last, episode_is_terminal = [], [], []
+
+        h = torch.zeros(
+            1,
+            self.config.d_hidden * self.config.rnn_n_blocks,
+            device=self.device,
+        )
+        action_onehot = torch.zeros(1, self.n_actions, device=self.device)
+        z_prev = torch.zeros(1, self.num_latents, self.num_classes, device=self.device)
+        z_prev_embed = self.world_model.z_embedding(z_prev.view(1, -1))
+
+        env_steps_in_episode = 0
+        with torch.no_grad():
+            while True:
+                encoder_input = self._build_encoder_input(obs)
+                h, _ = self.world_model.step_dynamics(z_prev_embed, action_onehot, h)
+
+                tokens = self.encoder(encoder_input)
+                posterior_logits = self.world_model.compute_posterior(h, tokens)
+                posterior_logits = unimix_logits(posterior_logits, unimix_ratio=0.01)
+                posterior_probs = F.softmax(posterior_logits, dim=-1)
+                z_indices = torch.distributions.Categorical(
+                    probs=posterior_probs
+                ).sample()
+                z_onehot = F.one_hot(z_indices, num_classes=self.num_classes).float()
+                z_sample = z_onehot + (posterior_probs - posterior_probs.detach())
+
+                actor_input = self.world_model.join_h_and_z(h, z_sample)
+                action_logits = self.actor(actor_input)
+                action_logits = unimix_logits(action_logits, unimix_ratio=0.01)
+                action = torch.distributions.Categorical(logits=action_logits).sample()
+                action_np = int(action.item())
+
+                action_onehot = F.one_hot(action, num_classes=self.n_actions).float()
+                action_onehot_np = action_onehot.detach().cpu().numpy().squeeze(0)
+                z_prev_embed = self.world_model.z_embedding(z_sample.view(1, -1))
+
+                total_reward = 0.0
+                terminated = False
+                truncated = False
+                for _ in range(self.action_repeat):
+                    obs, reward, terminated, truncated, _ = self.collect_env.step(
+                        action_np
+                    )
+                    total_reward += float(reward)
+                    env_steps_in_episode += 1
+                    if terminated or truncated:
+                        break
+
+                if self.use_pixels:
+                    episode_pixels.append(obs["pixels"])
+                    if "state" in obs:
+                        state_arr = np.asarray(obs["state"], dtype=np.float32)
+                    else:
+                        state_arr = np.zeros((1,), dtype=np.float32)
+                    if state_arr.ndim == 0:
+                        state_arr = np.array([float(state_arr)], dtype=np.float32)
+                    episode_vec_obs.append(state_arr)
+                else:
+                    episode_vec_obs.append(np.asarray(obs, dtype=np.float32))
+
+                episode_actions.append(action_onehot_np.astype(np.float32))
+                episode_rewards.append(np.float32(total_reward))
+                done = bool(terminated or truncated)
+                episode_is_last.append(done)
+                episode_is_terminal.append(bool(terminated))
+
+                if done:
+                    break
+
+        pixels_np = (
+            np.array(episode_pixels, dtype=np.uint8) if self.use_pixels else None
+        )
+        vec_obs_np = np.array(episode_vec_obs, dtype=np.float32)
+        actions_np = np.array(episode_actions, dtype=np.float32)
+        rewards_np = np.array(episode_rewards, dtype=np.float32)
+        is_last_np = np.array(episode_is_last, dtype=bool)
+        is_terminal_np = np.array(episode_is_terminal, dtype=bool)
+
+        self.replay_buffer.add_episode(
+            (
+                pixels_np,
+                vec_obs_np,
+                actions_np,
+                rewards_np,
+                is_last_np,
+                is_terminal_np,
+                env_steps_in_episode,
+            )
+        )
+        self.collect_episode_count += 1
+
+        if self.collect_episode_count % 5 == 0:
+            print(
+                f"Collected episode {self.collect_episode_count} "
+                f"(len={env_steps_in_episode}, total_env_steps={self.replay_buffer.total_env_steps})"
+            )
+
     def train_models(self):
         # Push current weights immediately so collectors do not spend startup
         # episodes in random-action mode when resuming from checkpoint.
-        self.send_models_to_collector(self.train_step)
+        if not self.single_process_collection:
+            self.send_models_to_collector(self.train_step)
 
         while self.train_step < self.max_train_steps:
+            if self.single_process_collection and not self.replay_buffer.is_ready:
+                self.collect_episode_single_process()
+                continue
+
             # Replay ratio gating: wait if we've trained too fast relative to env steps
             env_steps = (
                 self.replay_buffer.total_env_steps + self._resume_env_steps_offset
@@ -336,7 +480,10 @@ class WorldModelTrainer:
                 / (self.batch_size * effective_seq_for_gate * self.action_repeat)
             )
             if self.train_step >= target_train_steps and env_steps > 0:
-                time.sleep(0.01)  # Brief wait for more data
+                if self.single_process_collection:
+                    self.collect_episode_single_process()
+                else:
+                    time.sleep(0.01)  # Brief wait for more data
                 continue
 
             # Apply cosine LR schedule (if enabled)
@@ -818,7 +965,10 @@ class WorldModelTrainer:
             )
 
             # Send models to collector periodically
-            if self.train_step % self.steps_per_weight_sync == 0:
+            if (
+                not self.single_process_collection
+                and self.train_step % self.steps_per_weight_sync == 0
+            ):
                 self.send_models_to_collector(self.train_step)
 
             # Periodic logging (every 100 steps)
@@ -1660,6 +1810,9 @@ class WorldModelTrainer:
         self.logger.flush()
 
     def send_models_to_collector(self, training_step):
+        if self.model_queue is None:
+            return
+
         # Exclude h_prev/z_prev buffers as they have batch-size-dependent shapes
         wm = self._get_model(self.world_model)
         actor = self._get_model(self.actor)
