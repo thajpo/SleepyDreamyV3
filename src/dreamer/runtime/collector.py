@@ -4,15 +4,9 @@ import time
 import torch
 import torch.nn.functional as F
 from queue import Empty
-import cv2
 
 from ..models import initialize_actor, initialize_world_model, symlog, unimix_logits
 from .env import create_env
-
-
-def resize_image(img, target_size=(64, 64)):
-    """Resize image using cv2 (much faster than torch on CPU)."""
-    return cv2.resize(img, target_size, interpolation=cv2.INTER_AREA)
 
 
 def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=None):
@@ -126,12 +120,9 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
 
                 # Learned policy path
                 if use_pixels:
-                    # Pixel mode: resize and prepare dict input
-                    resized_for_encoder = resize_image(
-                        obs["pixels"], target_size=(64, 64)
-                    )
+                    # Pixel mode: use environment-provided frame directly.
                     pixel_obs_t = (
-                        torch.from_numpy(resized_for_encoder)
+                        torch.from_numpy(obs["pixels"])
                         .to(device)
                         .float()
                         .permute(2, 0, 1)
@@ -192,9 +183,7 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
 
             # Store observations
             if use_pixels:
-                # Resize pixels immediately (400x600 -> 64x64) to reduce memory/queue overhead
-                resized_pixels = resize_image(obs["pixels"], target_size=(64, 64))
-                episode_pixels.append(resized_pixels)
+                episode_pixels.append(obs["pixels"])
                 # obs["state"] is the same as pixels for Atari - store dummy vector
                 episode_vec_obs.append(np.zeros(1, dtype=np.float32))
             else:

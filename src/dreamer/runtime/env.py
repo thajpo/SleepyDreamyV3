@@ -92,6 +92,15 @@ def create_env(env_name, render_mode="rgb_array", use_pixels=True, config=None):
         if atari_compat and is_ale:
             sticky_prob = float(getattr(config, "atari_sticky_action_prob", 0.25))
             full_action_space = bool(getattr(config, "atari_full_action_space", False))
+            encoder_target = getattr(config, "encoder_cnn_target_size", None)
+            if (
+                isinstance(encoder_target, (tuple, list))
+                and len(encoder_target) == 2
+                and int(encoder_target[0]) == int(encoder_target[1])
+            ):
+                screen_size = int(encoder_target[0])
+            else:
+                screen_size = int(getattr(config, "atari_screen_size", 84))
             # Use frameskip=1 at ALE level, then apply frame skipping in AtariPreprocessing.
             base_env = gym.make(
                 env_name,
@@ -107,11 +116,11 @@ def create_env(env_name, render_mode="rgb_array", use_pixels=True, config=None):
                 terminal_on_life_loss=bool(
                     getattr(config, "atari_terminal_on_life_loss", False)
                 ),
-                screen_size=84,
+                screen_size=screen_size,
                 grayscale_obs=False,
                 scale_obs=False,
             )
-            if bool(getattr(config, "atari_fire_reset", True)):
+            if bool(getattr(config, "atari_fire_reset", False)):
                 env = FireResetWrapper(env)
             env = AtariPixelsStateWrapper(env)
         else:
