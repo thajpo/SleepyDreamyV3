@@ -499,10 +499,6 @@ class WorldModelTrainer:
                     sample_mask=sample_mask,
                 )
 
-                # Collect posterior states for replay grounding (detach to avoid WM grads)
-                if self.critic_replay_scale > 0.0:
-                    replay_posterior_states.append(h_z_joined.detach())
-
                 # Accumulate individual loss components (tensor addition, no GPU sync)
                 for key in wm_loss_components:
                     wm_loss_components[key] = (
@@ -526,6 +522,11 @@ class WorldModelTrainer:
                 # Skip AC for this timestep if batch-level skip is active or no valid samples.
                 if t_step < train_start_t:
                     continue
+
+                # Collect posterior states for replay grounding on the same
+                # post-burn-in window as replay value annotations.
+                if self.critic_replay_scale > 0.0:
+                    replay_posterior_states.append(h_z_joined.detach())
 
                 valid_ac_step = sample_mask.sum() > 0
                 if not skip_ac_batch and valid_ac_step:
