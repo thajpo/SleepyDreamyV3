@@ -72,12 +72,12 @@ def compute_wm_loss(
 
     # Pixel loss (only when using pixels)
     if use_pixels and "pixels" in obs_reconstruction and "pixels" in obs_t:
-        pixel_probs = obs_reconstruction["pixels"]
+        pixel_logits = obs_reconstruction["pixels"]
+        pixel_probs = torch.sigmoid(pixel_logits)
         pixel_target = obs_t["pixels"]
-        pixel_bce = F.binary_cross_entropy_with_logits(
-            pixel_probs, pixel_target / 255.0, reduction="none"
-        )
-        pred_loss_pixel = pixel_bce.mean(dim=(1, 2, 3))  # (B,)
+        pred_loss_pixel = ((pixel_probs - (pixel_target / 255.0)) ** 2).mean(
+            dim=(1, 2, 3)
+        )  # (B,)
     else:
         pred_loss_pixel = torch.zeros(
             pred_loss_vector.shape[0], device=device, dtype=pred_loss_vector.dtype
