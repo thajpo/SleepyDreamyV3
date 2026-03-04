@@ -75,7 +75,7 @@ def compute_wm_loss(
         pixel_logits = obs_reconstruction["pixels"]
         pixel_probs = torch.sigmoid(pixel_logits)
         pixel_target = obs_t["pixels"]
-        pred_loss_pixel = ((pixel_probs - (pixel_target / 255.0)) ** 2).mean(
+        pred_loss_pixel = ((pixel_probs - (pixel_target / 255.0)) ** 2).sum(
             dim=(1, 2, 3)
         )  # (B,)
     else:
