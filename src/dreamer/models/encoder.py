@@ -69,7 +69,7 @@ class ObservationEncoder(nn.Module):
         """
         # x is passed as a dict of ['state', 'pixels']
         # Expect pixels in (B, C, H, W) format - conversion happens once when loading data
-        image_obs = x["pixels"] / 255.0
+        image_obs = (x["pixels"] / 255.0) - 0.5
 
         x1 = self.CNN(image_obs)
         x1 = x1.reshape(x1.size(0), -1)  # Flatten all features
