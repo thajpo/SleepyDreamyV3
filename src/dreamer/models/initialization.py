@@ -13,18 +13,21 @@ def initialize_actor(device, cfg):
         Actor network (ThreeLayerMLP)
     """
     # This import is here to avoid circular dependencies
+    import torch.nn as nn
     from .encoder import ThreeLayerMLP
     from types import SimpleNamespace
 
     num_classes = cfg.d_hidden // 16
-    d_in = (cfg.d_hidden * cfg.rnn_n_blocks) + (
-        cfg.num_latents * num_classes
-    )
-    return ThreeLayerMLP(
+    d_in = (cfg.d_hidden * cfg.rnn_n_blocks) + (cfg.num_latents * num_classes)
+    actor = ThreeLayerMLP(
         d_in=d_in,
         d_hidden=cfg.d_hidden,
         d_out=cfg.n_actions,
-    ).to(device)
+    )
+    # Match DreamerV3 policy head outscale (0.01): keep logits small initially.
+    nn.init.normal_(actor.mlp[-1].weight, mean=0.0, std=0.01)
+    nn.init.zeros_(actor.mlp[-1].bias)
+    return actor.to(device)
 
 
 def initialize_critic(device, cfg):
@@ -42,14 +45,13 @@ def initialize_critic(device, cfg):
     from .encoder import ThreeLayerMLP
     from types import SimpleNamespace
 
+    num_bins = int(getattr(cfg, "num_bins", 255))
     num_classes = cfg.d_hidden // 16
-    d_in = (cfg.d_hidden * cfg.rnn_n_blocks) + (
-        cfg.num_latents * num_classes
-    )
+    d_in = (cfg.d_hidden * cfg.rnn_n_blocks) + (cfg.num_latents * num_classes)
     critic = ThreeLayerMLP(
         d_in=d_in,
         d_hidden=cfg.d_hidden,
-        d_out=cfg.b_end - cfg.b_start,
+        d_out=num_bins,
     )
     # Zero-init critic output layer (DreamerV3 paper)
     nn.init.zeros_(critic.mlp[-1].weight)
@@ -124,6 +126,7 @@ def initialize_world_model(device, cfg, batch_size=1):
         batch_size=batch_size,
         b_start=cfg.b_start,
         b_end=cfg.b_end,
+        num_bins=int(getattr(cfg, "num_bins", 255)),
         encoder_token_dim=encoder.token_dim,
         use_pixels=use_pixels,
     ).to(device)

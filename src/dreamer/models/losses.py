@@ -93,6 +93,10 @@ def compute_wm_loss(
     # c. continue predictor
     # The target is 1 if we continue, 0 if we terminate.
     continue_target = (1.0 - terminated_t.float()).unsqueeze(-1)
+    if bool(getattr(config, "contdisc", True)):
+        continue_target = continue_target * (
+            1.0 - 1.0 / float(max(1, getattr(config, "horizon", 333)))
+        )
     pred_loss_continue = F.binary_cross_entropy_with_logits(
         continue_logits, continue_target, reduction="none"
     ).squeeze(-1)  # (B,)

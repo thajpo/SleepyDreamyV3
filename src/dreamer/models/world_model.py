@@ -24,6 +24,7 @@ class RSSMWorldModel(nn.Module):
         b_start,
         b_end,
         encoder_token_dim,
+        num_bins=255,
         use_pixels=True,
     ):
         super().__init__()
@@ -88,7 +89,7 @@ class RSSMWorldModel(nn.Module):
         h_z_dim = (self.d_hidden * n_gru_blocks) + (self.n_latents * self.n_classes)
 
         # Rewards use two-hot encoding
-        reward_out = abs(b_start - b_end)
+        reward_out = int(num_bins)
         self.reward_predictor = nn.Linear(h_z_dim, reward_out)
         nn.init.zeros_(self.reward_predictor.weight)  # Reward is initalized to zero
         self.continue_predictor = nn.Linear(h_z_dim, 1)

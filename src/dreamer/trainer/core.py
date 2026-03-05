@@ -61,23 +61,28 @@ class WorldModelTrainer:
         self.gamma = config.gamma
         self.lam = config.lam
         self.actor_entropy_coef = config.actor_entropy_coef
-        b_start = config.b_start
-        b_end = config.b_end
-        # Keep head compatibility and preserve an exact zero-centered support.
-        beta_range = torch.arange(
-            start=b_start,
-            end=b_end,
-            device=self.device,
-            dtype=torch.float32,
-        )
-        self.B = symexp(beta_range)
         self.S = 0.0
+        self.ret_lo = None
+        self.ret_hi = None
+        self.retnorm_rate = 0.01
 
         self.actor = initialize_actor(self.device, config)
         self.critic = initialize_critic(self.device, config)
         self.encoder, self.world_model = initialize_world_model(
             self.device, config, batch_size=config.batch_size
         )
+
+        b_start = config.b_start
+        b_end = config.b_end
+        num_bins = int(getattr(self.critic.mlp[-1], "out_features"))
+        beta_range = torch.linspace(
+            start=b_start,
+            end=b_end,
+            steps=num_bins,
+            device=self.device,
+            dtype=torch.float32,
+        )
+        self.B = symexp(beta_range)
 
         self.compile_models = getattr(config, "compile_models", False)
         if self.compile_models:
@@ -820,9 +825,16 @@ class WorldModelTrainer:
                 replay_rewards = self.rewards[:, train_start_t:].transpose(
                     0, 1
                 )  # [T', B]
+                replay_is_last = self.is_last[:, train_start_t:].transpose(0, 1)
                 replay_continues = (1.0 - self.is_terminal.float()).transpose(0, 1)[
                     train_start_t:
                 ]  # [T', B]
+                # Match Dreamer replay-return semantics: stop credit across episode
+                # boundaries and apply horizon discount in continuation signal.
+                replay_continues = replay_continues * (1.0 - replay_is_last.float())
+                replay_continues = replay_continues * (
+                    1.0 - 1.0 / float(max(1, getattr(self.config, "horizon", 333)))
+                )
                 replay_mask = self.mask[:, train_start_t:].transpose(0, 1)  # [T', B]
 
                 # Compute replay lambda-returns with annotations (continues are probabilities)
@@ -849,7 +861,11 @@ class WorldModelTrainer:
                 per_step_ce = -torch.sum(
                     targets_twohot * F.log_softmax(logits_flat, dim=-1), dim=-1
                 )
-                replay_loss = (per_step_ce * mask_flat).sum() / (mask_flat.sum() + 1e-8)
+                replay_not_last = (1.0 - replay_is_last.float()).reshape(-1)
+                replay_weight = mask_flat * replay_not_last
+                replay_loss = (per_step_ce * replay_weight).sum() / (
+                    replay_weight.sum() + 1e-8
+                )
 
                 # EMA regularizer for replay pass (distributional)
                 with torch.no_grad():
@@ -861,8 +877,8 @@ class WorldModelTrainer:
                 per_step_ema = -torch.sum(
                     ema_probs * F.log_softmax(logits_flat, dim=-1), dim=-1
                 )
-                replay_ema_reg = (per_step_ema * mask_flat).sum() / (
-                    mask_flat.sum() + 1e-8
+                replay_ema_reg = (per_step_ema * replay_weight).sum() / (
+                    replay_weight.sum() + 1e-8
                 )
 
                 replay_loss_total = (
@@ -1074,10 +1090,18 @@ class WorldModelTrainer:
 
     def update_return_scale(self, lambda_returns, decay=0.99):
         flat = lambda_returns.detach().reshape(-1)
-        range_batch = (
-            torch.quantile(flat, 0.95).item() - torch.quantile(flat, 0.05).item()
-        )
-        self.S = self.S * decay + range_batch * (1 - decay)
+        lo_batch = torch.quantile(flat, 0.05).item()
+        hi_batch = torch.quantile(flat, 0.95).item()
+
+        if self.ret_lo is None or self.ret_hi is None:
+            self.ret_lo = lo_batch
+            self.ret_hi = hi_batch
+        else:
+            rate = self.retnorm_rate
+            self.ret_lo = (1.0 - rate) * self.ret_lo + rate * lo_batch
+            self.ret_hi = (1.0 - rate) * self.ret_hi + rate * hi_batch
+
+        self.S = max(1.0, float(self.ret_hi - self.ret_lo))
 
     def _surprise_log_ratio(self, key: str, value: float) -> float | None:
         """Return log(value / EMA) and update EMA; None if EMA not initialized."""
