@@ -413,6 +413,14 @@ def run_training(cfg: Config, checkpoint_path: str | None = None):
 
     # Setup MLflow
     mlflow_run_id = None
+    checkpoint_mlflow_run_id = None
+    if checkpoint_path and os.path.exists(checkpoint_path):
+        try:
+            checkpoint = torch.load(checkpoint_path, map_location="cpu")
+            checkpoint_mlflow_run_id = checkpoint.get("mlflow_run_id")
+        except Exception as exc:
+            print(f"  Warning: could not read MLflow run id from checkpoint: {exc}")
+
     if not cfg.dry_run:
         mlruns_dir = log_dir.parent / "mlruns"
         mlruns_dir.mkdir(parents=True, exist_ok=True)
@@ -421,8 +429,11 @@ def run_training(cfg: Config, checkpoint_path: str | None = None):
         exp_name = cfg.experiment_name or f"DreamerV3-{cfg.environment_name}"
         mlflow.set_experiment(exp_name)
 
-        run_name = f"{cfg.experiment_name or 'run'}_{timestamp}"
-        run = mlflow.start_run(run_name=run_name)
+        if checkpoint_mlflow_run_id:
+            run = mlflow.start_run(run_id=checkpoint_mlflow_run_id)
+        else:
+            run_name = f"{cfg.experiment_name or 'run'}_{timestamp}"
+            run = mlflow.start_run(run_name=run_name)
         mlflow_run_id = run.info.run_id
         print(f"  MLflow run ID: {mlflow_run_id}")
         print(f"  MLflow tracking: {mlruns_dir}")
@@ -442,11 +453,14 @@ def run_training(cfg: Config, checkpoint_path: str | None = None):
 
         start_mlflow_ui(str(mlruns_dir), port=5000)
 
-        # Log config as params
-        for k, v in asdict(cfg).items():
-            if isinstance(v, str) and len(v) > 250:
-                v = v[:250] + "..."
-            mlflow.log_param(k, str(v))
+        if checkpoint_mlflow_run_id:
+            mlflow.set_tag("resumed_from_checkpoint", checkpoint_path)
+        else:
+            # Log config as params only for new runs.
+            for k, v in asdict(cfg).items():
+                if isinstance(v, str) and len(v) > 250:
+                    v = v[:250] + "..."
+                mlflow.log_param(k, str(v))
 
     try:
         mp_ctx = mp.get_context("spawn")
@@ -458,7 +472,14 @@ def run_training(cfg: Config, checkpoint_path: str | None = None):
         for _ in range(max(1, cfg.num_collectors)):
             p = mp_ctx.Process(
                 target=collect_experiences,
-                args=(data_queue, model_queue, cfg, stop_event, str(log_dir)),
+                args=(
+                    data_queue,
+                    model_queue,
+                    cfg,
+                    stop_event,
+                    str(log_dir),
+                    checkpoint_path,
+                ),
             )
             experience_loops.append(p)
         trainer_loop = mp_ctx.Process(

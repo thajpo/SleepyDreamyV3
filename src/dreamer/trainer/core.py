@@ -1,6 +1,7 @@
 import math
 import copy
 import json
+import random
 from dataclasses import asdict
 import numpy as np
 import torch
@@ -1382,8 +1383,16 @@ class WorldModelTrainer:
             "actor_optimizer": self.actor_optimizer.state_dict(),
             "critic_optimizer": self.critic_optimizer.state_dict(),
             "return_scale": self.S,
+            "ret_lo": self.ret_lo,
+            "ret_hi": self.ret_hi,
             "surprise_ema": self._wm_surprise_ema,
             "smoothed_surprise": self._smoothed_surprise,
+            "rng_python": random.getstate(),
+            "rng_numpy": np.random.get_state(),
+            "rng_torch_cpu": torch.get_rng_state(),
+            "rng_torch_cuda": torch.cuda.get_rng_state_all()
+            if torch.cuda.is_available()
+            else None,
             "mlflow_run_id": self.mlflow_run_id,
         }
         path = os.path.join(self.checkpoint_dir, f"checkpoint_{suffix}.pt")
@@ -1437,12 +1446,26 @@ class WorldModelTrainer:
 
         # Restore auxiliary training state when available.
         self.S = float(checkpoint.get("return_scale", self.S))
+        self.ret_lo = checkpoint.get("ret_lo", self.ret_lo)
+        self.ret_hi = checkpoint.get("ret_hi", self.ret_hi)
         surprise_ema = checkpoint.get("surprise_ema")
         if isinstance(surprise_ema, dict):
             self._wm_surprise_ema = {str(k): float(v) for k, v in surprise_ema.items()}
         self._smoothed_surprise = float(
             checkpoint.get("smoothed_surprise", self._smoothed_surprise)
         )
+        rng_python = checkpoint.get("rng_python")
+        if rng_python is not None:
+            random.setstate(rng_python)
+        rng_numpy = checkpoint.get("rng_numpy")
+        if rng_numpy is not None:
+            np.random.set_state(rng_numpy)
+        rng_torch_cpu = checkpoint.get("rng_torch_cpu")
+        if rng_torch_cpu is not None:
+            torch.set_rng_state(rng_torch_cpu)
+        rng_torch_cuda = checkpoint.get("rng_torch_cuda")
+        if rng_torch_cuda is not None and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all(rng_torch_cuda)
 
         self.train_step = checkpoint.get("step", 0)
         print(f"Resumed checkpoint from {checkpoint_path} at step {self.train_step}")

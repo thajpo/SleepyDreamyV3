@@ -9,7 +9,14 @@ from ..models import initialize_actor, initialize_world_model, symlog, unimix_lo
 from .env import create_env
 
 
-def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=None):
+def collect_experiences(
+    data_queue,
+    model_queue,
+    config,
+    stop_event,
+    log_dir=None,
+    checkpoint_path=None,
+):
     """
     Continuously collects experiences from the environment and puts them on a queue.
 
@@ -23,11 +30,30 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
     n_actions = config.n_actions
     action_repeat = getattr(config, "action_repeat", 1)
 
-    # Start in random action mode - models initialized lazily
-    use_random_actions = True
+    # Fresh runs begin random; resumed runs can warm start from checkpoint.
+    use_random_actions = checkpoint_path is None
     actor = None
     encoder = None
     world_model = None
+
+    def initialize_models():
+        nonlocal actor, encoder, world_model
+        if actor is None:
+            actor = initialize_actor(device=device, cfg=config)
+            encoder, world_model = initialize_world_model(
+                device, batch_size=1, cfg=config
+            )
+
+    if checkpoint_path is not None:
+        initialize_models()
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        actor.load_state_dict(checkpoint["actor"])
+        encoder.load_state_dict(checkpoint["encoder"])
+        world_model.load_state_dict(checkpoint["world_model"], strict=False)
+        actor.eval()
+        encoder.eval()
+        world_model.eval()
+        print("Collector: Warm-started learned policy from checkpoint.")
 
     def pull_latest_models() -> int:
         """Drain model queue and apply only the newest update."""
@@ -44,11 +70,7 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
         if latest_model_states is None:
             return 0
 
-        if actor is None:
-            actor = initialize_actor(device=device, cfg=config)
-            encoder, world_model = initialize_world_model(
-                device, batch_size=1, cfg=config
-            )
+        initialize_models()
 
         actor.load_state_dict(latest_model_states["actor"])
         encoder.load_state_dict(latest_model_states["encoder"])
@@ -85,6 +107,8 @@ def collect_experiences(data_queue, model_queue, config, stop_event, log_dir=Non
         h = None
         action_onehot = None
         z_prev_embed = None
+        terminated = False
+        truncated = False
 
         # Initialize world model state for learned policy
         if not use_random_actions:
