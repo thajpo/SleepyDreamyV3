@@ -10,6 +10,7 @@ import shutil
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import cv2
 import imageio.v2 as imageio
@@ -17,7 +18,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from dreamer.config import Config, atari_pong_config, default_config
+from dreamer.config import Config, atari100k_pong_config, default_config
 from dreamer.runtime.env import create_env
 from dreamer.models import (
     initialize_actor,
@@ -42,8 +43,8 @@ def resolve_device(device_arg: str) -> str:
 def infer_config_from_checkpoint(
     checkpoint_path: Path, config_name: str | None
 ) -> Config:
-    if config_name == "atari_pong":
-        return atari_pong_config()
+    if config_name in {"atari_pong", "atari100k_pong"}:
+        return atari100k_pong_config()
     if config_name == "default":
         return default_config()
 
@@ -53,7 +54,7 @@ def infer_config_from_checkpoint(
         data = json.loads(cfg_path.read_text())
         return Config(**data)
 
-    return atari_pong_config()
+    return atari100k_pong_config()
 
 
 def load_models(checkpoint_path: Path, cfg: Config, device: str):
@@ -79,6 +80,60 @@ def decode_twohot_expectation(
     return torch.sum(probs * b_tensor, dim=-1)
 
 
+def imagine_dream_frames(
+    world_model,
+    actor,
+    start_h: torch.Tensor,
+    start_z: torch.Tensor,
+    n_actions: int,
+    horizon: int,
+    policy_mode: str,
+) -> list[np.ndarray]:
+    """Generate imagined pixel frames from a latent starting state."""
+    frames: list[np.ndarray] = []
+    h = start_h.detach().clone()
+    z = start_z.detach().clone()
+    z_embed = world_model.z_embedding(z.view(1, -1))
+
+    with torch.no_grad():
+        for _ in range(max(1, horizon)):
+            h_z = world_model.join_h_and_z(h, z)
+            dec = world_model.decoder(h_z)
+            pix_logits = dec.get("pixels")
+            if isinstance(pix_logits, torch.Tensor):
+                frame = (
+                    (
+                        torch.sigmoid(pix_logits[0])
+                        .permute(1, 2, 0)
+                        .detach()
+                        .cpu()
+                        .numpy()
+                        * 255.0
+                    )
+                    .clip(0, 255)
+                    .astype(np.uint8)
+                )
+                frames.append(frame)
+
+            action_logits = actor(h_z)
+            action_logits = unimix_logits(action_logits, unimix_ratio=0.01)
+            if policy_mode == "argmax":
+                action = action_logits.argmax(dim=-1)
+            else:
+                action = torch.distributions.Categorical(logits=action_logits).sample()
+            action_onehot = F.one_hot(action, num_classes=n_actions).float()
+
+            h, prior_logits = world_model.step_dynamics(z_embed, action_onehot, h)
+            prior_logits = unimix_logits(prior_logits, unimix_ratio=0.01)
+            prior_probs = F.softmax(prior_logits, dim=-1)
+            z_idx = torch.distributions.Categorical(probs=prior_probs).sample()
+            z_oh = F.one_hot(z_idx, num_classes=world_model.n_classes).float()
+            z = z_oh + (prior_probs - prior_probs.detach())
+            z_embed = world_model.z_embedding(z.view(1, -1))
+
+    return frames
+
+
 def run_inspection(
     checkpoint_path: Path,
     cfg: Config,
@@ -90,6 +145,8 @@ def run_inspection(
     compose_debug_video: bool,
     video_episodes: int,
     out_dir: Path,
+    dream_snippets_per_episode: int = 3,
+    dream_snippet_horizon: int = 30,
 ):
     actor, encoder, world_model, ckpt = load_models(checkpoint_path, cfg, device)
 
@@ -107,8 +164,19 @@ def run_inspection(
             action_meanings = None
     target_size = tuple(cfg.encoder_cnn_target_size) if cfg.use_pixels else None
     n_classes = cfg.d_hidden // 16
+    critic_out_bins = int(
+        ckpt.get("critic", {}).get("mlp.4.weight", torch.empty(0)).shape[0]
+    )
+    if critic_out_bins <= 0:
+        critic_out_bins = int(getattr(cfg, "num_bins", 255))
     b_tensor = symexp(
-        torch.arange(cfg.b_start, cfg.b_end, device=device, dtype=torch.float32)
+        torch.linspace(
+            cfg.b_start,
+            cfg.b_end,
+            steps=critic_out_bins,
+            device=device,
+            dtype=torch.float32,
+        )
     )
 
     summary = {
@@ -149,6 +217,11 @@ def run_inspection(
         ep_steps = 0
         frames = []
         debug_rows = []
+        dream_snippet_count = 0
+        snippet_stride = max(
+            1,
+            max_steps_per_episode // max(1, int(dream_snippets_per_episode)),
+        )
 
         while ep_steps < max_steps_per_episode:
             pixels_model = None
@@ -178,7 +251,8 @@ def run_inspection(
                     z_prev_embed, action_onehot, h
                 )
 
-                posterior_logits = encoder(encoder_input)
+                tokens = encoder(encoder_input)
+                posterior_logits = world_model.compute_posterior(h, tokens)
                 posterior_mixed = unimix_logits(posterior_logits, unimix_ratio=0.01)
                 posterior_probs = F.softmax(posterior_mixed, dim=-1)
                 posterior_entropy = (
@@ -240,6 +314,34 @@ def run_inspection(
                 action_counter[action_idx] += 1
                 action_onehot = F.one_hot(action, num_classes=cfg.n_actions).float()
                 z_prev_embed = world_model.z_embedding(z_sample.view(1, -1))
+
+                if (
+                    save_video
+                    and ep < video_episodes
+                    and cfg.use_pixels
+                    and dream_snippet_count < max(0, int(dream_snippets_per_episode))
+                    and (ep_steps % snippet_stride == 0)
+                ):
+                    dream_frames = imagine_dream_frames(
+                        world_model=world_model,
+                        actor=actor,
+                        start_h=h,
+                        start_z=z_sample,
+                        n_actions=cfg.n_actions,
+                        horizon=int(dream_snippet_horizon),
+                        policy_mode=policy_mode,
+                    )
+                    if dream_frames:
+                        dream_path = (
+                            out_dir / f"episode_{ep:02d}_dream_t{ep_steps:04d}.mp4"
+                        )
+                        frames_for_writer: list[Any] = dream_frames
+                        imageio.mimwrite(
+                            dream_path,
+                            frames_for_writer,
+                            fps=10,
+                        )
+                        dream_snippet_count += 1
 
                 reward_pred = decode_twohot_expectation(reward_logits, b_tensor).item()
                 continue_pred = torch.sigmoid(continue_logits).item()
@@ -686,6 +788,18 @@ def main():
         "--video_episodes", type=int, default=1, help="How many episodes to save as mp4"
     )
     parser.add_argument(
+        "--dream_snippets_per_episode",
+        type=int,
+        default=3,
+        help="How many dreamed rollout snippets to export per saved episode",
+    )
+    parser.add_argument(
+        "--dream_snippet_horizon",
+        type=int,
+        default=30,
+        help="Imagined horizon length (frames) for each dream snippet",
+    )
+    parser.add_argument(
         "--atari_frame_skip_override",
         type=int,
         default=None,
@@ -725,6 +839,8 @@ def main():
         compose_debug_video=args.compose_debug_video,
         video_episodes=args.video_episodes,
         out_dir=out_dir,
+        dream_snippets_per_episode=args.dream_snippets_per_episode,
+        dream_snippet_horizon=args.dream_snippet_horizon,
     )
 
     print("Inspection complete")

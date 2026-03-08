@@ -86,19 +86,6 @@ train:
   wm_ac_ratio_min: 2  # Low end of range
   wm_ac_ratio_invert: false  # If true: start low (2→8), if false: start high (8→2)
 
-  # Surprise-scaled AC learning rate
-  # When enabled, AC learning rate is scaled by 1/(1 + surprise * k)
-  # High surprise = slower AC, keeping WM and AC coupled
-  surprise_scale_ac_lr: true
-  surprise_lr_scale_k: 10.0  # sensitivity (higher = more aggressive scaling)
-  surprise_ema_beta: 0.99  # EMA decay for surprise baseline
-
-  # WM focus mode (extra WM steps when surprise high)
-  surprise_wm_focus_threshold: 0.05  # surprise level to trigger focus
-  surprise_wm_focus_ratio: 4  # WM:AC update ratio during focus
-  surprise_wm_focus_duration: 20  # steps in focus mode
-  surprise_wm_focus_cooldown: 50  # steps after focus before re-entry
-
   # Early stopping (0 to disable)
   early_stop_ep_length: 500  # CartPole solved at 500
 
@@ -120,15 +107,12 @@ train:
   action_repeat: 1   # env frames per action
   recent_fraction: 0.2  # fraction of batch from newest episodes
 
-  # Baseline mode: disable non-paper extras for baseline experiments
-  baseline_mode: false
-
 # Hydra settings
 hydra:
   run:
-    dir: runs/${now:%m-%d_%H%M%S}
+    dir: experiments/${now:%Y-%m-%d}_${now:%H%M%S}_${environment.environment_name}
   sweep:
-    dir: runs/sweeps/${now:%m-%d_%H%M}
+    dir: experiments/sweeps/${now:%Y-%m-%d}_${now:%H%M}
     subdir: ${hydra.job.override_dirname}
   launcher:
     # Sequential execution - parallel n_jobs>1 conflicts with nested mp.Process

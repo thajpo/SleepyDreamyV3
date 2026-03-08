@@ -3,6 +3,7 @@ import copy
 import json
 import random
 from dataclasses import asdict
+from typing import NamedTuple, Optional
 import numpy as np
 import torch
 import torch.distributions as dist
@@ -33,6 +34,19 @@ from .mlflow_logger import MLflowLogger
 from ..runtime.env import create_env
 
 
+class EnvData(NamedTuple):
+    """Immutable batch of environment data sampled from replay."""
+
+    states: torch.Tensor  # (B, T, n_obs) — symlog'd
+    actions: torch.Tensor  # (B, T, n_actions)
+    rewards: torch.Tensor  # (B, T)
+    is_last: torch.Tensor  # (B, T)
+    is_terminal: torch.Tensor  # (B, T)
+    mask: torch.Tensor  # (B, T) — 1=real, 0=padded
+    pixels: Optional[torch.Tensor] = None  # (B, T, C, H, W)
+    pixels_original: Optional[torch.Tensor] = None  # (B, T, C, H, W)
+
+
 class WorldModelTrainer:
     def __init__(
         self,
@@ -43,19 +57,11 @@ class WorldModelTrainer:
         checkpoint_path=None,
         mlflow_run_id=None,
         dry_run=False,
+        device="cpu",
     ):
         self.config = config  # Store config for use in methods
         self.dry_run = dry_run
-
-        device_str = config.device
-        if device_str == "auto":
-            if torch.cuda.is_available():
-                device_str = "cuda"
-            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                device_str = "mps"
-            else:
-                device_str = "cpu"
-        self.device = torch.device(device_str)
+        self.device = torch.device(device)
 
         self.use_pixels = config.use_pixels
         self.n_dream_steps = config.num_dream_steps
@@ -85,19 +91,18 @@ class WorldModelTrainer:
         )
         self.B = symexp(beta_range)
 
-        self.compile_models = getattr(config, "compile_models", False)
-        if self.compile_models:
-            if hasattr(torch, "compile"):
-                try:
-                    self.encoder = torch.compile(self.encoder)
-                    self.world_model = torch.compile(self.world_model)
-                    self.actor = torch.compile(self.actor)
-                    self.critic = torch.compile(self.critic)
-                    print("torch.compile enabled for trainer models.")
-                except Exception as exc:
-                    print(f"torch.compile failed ({exc}); running uncompiled.")
-            else:
-                print("torch.compile not available; running uncompiled.")
+        self.compile_models = config.compile_models
+        if self.compile_models and hasattr(torch, "compile"):
+            try:
+                self.encoder = torch.compile(self.encoder)
+                self.world_model = torch.compile(self.world_model)
+                self.actor = torch.compile(self.actor)
+                self.critic = torch.compile(self.critic)
+                print("torch.compile enabled for trainer models.")
+            except Exception as exc:
+                print(f"torch.compile failed ({exc}); running uncompiled.")
+        else:
+            print("torch.compile not available; running uncompiled.")
 
         self.wm_params = list(self.encoder.parameters()) + list(
             self.world_model.parameters()
@@ -124,17 +129,14 @@ class WorldModelTrainer:
         for param in self.critic_ema.parameters():
             param.requires_grad = False
 
-        self.critic_ema_decay = getattr(config, "critic_ema_decay", 0.98)
-        self.critic_ema_regularizer = getattr(config, "critic_ema_regularizer", 1.0)
-        self.critic_replay_scale = getattr(config, "critic_replay_scale", 0.0)
+        self.critic_ema_decay = config.critic_ema_decay
+        self.critic_ema_regularizer = config.critic_ema_regularizer
+        self.critic_replay_scale = config.critic_replay_scale
 
         self.max_train_steps = config.max_train_steps
         self.train_step = 0
         self.data_queue = data_queue
         self.model_queue = model_queue
-        self.single_process_collection = data_queue is None
-        self.collect_env = None
-        self.collect_episode_count = 0
         self.d_hidden = config.d_hidden
         self.num_latents = config.num_latents  # L
         self.num_classes = config.d_hidden // 16  # K
@@ -142,9 +144,9 @@ class WorldModelTrainer:
         self.steps_per_weight_sync = config.steps_per_weight_sync
         self.batch_size = config.batch_size
         self.sequence_length = config.sequence_length
-        self.replay_ratio = getattr(config, "replay_ratio", 1.0)
-        self.action_repeat = getattr(config, "action_repeat", 1)
-        self.profile_enabled = getattr(config, "profile", False)
+        self.replay_ratio = config.replay_ratio
+        self.action_repeat = config.action_repeat
+        self.profile_enabled = config.profile
 
         # Replay buffer: background thread drains queue, sample() returns instantly
         self.replay_buffer = EpisodeReplayBuffer(
@@ -184,30 +186,6 @@ class WorldModelTrainer:
             # Lean mode still needs responsive MLflow curves on slow Atari runs.
             self.log_every = 25
             self.image_log_every = 250
-        self.surprise_ema_beta = config.surprise_ema_beta
-        self._wm_surprise_ema = {}
-        self._last_surprise_log_ratio = 0.0  # Raw surprise (log ratio)
-        self._smoothed_surprise = (
-            0.0  # Smoothed surprise for LR scaling (lingers after spikes)
-        )
-        self.surprise_smooth_beta = (
-            0.9  # How fast smoothed surprise decays (higher = slower)
-        )
-        self.surprise_scale_ac_lr = config.surprise_scale_ac_lr
-        self.surprise_lr_scale_k = config.surprise_lr_scale_k
-        self.base_actor_lr = config.actor_lr
-        self.base_critic_lr = config.critic_lr
-        self._wm_surprise_eps = 1e-8
-
-        # WM focus mode: extra WM steps when surprise spikes
-        self.surprise_wm_focus_threshold = config.surprise_wm_focus_threshold
-        self.surprise_wm_focus_ratio = config.surprise_wm_focus_ratio
-        self.surprise_wm_focus_duration = config.surprise_wm_focus_duration
-        self.surprise_wm_focus_cooldown = config.surprise_wm_focus_cooldown
-        self._wm_focus_steps_remaining = 0  # Countdown for focus mode
-        self._wm_focus_cooldown_remaining = 0  # Cooldown after focus (no re-entry)
-        self._wm_focus_ac_counter = 0  # Counter for AC step ratio
-
         # WM:AC update ratio (e.g., 4 = do 4 WM updates per 1 AC update)
         self.wm_ac_ratio = config.wm_ac_ratio
         self._wm_ac_counter = 0  # Counts WM steps since last AC step
@@ -221,16 +199,6 @@ class WorldModelTrainer:
         self.wm_ac_ratio_max = config.wm_ac_ratio_max
         self.wm_ac_ratio_min = config.wm_ac_ratio_min
         self.wm_ac_ratio_invert = config.wm_ac_ratio_invert
-
-        # Baseline mode: disable non-paper extras for baseline experiments
-        self.baseline_mode = getattr(config, "baseline_mode", False)
-        if self.baseline_mode:
-            self.surprise_scale_ac_lr = False
-            self.wm_ac_ratio_cosine = False
-            self.lr_cosine_decay = False
-            print(
-                "BASELINE MODE: disabled surprise_scale_ac_lr, wm_ac_ratio_cosine, lr_cosine_decay"
-            )
 
         # Deterministic evaluation
         self.eval_every = config.eval_every
@@ -272,11 +240,9 @@ class WorldModelTrainer:
                 / denom
             )
 
-    def get_data_from_buffer(self):
-        """Sample batch from replay buffer (non-blocking after initial fill)."""
-        # Sample returns list of (pixels, states, actions, rewards, is_last, is_terminal, mask) tuples
-        # Each already has fixed sequence_length from buffer's _sample_subsequence
-        batch = self.replay_buffer.sample(self.batch_size)
+    def get_data_from_buffer(self) -> EnvData | None:
+        """Sample batch from replay buffer. Returns EnvData or None if empty."""
+        raw_batch = self.replay_buffer.sample(self.batch_size)
 
         batch_pixels = []
         batch_pixels_original = []
@@ -287,12 +253,11 @@ class WorldModelTrainer:
         batch_is_terminal = []
         batch_mask = []
 
-        for pixels, states, actions, rewards, is_last, is_terminal, mask in batch:
+        for pixels, states, actions, rewards, is_last, is_terminal, mask in raw_batch:
             if self.use_pixels and pixels is not None:
                 target_size = self.config.encoder_cnn_target_size
-                # Convert pixels from (T, H, W, C) to (T, C, H, W)
                 pixels_tensor = torch.from_numpy(pixels).permute(0, 3, 1, 2)
-                batch_pixels_original.append(pixels_tensor)  # Keep original resolution
+                batch_pixels_original.append(pixels_tensor)
                 if pixels_tensor.shape[-2:] != target_size:
                     pixels_tensor = resize_pixels_to_target(pixels_tensor, target_size)
                 batch_pixels.append(pixels_tensor)
@@ -304,228 +269,100 @@ class WorldModelTrainer:
             batch_is_terminal.append(torch.from_numpy(is_terminal))
             batch_mask.append(torch.from_numpy(mask))
 
-        # Stack into batch tensors: (B, T, ...)
-        # Note: All sequences are same length now (buffer handles this)
         if self.use_pixels and batch_pixels:
-            self.pixels = (
-                torch.stack(batch_pixels).to(self.device).float()
-            )  # (B, T, C, H, W)
-            self.pixels_original = (
+            pixels_out = torch.stack(batch_pixels).to(self.device).float()
+            pixels_original_out = (
                 torch.stack(batch_pixels_original).to(self.device).float()
             )
         else:
-            self.pixels = None
-            self.pixels_original = None
+            pixels_out = None
+            pixels_original_out = None
 
-        self.states = symlog(
-            torch.stack(batch_states).to(self.device)
-        )  # (B, T, state_dim)
-        self.actions = torch.stack(batch_actions).to(self.device)  # (B, T, n_actions)
-        self.rewards = torch.stack(batch_rewards).to(self.device)  # (B, T)
-        self.is_last = torch.stack(batch_is_last).to(self.device)  # (B, T)
-        self.is_terminal = torch.stack(batch_is_terminal).to(self.device)  # (B, T)
-        self.mask = torch.stack(batch_mask).to(self.device)  # (B, T) - 1=real, 0=padded
+        # wonder if we should not do this here...
+        states_out = symlog(torch.stack(batch_states).to(self.device))
 
-    def _build_encoder_input(self, obs):
-        """Build encoder inputs for one observation."""
-        if self.use_pixels:
-            pixel_obs_t = (
-                torch.from_numpy(obs["pixels"])
-                .to(self.device)
-                .float()
-                .permute(2, 0, 1)
-                .unsqueeze(0)
-            )
-            target_size = self.config.encoder_cnn_target_size
-            if target_size and pixel_obs_t.shape[-2:] != tuple(target_size):
-                pixel_obs_t = resize_pixels_to_target(pixel_obs_t, target_size)
+        return EnvData(
+            states=states_out,
+            actions=torch.stack(batch_actions).to(self.device),
+            rewards=torch.stack(batch_rewards).to(self.device),
+            is_last=torch.stack(batch_is_last).to(self.device),
+            is_terminal=torch.stack(batch_is_terminal).to(self.device),
+            mask=torch.stack(batch_mask).to(self.device),
+            pixels=pixels_out,
+            pixels_original=pixels_original_out,
+        )
 
-            encoder_input = {"pixels": pixel_obs_t}
-            if self.config.n_observations > 0 and "state" in obs:
-                vec_obs_t = (
-                    torch.from_numpy(obs["state"]).to(self.device).float().unsqueeze(0)
-                )
-                encoder_input["state"] = symlog(vec_obs_t)
-            return encoder_input
+    def prevent_stale_training(self):
+        # Replay ratio gating: wait if we've trained too fast relative to env steps
+        env_steps = self.replay_buffer.total_env_steps + self._resume_env_steps_offset
+        effective_burn_in = min(
+            self.config.replay_burn_in,
+            self.sequence_length - 1,
+        )
+        effective_seq_for_gate = max(1, self.sequence_length - effective_burn_in)
+        target_train_steps = int(
+            env_steps
+            * self.replay_ratio
+            / (self.batch_size * effective_seq_for_gate * self.action_repeat)
+        )
+        if self.train_step >= target_train_steps and env_steps > 0:
+            time.sleep(0.01)  # Brief wait for more data
+            return True
+        return False
 
-        vec_obs_t = torch.from_numpy(obs).to(self.device).float().unsqueeze(0)
-        return symlog(vec_obs_t)
-
-    def collect_episode_single_process(self):
-        """Collect one full episode and insert it directly into replay."""
-        if self.collect_env is None:
-            self.collect_env = create_env(
-                self.config.environment_name,
-                use_pixels=self.use_pixels,
-                config=self.config,
-            )
-
-        obs, _ = self.collect_env.reset()
-        episode_pixels, episode_vec_obs, episode_actions = [], [], []
-        episode_rewards, episode_is_last, episode_is_terminal = [], [], []
-
-        h = torch.zeros(
-            1,
-            self.config.d_hidden * self.config.rnn_n_blocks,
+    def zeroize_state(self):
+        self.world_model.h_prev = torch.zeros(
+            actual_batch_size, h_dim, device=self.device
+        )
+        self.world_model.z_prev = torch.zeros(
+            actual_batch_size,
+            self.num_latents,
+            self.num_classes,
             device=self.device,
         )
-        action_onehot = torch.zeros(1, self.n_actions, device=self.device)
-        z_prev = torch.zeros(1, self.num_latents, self.num_classes, device=self.device)
-        z_prev_embed = self.world_model.z_embedding(z_prev.view(1, -1))
 
-        env_steps_in_episode = 0
-        with torch.no_grad():
-            while True:
-                encoder_input = self._build_encoder_input(obs)
-                h, _ = self.world_model.step_dynamics(z_prev_embed, action_onehot, h)
+        # Zero gradients before accumulating losses
+        self.wm_optimizer.zero_grad()
+        self.critic_optimizer.zero_grad()
+        self.actor_optimizer.zero_grad()
 
-                tokens = self.encoder(encoder_input)
-                posterior_logits = self.world_model.compute_posterior(h, tokens)
-                posterior_logits = unimix_logits(posterior_logits, unimix_ratio=0.01)
-                posterior_probs = F.softmax(posterior_logits, dim=-1)
-                z_indices = torch.distributions.Categorical(
-                    probs=posterior_probs
-                ).sample()
-                z_onehot = F.one_hot(z_indices, num_classes=self.num_classes).float()
-                z_sample = z_onehot + (posterior_probs - posterior_probs.detach())
-
-                actor_input = self.world_model.join_h_and_z(h, z_sample)
-                action_logits = self.actor(actor_input)
-                action_logits = unimix_logits(action_logits, unimix_ratio=0.01)
-                action = torch.distributions.Categorical(logits=action_logits).sample()
-                action_np = int(action.item())
-
-                action_onehot = F.one_hot(action, num_classes=self.n_actions).float()
-                action_onehot_np = action_onehot.detach().cpu().numpy().squeeze(0)
-                z_prev_embed = self.world_model.z_embedding(z_sample.view(1, -1))
-
-                total_reward = 0.0
-                terminated = False
-                truncated = False
-                for _ in range(self.action_repeat):
-                    obs, reward, terminated, truncated, _ = self.collect_env.step(
-                        action_np
-                    )
-                    total_reward += float(reward)
-                    env_steps_in_episode += 1
-                    if terminated or truncated:
-                        break
-
-                if self.use_pixels:
-                    episode_pixels.append(obs["pixels"])
-                    if "state" in obs:
-                        state_arr = np.asarray(obs["state"], dtype=np.float32)
-                    else:
-                        state_arr = np.zeros((1,), dtype=np.float32)
-                    if state_arr.ndim == 0:
-                        state_arr = np.array([float(state_arr)], dtype=np.float32)
-                    episode_vec_obs.append(state_arr)
-                else:
-                    episode_vec_obs.append(np.asarray(obs, dtype=np.float32))
-
-                episode_actions.append(action_onehot_np.astype(np.float32))
-                episode_rewards.append(np.float32(total_reward))
-                done = bool(terminated or truncated)
-                episode_is_last.append(done)
-                episode_is_terminal.append(bool(terminated))
-
-                if done:
-                    break
-
-        pixels_np = (
-            np.array(episode_pixels, dtype=np.uint8) if self.use_pixels else None
-        )
-        vec_obs_np = np.array(episode_vec_obs, dtype=np.float32)
-        actions_np = np.array(episode_actions, dtype=np.float32)
-        rewards_np = np.array(episode_rewards, dtype=np.float32)
-        is_last_np = np.array(episode_is_last, dtype=bool)
-        is_terminal_np = np.array(episode_is_terminal, dtype=bool)
-
-        self.replay_buffer.add_episode(
-            (
-                pixels_np,
-                vec_obs_np,
-                actions_np,
-                rewards_np,
-                is_last_np,
-                is_terminal_np,
-                env_steps_in_episode,
-            )
-        )
-        self.collect_episode_count += 1
-
-        if self.collect_episode_count % 5 == 0:
-            print(
-                f"Collected episode {self.collect_episode_count} "
-                f"(len={env_steps_in_episode}, total_env_steps={self.replay_buffer.total_env_steps})"
-            )
+        # Initialize loss accumulators - will be set on first iteration
+        total_wm_loss = None
+        total_actor_loss = None
+        total_critic_loss = None
+        return total_wm_loss, total_actor_loss, total_critic_loss
 
     def train_models(self):
         # Push current weights immediately so collectors do not spend startup
         # episodes in random-action mode when resuming from checkpoint.
-        if not self.single_process_collection:
-            self.send_models_to_collector(self.train_step)
+        self.send_models_to_collector(self.train_step)
 
         while self.train_step < self.max_train_steps:
-            if self.single_process_collection and not self.replay_buffer.is_ready:
-                self.collect_episode_single_process()
+            if self.prevent_stale_training():
                 continue
-
-            # Replay ratio gating: wait if we've trained too fast relative to env steps
-            env_steps = (
-                self.replay_buffer.total_env_steps + self._resume_env_steps_offset
-            )
-            burn_in_for_gate = min(
-                getattr(self.config, "replay_burn_in", 0),
-                max(0, self.sequence_length - 1),
-            )
-            effective_seq_for_gate = max(1, self.sequence_length - burn_in_for_gate)
-            target_train_steps = int(
-                env_steps
-                * self.replay_ratio
-                / (self.batch_size * effective_seq_for_gate * self.action_repeat)
-            )
-            if self.train_step >= target_train_steps and env_steps > 0:
-                if self.single_process_collection:
-                    self.collect_episode_single_process()
-                else:
-                    time.sleep(0.01)  # Brief wait for more data
+            if not self.replay_buffer.is_ready:
+                time.sleep(0.01)
                 continue
 
             # Apply cosine LR schedule (if enabled)
-            self.apply_lr_schedule()
+            if self.config.lr_cosine_decay:
+                self.apply_lr_schedule()
 
             # Data loading
-            self.get_data_from_buffer()  # Sample from replay buffer (non-blocking)
+            batch = self.get_data_from_buffer()
 
             # Skip if no data was retrieved
-            if not hasattr(self, "states") or self.states.shape[1] == 0:
+            if batch is None or batch.states.shape[1] == 0:
                 print(f"Trainer: No data was retrieved at step {self.train_step}.")
                 continue
 
             # Reset hidden states per trajectory - match actual input batch size
-            actual_batch_size = self.states.shape[0]
+            actual_batch_size = batch.states.shape[0]
             h_dim = self.world_model.h_prev.shape[1]
-            self.world_model.h_prev = torch.zeros(
-                actual_batch_size, h_dim, device=self.device
-            )
-            self.world_model.z_prev = torch.zeros(
-                actual_batch_size,
-                self.num_latents,
-                self.num_classes,
-                device=self.device,
-            )
 
-            # Zero gradients before accumulating losses
-            self.wm_optimizer.zero_grad()
-            self.critic_optimizer.zero_grad()
-            self.actor_optimizer.zero_grad()
+            # Reset hidden states per trajectory - match actual input batch size
+            total_wm_loss, total_actor_loss, total_critic_loss = self.zeroize_state()
 
-            # Initialize loss accumulators - will be set on first iteration
-            total_wm_loss = None
-            total_actor_loss = None
-            total_critic_loss = None
-            # Accumulate individual loss components for logging (as tensors to avoid GPU syncs in loop)
             wm_loss_components = {
                 "prediction_pixel": torch.tensor(0.0, device=self.device),
                 "prediction_vector": torch.tensor(0.0, device=self.device),
@@ -545,72 +382,53 @@ class WorldModelTrainer:
             replay_value_annotations = []
             replay_loss = None
             replay_ema_reg = None
-            # Initialize loss variables in case loop doesn't execute
-            wm_loss = torch.tensor(0.0, device=self.device)
-            actor_loss = torch.tensor(0.0, device=self.device)
-            critic_loss = torch.tensor(0.0, device=self.device)
-            last_obs_pixels = None
-            last_obs_pixels_original = None
-            last_reconstruction_pixels = None
-            last_posterior_probs = None
-            last_dreamed_pixels = None
 
-            # --- PROFILE: Forward pass ---
+            log_images = self.train_step % self.image_log_every == 0
+            viz_data = {} if log_images else None
+
+            # Initialize loss variables in case loop doesn't execute
             t0 = time.perf_counter()
 
-            # Phase 2: Batch encode all timesteps at once (single encoder forward pass)
-            # The encoder now returns tokens (feature vectors), not posterior logits.
-            # The posterior q(z|h,x) is computed inside the world model, conditioned on h_t.
-            B, T = self.states.shape[:2]
-            burn_in_steps = min(
-                getattr(self.config, "replay_burn_in", 8), max(0, T - 1)
-            )
+            total_wm_loss = None
+            total_actor_loss = None
+            total_critic_loss = None
+            B, T = batch.states.shape[:2]
+            burn_in_steps = min(self.config.replay_burn_in, T - 1)
             train_start_t = burn_in_steps
             effective_train_steps = T - train_start_t
-            states_flat = self.states.view(B * T, self.states.shape[-1])  # (B*T, n_obs)
+            states_flat = batch.states.view(
+                B * T, batch.states.shape[-1]
+            )  # (B*T, n_obs)
 
-            if self.use_pixels and self.pixels is not None:
-                pixels_flat = self.pixels.view(
-                    B * T, *self.pixels.shape[2:]
+            if self.use_pixels and batch.pixels is not None:
+                pixels_flat = batch.pixels.view(
+                    B * T, *batch.pixels.shape[2:]
                 )  # (B*T, C, H, W)
                 encoder_input = {"pixels": pixels_flat, "state": states_flat}
             else:
                 encoder_input = states_flat  # State-only mode
 
             all_tokens = self.encoder(encoder_input)  # (B*T, token_dim)
-            # Reshape back to (B, T, token_dim)
             all_tokens = all_tokens.view(B, T, -1)
 
-            # Decide AC update once per batch (ratio + focus), then mask per timestep
-            skip_ac_batch = False
-            ac_any = False
-            current_ratio = self.get_current_wm_ac_ratio()
-            self._wm_ac_counter += 1
-            if self._wm_ac_counter < current_ratio:
-                skip_ac_batch = True
-            else:
-                self._wm_ac_counter = 0
-                skip_ac_batch = self.should_skip_ac_for_wm_focus()
+            # Decide AC update once per batch (ratio)
+            skip_ac_batch = self.should_skip_ac_update()
 
             for t_step in range(T):
-                # Extract time step - now just indexing, no encoder call
-                if self.use_pixels and self.pixels is not None:
+                if self.use_pixels and batch.pixels is not None:
                     obs_t = {
-                        "pixels": self.pixels[:, t_step],
-                        "state": self.states[:, t_step],
+                        "pixels": batch.pixels[:, t_step],
+                        "state": batch.states[:, t_step],
                     }
                 else:
-                    obs_t = {"state": self.states[:, t_step]}  # State-only mode
-                action_t = self.actions[:, t_step]
-                reward_t = self.rewards[:, t_step]
-                is_terminal_t = self.is_terminal[:, t_step]
-                sample_mask = self.mask[:, t_step]
+                    obs_t = {"state": batch.states[:, t_step]}
+                action_t = batch.actions[:, t_step]
+                reward_t = batch.rewards[:, t_step]
+                is_terminal_t = batch.is_terminal[:, t_step]
+                sample_mask = batch.mask[:, t_step]
 
-                # Get pre-computed encoder tokens for this timestep
-                tokens_t = all_tokens[:, t_step]  # (B, token_dim)
+                tokens_t = all_tokens[:, t_step]
 
-                # World model now handles posterior computation internally,
-                # conditioning on h_t: q(z_t | h_t, tokens_t)
                 (
                     obs_reconstruction,
                     reward_dist,
@@ -620,20 +438,6 @@ class WorldModelTrainer:
                     prior_logits,
                     posterior_logits,
                 ) = self.world_model(tokens_t, action_t)
-
-                # Shape verification (DreamerV3 paper alignment)
-                if t_step == 0:  # Check once per batch
-                    L, K = self.num_latents, self.num_classes
-                    h_dim = self.world_model.n_blocks * self.d_hidden
-                    assert posterior_logits.shape[-2:] == (L, K), (
-                        f"posterior_logits shape {posterior_logits.shape} != [B, {L}, {K}]"
-                    )
-                    assert prior_logits.shape[-2:] == (L, K), (
-                        f"prior_logits shape {prior_logits.shape} != [B, {L}, {K}]"
-                    )
-                    assert h_z_joined.shape[-1] == h_dim + L * K, (
-                        f"h_z_joined dim {h_z_joined.shape[-1]} != {h_dim + L * K}"
-                    )
 
                 # Updating loss of encoder and world model
                 wm_loss, wm_loss_dict = compute_wm_loss(
@@ -652,18 +456,23 @@ class WorldModelTrainer:
                     sample_mask=sample_mask,
                 )
 
-                # Store visualization data
-                if self.use_pixels and "pixels" in obs_t:
-                    last_obs_pixels = obs_t["pixels"]
-                    last_obs_pixels_original = self.pixels_original[:, t_step]
-                    last_reconstruction_pixels = obs_reconstruction.get("pixels")
-                else:
-                    last_obs_pixels = None
-                    last_obs_pixels_original = None
-                    last_reconstruction_pixels = None
-                last_posterior_probs = F.softmax(
-                    posterior_logits, dim=-1
-                ).detach()  # (batch, d_hidden, d_hidden/16)
+                # Store visualization data (only on log_images step, at the end of the batch)
+                if log_images and t_step == T - 1:
+                    if self.use_pixels and "pixels" in obs_t:
+                        viz_data["obs_pixels"] = obs_t["pixels"]
+                        viz_data["obs_pixels_original"] = batch.pixels_original[
+                            :, t_step
+                        ]
+                        viz_data["reconstruction_pixels"] = obs_reconstruction.get(
+                            "pixels"
+                        )
+                    viz_data["posterior_probs"] = F.softmax(
+                        posterior_logits, dim=-1
+                    ).detach()
+
+                # Initialize step losses for AC (WM is computed above)
+                actor_loss = torch.tensor(0.0, device=self.device)
+                critic_loss = torch.tensor(0.0, device=self.device)
 
                 # --- Dream Sequence for Actor-Critic ---
                 # Skip AC for this timestep if batch-level skip is active or no valid samples.
@@ -766,7 +575,6 @@ class WorldModelTrainer:
                         sample_mask=sample_mask,
                     )
                     actor_entropy_list.append(entropy.detach().cpu())
-                    ac_any = True
                 else:
                     actor_loss = torch.tensor(0.0, device=self.device)
                     critic_loss = torch.tensor(0.0, device=self.device)
@@ -776,8 +584,8 @@ class WorldModelTrainer:
                             torch.zeros_like(sample_mask, device=self.device)
                         )
 
-                    # Decode dreamed states for visualization (every 50 steps)
-                    if self.train_step % 50 == 0 and self.use_pixels:
+                    # Decode dreamed states for visualization
+                    if log_images and t_step == T - 1 and self.use_pixels:
                         with torch.no_grad():
                             try:
                                 # dreamed_recurrent_states: (n_dream_steps, batch, d_hidden)
@@ -791,11 +599,11 @@ class WorldModelTrainer:
                                 if pixels_flat is not None:
                                     # Decoder flattens to (n_steps * batch, C, H, W), reshape back
                                     C, H, W = pixels_flat.shape[1:]
-                                    last_dreamed_pixels = torch.sigmoid(
+                                    viz_data["dreamed_pixels"] = torch.sigmoid(
                                         pixels_flat.view(n_steps, batch_sz, C, H, W)
                                     ).detach()
                             except Exception:
-                                last_dreamed_pixels = None
+                                pass
 
                 # Accumulate losses (per-sample masking handled inside loss functions)
                 if total_wm_loss is None:
@@ -811,7 +619,6 @@ class WorldModelTrainer:
             if (
                 self.critic_replay_scale > 0.0
                 and not skip_ac_batch
-                and ac_any
                 and len(replay_value_annotations) == effective_train_steps
                 and len(replay_posterior_states) == effective_train_steps
             ):
@@ -823,11 +630,11 @@ class WorldModelTrainer:
                     replay_value_annotations, dim=0
                 )  # [T, B]
 
-                replay_rewards = self.rewards[:, train_start_t:].transpose(
+                replay_rewards = batch.rewards[:, train_start_t:].transpose(
                     0, 1
                 )  # [T', B]
-                replay_is_last = self.is_last[:, train_start_t:].transpose(0, 1)
-                replay_continues = (1.0 - self.is_terminal.float()).transpose(0, 1)[
+                replay_is_last = batch.is_last[:, train_start_t:].transpose(0, 1)
+                replay_continues = (1.0 - batch.is_terminal.float()).transpose(0, 1)[
                     train_start_t:
                 ]  # [T', B]
                 # Match Dreamer replay-return semantics: stop credit across episode
@@ -836,7 +643,7 @@ class WorldModelTrainer:
                 replay_continues = replay_continues * (
                     1.0 - 1.0 / float(max(1, getattr(self.config, "horizon", 333)))
                 )
-                replay_mask = self.mask[:, train_start_t:].transpose(0, 1)  # [T', B]
+                replay_mask = batch.mask[:, train_start_t:].transpose(0, 1)  # [T', B]
 
                 # Compute replay lambda-returns with annotations (continues are probabilities)
                 replay_lambda_returns = calculate_lambda_returns(
@@ -891,10 +698,6 @@ class WorldModelTrainer:
 
             # End forward, start backward
 
-            # Compute surprise BEFORE backward pass (proactive, not reactive)
-            seq_len = self.states.shape[1] if hasattr(self, "states") else 1
-            self.compute_surprise_for_batch(total_wm_loss, seq_len)
-
             # Backprop
             assert (
                 total_wm_loss is not None
@@ -906,22 +709,14 @@ class WorldModelTrainer:
                     f"Non-finite WM loss at step {self.train_step}: {total_wm_loss.item()}"
                 )
 
-            # Use the batch-level AC skip decision (or skip if no valid AC steps)
-            if skip_ac_batch or not ac_any:
-                # WM focus mode: only update WM this step
+            # Use the batch-level AC skip decision
+            if skip_ac_batch:
+                # WM-only update this step
                 total_wm_loss.backward()
                 adaptive_gradient_clipping(self.wm_params)
                 self.wm_optimizer.step()
             else:
                 # Full training: WM + critic + actor
-                # Apply surprise-based lr scaling to AC optimizers (uses smoothed surprise)
-                lr_scale = self.get_ac_lr_scale()
-                if lr_scale < 1.0:
-                    for pg in self.actor_optimizer.param_groups:
-                        pg["lr"] = self.base_actor_lr * lr_scale
-                    for pg in self.critic_optimizer.param_groups:
-                        pg["lr"] = self.base_critic_lr * lr_scale
-
                 total_wm_loss.backward()
                 total_critic_loss.backward()
                 total_actor_loss.backward()
@@ -948,20 +743,13 @@ class WorldModelTrainer:
                             param.data, alpha=1 - self.critic_ema_decay
                         )
 
-                    # Reset lr after step (for next iteration's scaling)
-                    if lr_scale < 1.0:
-                        for pg in self.actor_optimizer.param_groups:
-                            pg["lr"] = self.base_actor_lr
-                        for pg in self.critic_optimizer.param_groups:
-                            pg["lr"] = self.base_critic_lr
-
             # End backward
 
             log_step = self.train_step
             self.train_step += 1
 
             # Log metrics to MLflow
-            sequence_length = effective_train_steps if hasattr(self, "states") else 0
+            sequence_length = effective_train_steps
             self.log_metrics(
                 total_wm_loss,
                 total_actor_loss,
@@ -973,19 +761,12 @@ class WorldModelTrainer:
                 actor_entropy_list,
                 replay_loss,
                 replay_ema_reg,
-                last_obs_pixels,
-                last_obs_pixels_original,
-                last_reconstruction_pixels,
-                last_posterior_probs,
-                last_dreamed_pixels,
-                log_step,
+                viz_data=viz_data,
+                step=log_step,
             )
 
             # Send models to collector periodically
-            if (
-                not self.single_process_collection
-                and self.train_step % self.steps_per_weight_sync == 0
-            ):
+            if self.train_step % self.steps_per_weight_sync == 0:
                 self.send_models_to_collector(self.train_step)
 
             # Periodic logging (every 100 steps)
@@ -1089,6 +870,15 @@ class WorldModelTrainer:
         self.replay_buffer.stop()
         self.logger.close()
 
+    def should_skip_ac_update(self) -> bool:
+        """Decide if we should skip the Actor-Critic update this batch based on WM:AC ratio."""
+        self._wm_ac_counter += 1
+        if self._wm_ac_counter < self.get_current_wm_ac_ratio():
+            return True
+        else:
+            self._wm_ac_counter = 0
+            return False
+
     def update_return_scale(self, lambda_returns, decay=0.99):
         flat = lambda_returns.detach().reshape(-1)
         lo_batch = torch.quantile(flat, 0.05).item()
@@ -1103,20 +893,6 @@ class WorldModelTrainer:
             self.ret_hi = (1.0 - rate) * self.ret_hi + rate * hi_batch
 
         self.S = max(1.0, float(self.ret_hi - self.ret_lo))
-
-    def _surprise_log_ratio(self, key: str, value: float) -> float | None:
-        """Return log(value / EMA) and update EMA; None if EMA not initialized."""
-        ema = self._wm_surprise_ema.get(key)
-        if ema is None:
-            self._wm_surprise_ema[key] = value
-            return None
-        log_ratio = math.log(
-            (value + self._wm_surprise_eps) / (ema + self._wm_surprise_eps)
-        )
-        self._wm_surprise_ema[key] = (
-            self.surprise_ema_beta * ema + (1.0 - self.surprise_ema_beta) * value
-        )
-        return log_ratio
 
     def get_cosine_schedule(self, max_val: float, min_val: float) -> float:
         """Cosine schedule from max_val to min_val over training."""
@@ -1140,52 +916,13 @@ class WorldModelTrainer:
 
     def apply_lr_schedule(self):
         """Apply cosine LR decay to all optimizers."""
-        if not self.lr_cosine_decay:
-            return
         scale = self.get_cosine_schedule(1.0, self.lr_cosine_min_factor)
         for pg in self.wm_optimizer.param_groups:
             pg["lr"] = self.config.wm_lr * scale
         for pg in self.actor_optimizer.param_groups:
-            pg["lr"] = self.base_actor_lr * scale
+            pg["lr"] = self.config.actor_lr * scale
         for pg in self.critic_optimizer.param_groups:
-            pg["lr"] = self.base_critic_lr * scale
-
-    def compute_surprise_for_batch(self, wm_loss: torch.Tensor, seq_len: int) -> float:
-        """
-        Compute surprise from current batch's WM loss BEFORE backward pass.
-        Updates EMA, smoothed surprise, and WM focus mode. Call this right after forward pass.
-
-        Returns the raw surprise log ratio.
-        """
-        wm_per_step = wm_loss.item() / max(1, seq_len)
-
-        # Compute raw surprise (log ratio vs EMA)
-        raw_surprise = self._surprise_log_ratio("total", wm_per_step)
-        if raw_surprise is None:
-            raw_surprise = 0.0
-
-        self._last_surprise_log_ratio = raw_surprise
-
-        # Update smoothed surprise (lingers after spikes)
-        # Only positive surprise affects smoothing (WM struggling)
-        positive_surprise = max(0.0, raw_surprise)
-        # Smoothed surprise takes the max of decay and new value (ratchet up quickly, decay slowly)
-        decayed = self._smoothed_surprise * self.surprise_smooth_beta
-        self._smoothed_surprise = max(decayed, positive_surprise)
-
-        # Trigger WM focus mode if surprise exceeds threshold (respecting cooldown)
-        if positive_surprise > self.surprise_wm_focus_threshold:
-            if self._wm_focus_cooldown_remaining <= 0:
-                # Not in cooldown, can enter focus
-                self._wm_focus_steps_remaining = self.surprise_wm_focus_duration
-                self._wm_focus_ac_counter = 0  # Reset counter
-            # If in cooldown, LR scaling still applies but no focus mode
-
-        # Tick cooldown
-        if self._wm_focus_cooldown_remaining > 0:
-            self._wm_focus_cooldown_remaining -= 1
-
-        return raw_surprise
+            pg["lr"] = self.config.critic_lr * scale
 
     def evaluate_policy(self, num_episodes: int, step: int) -> float:
         """Run deterministic evaluation episodes and log summary metrics.
@@ -1323,44 +1060,6 @@ class WorldModelTrainer:
 
         return avg_len
 
-    def should_skip_ac_for_wm_focus(self) -> bool:
-        """
-        Check if AC update should be skipped this step due to WM focus mode.
-        In focus mode, only update AC every N steps (ratio).
-        """
-        if self._wm_focus_steps_remaining <= 0:
-            return False
-
-        # Decrement focus countdown
-        self._wm_focus_steps_remaining -= 1
-
-        # Start cooldown when exiting focus mode
-        if self._wm_focus_steps_remaining == 0:
-            self._wm_focus_cooldown_remaining = self.surprise_wm_focus_cooldown
-
-        # Check if this is an AC step (every Nth step)
-        self._wm_focus_ac_counter += 1
-        if self._wm_focus_ac_counter >= self.surprise_wm_focus_ratio:
-            self._wm_focus_ac_counter = 0
-            return False  # Do AC this step
-
-        return True  # Skip AC this step
-
-    def get_ac_lr_scale(self) -> float:
-        """
-        Get AC learning rate scale based on smoothed surprise.
-
-        Returns scale factor in (0, 1]:
-        - High surprise → low scale (slower AC learning)
-        - Low/negative surprise → scale ≈ 1 (normal learning)
-
-        Uses smoothed surprise so LR reduction lingers after spikes.
-        """
-        if not self.surprise_scale_ac_lr:
-            return 1.0
-        # Use smoothed surprise (not raw) so reduction lingers
-        return 1.0 / (1.0 + self._smoothed_surprise * self.surprise_lr_scale_k)
-
     def _get_model(self, model):
         """Get underlying model (handles both compiled and non-compiled)."""
         return getattr(model, "_orig_mod", model)
@@ -1385,14 +1084,6 @@ class WorldModelTrainer:
             "return_scale": self.S,
             "ret_lo": self.ret_lo,
             "ret_hi": self.ret_hi,
-            "surprise_ema": self._wm_surprise_ema,
-            "smoothed_surprise": self._smoothed_surprise,
-            "rng_python": random.getstate(),
-            "rng_numpy": np.random.get_state(),
-            "rng_torch_cpu": torch.get_rng_state(),
-            "rng_torch_cuda": torch.cuda.get_rng_state_all()
-            if torch.cuda.is_available()
-            else None,
             "mlflow_run_id": self.mlflow_run_id,
         }
         path = os.path.join(self.checkpoint_dir, f"checkpoint_{suffix}.pt")
@@ -1448,24 +1139,6 @@ class WorldModelTrainer:
         self.S = float(checkpoint.get("return_scale", self.S))
         self.ret_lo = checkpoint.get("ret_lo", self.ret_lo)
         self.ret_hi = checkpoint.get("ret_hi", self.ret_hi)
-        surprise_ema = checkpoint.get("surprise_ema")
-        if isinstance(surprise_ema, dict):
-            self._wm_surprise_ema = {str(k): float(v) for k, v in surprise_ema.items()}
-        self._smoothed_surprise = float(
-            checkpoint.get("smoothed_surprise", self._smoothed_surprise)
-        )
-        rng_python = checkpoint.get("rng_python")
-        if rng_python is not None:
-            random.setstate(rng_python)
-        rng_numpy = checkpoint.get("rng_numpy")
-        if rng_numpy is not None:
-            np.random.set_state(rng_numpy)
-        rng_torch_cpu = checkpoint.get("rng_torch_cpu")
-        if rng_torch_cpu is not None:
-            torch.set_rng_state(rng_torch_cpu)
-        rng_torch_cuda = checkpoint.get("rng_torch_cuda")
-        if rng_torch_cuda is not None and torch.cuda.is_available():
-            torch.cuda.set_rng_state_all(rng_torch_cuda)
 
         self.train_step = checkpoint.get("step", 0)
         print(f"Resumed checkpoint from {checkpoint_path} at step {self.train_step}")
@@ -1482,25 +1155,10 @@ class WorldModelTrainer:
         actor_entropy_list,
         replay_loss=None,
         replay_ema_reg=None,
-        last_obs_pixels=None,
-        last_obs_pixels_original=None,
-        last_reconstruction_pixels=None,
-        last_posterior_probs=None,
-        last_dreamed_pixels=None,
+        viz_data=None,
         step=None,
     ):
-        """Log metrics to MLflow.
-
-        Metric naming convention:
-        - loss/{model}/total: Top-level loss per model (wm, actor, critic)
-        - wm/{component}/loss: World model sub-component losses
-        - wm/rssm/*: RSSM-specific metrics (KL divergences)
-        - dream/{source}/*: Imagined trajectory stats from world model rollouts
-        - actor/*: Actor network metrics
-        - train/*: Training infrastructure metrics
-        - env/*: Environment interaction metrics
-        - viz/*: Visualization artifacts
-        """
+        """Log metrics to MLflow."""
         if step is None:
             step = self.train_step
         log_scalars = step % self.log_every == 0
@@ -1508,7 +1166,6 @@ class WorldModelTrainer:
         if not (log_scalars or log_images):
             return
 
-        # Safety check - should not happen due to assertions, but just in case
         if (
             total_wm_loss is None
             or total_actor_loss is None
@@ -1518,36 +1175,25 @@ class WorldModelTrainer:
 
         if log_scalars:
             is_full_profile = self.log_profile == "full"
-            # All losses normalized to per-step for fair comparison
+            metrics = {}
+
             if sequence_length > 0:
                 norm = 1.0 / sequence_length
-                beta_pred = self.config.beta_pred
-                beta_dyn = self.config.beta_dyn
-                beta_rep = self.config.beta_rep
-
-                # Convert tensor loss components to CPU floats (single sync for all 8 components)
                 wm_components_cpu = {k: v.item() for k, v in wm_loss_components.items()}
 
-                # Per-step totals for each model
-                wm_per_step = total_wm_loss.item() * norm
-                actor_per_step = total_actor_loss.item() * norm
-                critic_per_step = total_critic_loss.item() * norm
-                self.logger.add_scalar("loss/wm/total", wm_per_step, step)
-                self.logger.add_scalar("loss/actor/total", actor_per_step, step)
-                self.logger.add_scalar("loss/critic/total", critic_per_step, step)
+                metrics.update(
+                    {
+                        "loss/wm/total": total_wm_loss.item() * norm,
+                        "loss/actor/total": total_actor_loss.item() * norm,
+                        "loss/critic/total": total_critic_loss.item() * norm,
+                    }
+                )
 
-                # Replay critic grounding (logged as raw masked average loss)
                 if replay_loss is not None:
-                    replay_loss_value = float(replay_loss.item())
-                    self.logger.add_scalar(
-                        "loss/critic/replay", replay_loss_value, step
-                    )
+                    metrics["loss/critic/replay"] = float(replay_loss.item())
                 if replay_ema_reg is not None:
-                    self.logger.add_scalar(
-                        "loss/critic/replay_ema_reg", float(replay_ema_reg.item()), step
-                    )
+                    metrics["loss/critic/replay_ema_reg"] = float(replay_ema_reg.item())
 
-                # Raw component values (per-step, unscaled)
                 pixel = wm_components_cpu["prediction_pixel"] * norm
                 state = wm_components_cpu["prediction_vector"] * norm
                 reward = wm_components_cpu["prediction_reward"] * norm
@@ -1555,140 +1201,46 @@ class WorldModelTrainer:
                 dyn = wm_components_cpu["dynamics"] * norm
                 rep = wm_components_cpu["representation"] * norm
 
-                # Surprise signals: log-ratio of recent loss vs EMA
-                # Note: "total" is computed in compute_surprise_for_batch (before backward)
-                # Only compute component surprises here to avoid double EMA update
-                surprise_inputs = {
-                    "pixel": pixel,
-                    "state": state,
-                    "reward": reward,
-                    "continue": cont,
-                    "kl_dyn": dyn,
-                    "kl_rep": rep,
-                }
-                surprise_log_ratios = {}
-                for key, value in surprise_inputs.items():
-                    log_ratio = self._surprise_log_ratio(key, float(value))
-                    if log_ratio is not None:
-                        surprise_log_ratios[key] = log_ratio
-
-                # Log total surprise (already computed in compute_surprise_for_batch)
-                if is_full_profile:
-                    self.logger.add_scalar("wm/surprise/ready", 1.0, step)
-                    self.logger.add_scalar(
-                        "wm/surprise/total_log_ratio",
-                        self._last_surprise_log_ratio,
-                        step,
-                    )
-
-                # Log component surprises
-                if is_full_profile and "reward" in surprise_log_ratios:
-                    self.logger.add_scalar(
-                        "wm/surprise/reward_log_ratio",
-                        surprise_log_ratios["reward"],
-                        step,
-                    )
-                if is_full_profile and "continue" in surprise_log_ratios:
-                    self.logger.add_scalar(
-                        "wm/surprise/continue_log_ratio",
-                        surprise_log_ratios["continue"],
-                        step,
-                    )
-                if is_full_profile and "pixel" in surprise_log_ratios:
-                    self.logger.add_scalar(
-                        "wm/surprise/pixel_log_ratio",
-                        surprise_log_ratios["pixel"],
-                        step,
-                    )
-                if is_full_profile and "state" in surprise_log_ratios:
-                    self.logger.add_scalar(
-                        "wm/surprise/state_log_ratio",
-                        surprise_log_ratios["state"],
-                        step,
-                    )
-                if is_full_profile and "kl_dyn" in surprise_log_ratios:
-                    self.logger.add_scalar(
-                        "wm/surprise/kl_dyn_log_ratio",
-                        surprise_log_ratios["kl_dyn"],
-                        step,
-                    )
-                if is_full_profile and "kl_rep" in surprise_log_ratios:
-                    self.logger.add_scalar(
-                        "wm/surprise/kl_rep_log_ratio",
-                        surprise_log_ratios["kl_rep"],
-                        step,
-                    )
-                component_vals = list(surprise_log_ratios.values())
-                if is_full_profile and component_vals:
-                    self.logger.add_scalar(
-                        "wm/surprise/max_component_log_ratio",
-                        max(component_vals),
-                        step,
-                    )
-
-                # Log AC learning rate scale (based on surprise)
-                if is_full_profile and self.surprise_scale_ac_lr:
-                    lr_scale = self.get_ac_lr_scale()
-                    self.logger.add_scalar("ac/lr_scale", lr_scale, step)
-                    # Log smoothed vs raw surprise for debugging
-                    self.logger.add_scalar(
-                        "wm/surprise/smoothed", self._smoothed_surprise, step
-                    )
-                    # Log WM focus mode (1 = in focus, 0 = normal) and cooldown
-                    self.logger.add_scalar(
-                        "ac/wm_focus_active",
-                        float(self._wm_focus_steps_remaining > 0),
-                        step,
-                    )
-                    self.logger.add_scalar(
-                        "ac/wm_focus_cooldown",
-                        float(self._wm_focus_cooldown_remaining > 0),
-                        step,
-                    )
-
-                # World model sub-component losses (grouped by module)
-                # Decoder losses (reconstruction)
                 if self._has_pixel_obs:
-                    self.logger.add_scalar("wm/decoder/pixel_loss", pixel, step)
+                    metrics["wm/decoder/pixel_loss"] = pixel
                 if self._has_vector_obs:
-                    self.logger.add_scalar("wm/decoder/state_loss", state, step)
-                # Predictor head losses
-                self.logger.add_scalar("wm/reward_head/loss", reward, step)
-                self.logger.add_scalar("wm/continue_head/loss", cont, step)
-                # RSSM KL losses (after free bits)
-                self.logger.add_scalar("wm/rssm/kl_dynamics", dyn, step)
-                self.logger.add_scalar("wm/rssm/kl_representation", rep, step)
+                    metrics["wm/decoder/state_loss"] = state
 
-                # Scaled contributions to total (these should sum to loss/wm/total)
-                pred_total = pixel + state + reward + cont
+                metrics.update(
+                    {
+                        "wm/reward_head/loss": reward,
+                        "wm/continue_head/loss": cont,
+                        "wm/rssm/kl_dynamics": dyn,
+                        "wm/rssm/kl_representation": rep,
+                    }
+                )
+
                 if is_full_profile:
-                    self.logger.add_scalar(
-                        "wm/scaled/prediction", beta_pred * pred_total, step
+                    metrics.update(
+                        {
+                            "wm/scaled/prediction": self.config.beta_pred
+                            * (pixel + state + reward + cont),
+                            "wm/scaled/dynamics": self.config.beta_dyn * dyn,
+                            "wm/scaled/representation": self.config.beta_rep * rep,
+                            "wm/rssm/kl_dynamics_raw": wm_components_cpu[
+                                "kl_dynamics_raw"
+                            ]
+                            * norm,
+                            "wm/rssm/kl_representation_raw": wm_components_cpu[
+                                "kl_representation_raw"
+                            ]
+                            * norm,
+                        }
                     )
-                    self.logger.add_scalar("wm/scaled/dynamics", beta_dyn * dyn, step)
-                    self.logger.add_scalar(
-                        "wm/scaled/representation", beta_rep * rep, step
-                    )
-
-                # Raw KL divergences (before free bits clipping, for debugging)
-                kl_dyn_raw = wm_components_cpu["kl_dynamics_raw"] * norm
-                kl_rep_raw = wm_components_cpu["kl_representation_raw"] * norm
-                self.logger.add_scalar("wm/rssm/kl_dynamics_raw", kl_dyn_raw, step)
-                self.logger.add_scalar(
-                    "wm/rssm/kl_representation_raw", kl_rep_raw, step
-                )
             else:
-                # Fallback if no sequence
-                self.logger.add_scalar("loss/wm/total", total_wm_loss.item(), step)
-                self.logger.add_scalar(
-                    "loss/actor/total", total_actor_loss.item(), step
-                )
-                self.logger.add_scalar(
-                    "loss/critic/total", total_critic_loss.item(), step
+                metrics.update(
+                    {
+                        "loss/wm/total": total_wm_loss.item(),
+                        "loss/actor/total": total_actor_loss.item(),
+                        "loss/critic/total": total_critic_loss.item(),
+                    }
                 )
 
-            # Dreamed trajectory statistics (from world model imagination rollouts)
-            # Batch stats computation and sync once to reduce GPU stalls
             if dreamed_rewards_list:
                 all_dreamed_rewards = torch.cat(dreamed_rewards_list, dim=0)
                 reward_stats = torch.stack(
@@ -1698,138 +1250,101 @@ class WorldModelTrainer:
                         all_dreamed_rewards.min(),
                         all_dreamed_rewards.max(),
                     ]
-                ).cpu()  # Single sync for all 4 stats
-                # Rewards predicted by WM reward head during imagination
-                self.logger.add_scalar(
-                    "dream/wm_reward/mean", reward_stats[0].item(), step
-                )
-                self.logger.add_scalar(
-                    "dream/wm_reward/std", reward_stats[1].item(), step
+                ).cpu()
+                metrics.update(
+                    {
+                        "dream/wm_reward/mean": reward_stats[0].item(),
+                        "dream/wm_reward/std": reward_stats[1].item(),
+                    }
                 )
                 if is_full_profile:
-                    self.logger.add_scalar(
-                        "dream/wm_reward/min", reward_stats[2].item(), step
-                    )
-                    self.logger.add_scalar(
-                        "dream/wm_reward/max", reward_stats[3].item(), step
+                    metrics.update(
+                        {
+                            "dream/wm_reward/min": reward_stats[2].item(),
+                            "dream/wm_reward/max": reward_stats[3].item(),
+                        }
                     )
 
             if dreamed_values_list:
                 all_dreamed_values = torch.cat(dreamed_values_list, dim=0)
                 value_stats = torch.stack(
-                    [
-                        all_dreamed_values.mean(),
-                        all_dreamed_values.std(),
-                    ]
-                ).cpu()  # Single sync for both stats
-                # Values from critic during imagination
-                self.logger.add_scalar(
-                    "dream/critic_value/mean", value_stats[0].item(), step
-                )
-                self.logger.add_scalar(
-                    "dream/critic_value/std", value_stats[1].item(), step
+                    [all_dreamed_values.mean(), all_dreamed_values.std()]
+                ).cpu()
+                metrics.update(
+                    {
+                        "dream/critic_value/mean": value_stats[0].item(),
+                        "dream/critic_value/std": value_stats[1].item(),
+                    }
                 )
                 symlog_values = symlog(all_dreamed_values)
                 symlog_stats = torch.stack(
-                    [
-                        symlog_values.mean(),
-                        symlog_values.std(),
-                    ]
+                    [symlog_values.mean(), symlog_values.std()]
                 ).cpu()
-                self.logger.add_scalar(
-                    "dream/critic_value_symlog/mean", symlog_stats[0].item(), step
-                )
-                self.logger.add_scalar(
-                    "dream/critic_value_symlog/std", symlog_stats[1].item(), step
+                metrics.update(
+                    {
+                        "dream/critic_value_symlog/mean": symlog_stats[0].item(),
+                        "dream/critic_value_symlog/std": symlog_stats[1].item(),
+                    }
                 )
 
-            # Actor entropy (important for monitoring exploration)
             if actor_entropy_list:
                 all_entropy = torch.stack(actor_entropy_list)
                 entropy_stats = torch.stack(
-                    [
-                        all_entropy.mean(),
-                        all_entropy.std(),
-                    ]
-                ).cpu()  # Single sync for both stats
-                self.logger.add_scalar(
-                    "actor/entropy/mean", entropy_stats[0].item(), step
-                )
+                    [all_entropy.mean(), all_entropy.std()]
+                ).cpu()
+                metrics["actor/entropy/mean"] = entropy_stats[0].item()
                 if is_full_profile:
-                    self.logger.add_scalar(
-                        "actor/entropy/std", entropy_stats[1].item(), step
-                    )
+                    metrics["actor/entropy/std"] = entropy_stats[1].item()
 
-            # Learning rates
             if is_full_profile:
-                self.logger.add_scalar(
-                    "train/lr/wm",
-                    self.wm_optimizer.param_groups[0]["lr"],
-                    step,
+                metrics.update(
+                    {
+                        "train/lr/wm": self.wm_optimizer.param_groups[0]["lr"],
+                        "train/lr/actor": self.actor_optimizer.param_groups[0]["lr"],
+                        "train/lr/critic": self.critic_optimizer.param_groups[0]["lr"],
+                    }
                 )
-                self.logger.add_scalar(
-                    "train/lr/actor",
-                    self.actor_optimizer.param_groups[0]["lr"],
-                    step,
-                )
-                self.logger.add_scalar(
-                    "train/lr/critic",
-                    self.critic_optimizer.param_groups[0]["lr"],
-                    step,
-                )
+                if self.wm_ac_ratio_cosine:
+                    metrics["train/wm_ac_ratio"] = self.get_current_wm_ac_ratio()
 
-            # Log WM:AC ratio (if using cosine schedule)
-            if is_full_profile and self.wm_ac_ratio_cosine:
-                self.logger.add_scalar(
-                    "train/wm_ac_ratio",
-                    self.get_current_wm_ac_ratio(),
-                    step,
-                )
+            self.logger.log_scalars(metrics, step)
 
-        # Visualizations every 250 steps (show first sample only)
-        if (
-            # step % 50 == 0
-            log_images
-            and last_obs_pixels is not None
-            and last_reconstruction_pixels is not None
-        ):
-            # Take first sample from batch
-            actual = (last_obs_pixels[0] / 255.0).clamp(0, 1)  # (C, H, W)
-            recon = torch.sigmoid(last_reconstruction_pixels[0]).clamp(
-                0, 1
-            )  # (C, H, W)
-            # Resize reconstruction to match actual if needed
-            if recon.shape != actual.shape:
-                recon = F.interpolate(
-                    recon.unsqueeze(0),
-                    size=actual.shape[1:],
-                    mode="bilinear",
-                    align_corners=False,
-                ).squeeze(0)
+        if log_images and viz_data:
+            last_obs_pixels = viz_data.get("obs_pixels")
+            last_reconstruction_pixels = viz_data.get("reconstruction_pixels")
+            last_posterior_probs = viz_data.get("posterior_probs")
+            last_dreamed_pixels = viz_data.get("dreamed_pixels")
+            last_obs_pixels_original = viz_data.get("obs_pixels_original")
 
-            # 1. Actual vs Reconstruction side by side (decoder output quality)
-            comparison = torch.cat([actual, recon], dim=2)  # concat on width
-            self.logger.add_image("viz/decoder/reconstruction", comparison, step)
+            if last_obs_pixels is not None and last_reconstruction_pixels is not None:
+                actual = (last_obs_pixels[0] / 255.0).clamp(0, 1)
+                recon = torch.sigmoid(last_reconstruction_pixels[0]).clamp(0, 1)
+                if recon.shape != actual.shape:
+                    recon = F.interpolate(
+                        recon.unsqueeze(0),
+                        size=actual.shape[1:],
+                        mode="bilinear",
+                        align_corners=False,
+                    ).squeeze(0)
 
-            # 2. Reconstruction error heatmap (decoder error visualization)
-            error = torch.abs(actual - recon).mean(dim=0, keepdim=True)  # (1, H, W)
-            error_norm = error / (error.max() + 1e-8)
-            error_heatmap = error_norm.repeat(3, 1, 1)  # grayscale to RGB
-            self.logger.add_image("viz/decoder/error", error_heatmap, step)
+                comparison = torch.cat([actual, recon], dim=2)
+                self.logger.log_image("viz/decoder/reconstruction", comparison, step)
 
-            # 3. Latent activation heatmap (encoder posterior distribution)
+                error = torch.abs(actual - recon).mean(dim=0, keepdim=True)
+                error_norm = error / (error.max() + 1e-8)
+                error_heatmap = error_norm.repeat(3, 1, 1)
+                self.logger.log_image("viz/decoder/error", error_heatmap, step)
+
             if last_posterior_probs is not None:
-                # Shape: (batch, d_hidden, categories) -> take first batch, make 2D
-                latent_probs = last_posterior_probs[0]  # (512, 32)
-                # Normalize and add batch/channel dims for add_images
-                latent_img = latent_probs.unsqueeze(0).unsqueeze(0)  # (1, 1, 512, 32)
-                self.logger.add_images("viz/encoder/latent_posterior", latent_img, step)
+                latent_probs = last_posterior_probs[0]  # (d_hidden, K)
+                latent_img = latent_probs.unsqueeze(
+                    0
+                )  # (1, d_hidden, K) -> treated as (C, H, W)
+                self.logger.log_image("viz/encoder/latent_posterior", latent_img, step)
 
-            # 4. Dream rollout video (WM imagination/planning visualization)
-            if last_dreamed_pixels is not None:
-                # Shape: (n_dream_steps, batch, C, H, W) -> take first batch
-                dream_frames = last_dreamed_pixels[:, 0]  # (n_steps, C, H, W)
-                # Resize to match actual size if needed
+            if last_dreamed_pixels is not None and last_obs_pixels is not None:
+                actual = (last_obs_pixels[0] / 255.0).clamp(0, 1)
+                dream_frames = last_dreamed_pixels[:, 0]
                 if dream_frames.shape[2:] != actual.shape[1:]:
                     dream_frames = F.interpolate(
                         dream_frames,
@@ -1837,26 +1352,18 @@ class WorldModelTrainer:
                         mode="bilinear",
                         align_corners=False,
                     )
-                # Add video: shape (N, T, C, H, W) - batch, time, channels, height, width
-                video = dream_frames.unsqueeze(0)  # (1, n_steps, C, H, W)
-                self.logger.add_video("viz/wm/dream_video", video, step, fps=4)
-                # Also add strip image for quick glance
+                video = dream_frames.unsqueeze(0)
+                self.logger.log_video("viz/wm/dream_video", video, step, fps=4)
+
                 n_show = min(5, dream_frames.shape[0])
                 dream_strip = torch.cat([dream_frames[i] for i in range(n_show)], dim=2)
-                self.logger.add_images(
-                    "viz/wm/dream_strip", dream_strip.unsqueeze(0), step
-                )
+                self.logger.log_image("viz/wm/dream_strip", dream_strip, step)
 
-            # 5. Original resolution image (environment frame)
             if last_obs_pixels_original is not None:
-                original = (last_obs_pixels_original[0] / 255.0).clamp(
-                    0, 1
-                )  # First sample only
-                self.logger.add_image("viz/env/frame", original, step)
+                original = (last_obs_pixels_original[0] / 255.0).clamp(0, 1)
+                self.logger.log_image("viz/env/frame", original, step)
 
-        self.logger.flush()
-
-    def send_models_to_collector(self, training_step):
+    def send_models_to_collector(self, step: int):
         if self.model_queue is None:
             return
 
@@ -1899,6 +1406,7 @@ def train_world_model(
     checkpoint_path=None,
     mlflow_run_id=None,
     dry_run=False,
+    device="cpu",
 ):
     # Set MLflow tracking URI and join existing run in this child process (skip in dry_run)
     if mlflow_run_id and not dry_run:
@@ -1915,5 +1423,6 @@ def train_world_model(
         checkpoint_path,
         mlflow_run_id,
         dry_run,
+        device,
     )
     trainer.train_models()

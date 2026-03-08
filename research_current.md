@@ -919,6 +919,40 @@ The 4:1 ratio successfully keeps WM ahead of AC, preventing the "WM exploitation
 - **Primary metric**:
   - `points_for_per_game` (time-to-first-meaningful-scoring behavior).
 - **Secondary metrics**:
+
+### 03-04-26 Single-Process Resume + Critic Geometry Diagnostics
+- **Run/control updates**:
+  - stopped multiprocess trainer and resumed from `runs/03-04_065939/checkpoints/checkpoint_step_5000.pt` using single-process collect+train path.
+  - new run artifact dir: `runs/03-04_185651`.
+  - observed throughput in this mode: `train.throughput ~0.74 updates/s` around step `5100` (materially higher than prior ~0.1 updates/s gated regime).
+- **Behavioral finding**:
+  - policy still shows major argmax action collapse ("holds one action"), despite world-model dream/reconstruction videos looking qualitatively plausible.
+  - this points to actor/critic target quality mismatch rather than pure perception failure.
+- **Linear-algebra checkpoint probe (latest ckpt at analysis time)**:
+  - checkpoint analyzed: `runs/03-04_201607/checkpoints/checkpoint_step_152500.pt`.
+  - actor layer stats (selected):
+    - `actor.mlp.0.weight`: stable_rank `13.03`, cond `8.6e+00`
+    - `actor.mlp.2.weight`: stable_rank `22.97`, cond `1.2e+03`
+    - `actor.mlp.4.weight`: stable_rank `3.68`, cond `1.6e+00`
+  - critic layer stats (selected):
+    - `critic.mlp.0.weight`: stable_rank `6.89`, cond `1.7e+01`
+    - `critic.mlp.2.weight`: stable_rank `7.34`, cond `3.9e+03`
+    - `critic.mlp.4.weight`: **stable_rank `1.14`**, **cond `2.5e+07`** (very ill-conditioned / near rank-1 output geometry)
+  - actor random-input entropy sanity: mean `~1.65` (6-action max is `log(6)=1.79`), suggesting actor head itself is not fully degenerate at initialization-level probing.
+- **Interpretation**:
+  - strongest current suspect remains critic/value-target shaping (replay + dreamed value path), with actor collapse as downstream exploitation of biased value geometry.
+
+### 03-04-26 Visualization Tooling Upgrade (Dream Snippets)
+- **Change**:
+  - `inspect`/`dreamer-viz` now export multiple imagined dream clips sampled across the same rollout episode timeline.
+  - new outputs include files like:
+    - `episode_00_dream_t0000.mp4`
+    - `episode_00_dream_t0075.mp4`
+    - `episode_00_dream_t0150.mp4`
+    - `episode_00_dream_t0225.mp4`
+- **Reason**:
+  - compare imagined control trajectories at several in-episode contexts instead of a single dream clip.
+  - helps distinguish "WM can reconstruct" from "critic/actor assigns useful control value." 
   - `points_against_per_game`, `point_diff_per_game`, `win_rate`, argmax top-1 action occupancy.
 - **Launch correction**:
   - initial launch used a stale checkpoint path under `runs/02-17_195655/...` and exited.
@@ -974,3 +1008,48 @@ The 4:1 ratio successfully keeps WM ahead of AC, preventing the "WM exploitation
   - `points_for_per_game` at matched env-frame checkpoints.
 - **Secondary metrics**:
   - `point_diff_per_game`, `win_rate`, argmax top-1 action occupancy, `train/throughput` stability.
+
+### 02-28-26 Resume Note: 15k Checkpoint Compatibility
+- **What happened**:
+  - resume from `runs/02-28_065446/checkpoints/checkpoint_step_15000.pt` initially failed with a world-model tensor shape mismatch (`262` vs `1024`).
+- **Cause**:
+  - commit `a559e55` (`fix(gru): add per-input Linear→RMSNorm→SiLU preprocessing`) changes RSSM GRU input dimensionality and is not checkpoint-compatible with this 15k run family.
+- **Action taken for this resumed run**:
+  - resumed training was relaunched after restoring `src/dreamer/models/world_model.py` to the pre-`a559e55` compatible version.
+  - this run therefore **does not include** the `a559e55` architecture diff.
+- **Active resumed run**:
+  - checkpoint source: `runs/02-28_065446/checkpoints/checkpoint_step_15000.pt`
+  - output dir: `runs/02-28_174930`
+  - log: `runs/resume_02-28_065446_from_15k.log`
+  - MLflow run ID: `149f5176893241f087a946d67f63d128`
+
+### 03-04-26 Single-Process Interleaving + Pong Collapse Diagnosis
+- **Architecture change (implemented)**:
+  - commit `20fecb8`: add single-process collect+train interleaving path in trainer/replay code (no collector model-sync queue in this mode).
+  - expected benefit: remove multiprocess sync bottleneck and keep policy inference + training in one process.
+- **Throughput result (resume from 5k)**:
+  - checkpoint: `runs/03-04_065939/checkpoints/checkpoint_step_5000.pt`
+  - run: `runs/03-04_185651` (MLflow `92cdddf7fc484be4a599e3ea5d1e780f`)
+  - observed `train.updates_total=5100`, `train.throughput≈0.74` updates/s (substantially higher than prior ~0.1 updates/s steady-state runs).
+- **Important metric interpretation**:
+  - `train/throughput` is **updates/sec**, not env FPS.
+  - low throughput can be replay-ratio-gated; effective ceiling depends on env frame generation speed and denominator `batch_size * effective_seq * action_repeat`.
+- **Policy failure pattern (current key finding)**:
+  - world-model recon/dream videos look qualitatively plausible, but policy collapses to near-single action ("press up" behavior).
+  - metric pattern reported during collapse window:
+    - `critic_replay_ema_reg ~ 0.6` (spiky)
+    - `loss.critic.total ~ 1.3`
+    - `loss.critic.replay ~ 0.6`
+    - `dream critic value ~ 3` (with unstable scale behavior)
+    - `loss.wm.total ~ 1.4`
+    - `wm.reward_head.loss ~ 0.04`
+    - `wm.continue_head.loss ~ 0`
+    - `wm.rssm.kl_*_raw ~ 0.5` and spiky
+  - interpretation: strongest suspicion is **critic/advantage target quality**, not pure WM perception failure.
+- **Visualization tooling update (local, not yet committed at this note)**:
+  - `dreamer-viz`/`inspect` now export multiple dream snippets sampled across the same episode timeline:
+    - files like `episode_00_dream_t0000.mp4`, `episode_00_dream_t0075.mp4`, etc.
+  - this is useful to compare imagined control trajectories vs real rollout behavior at several in-episode contexts.
+- **Next debug check (high priority)**:
+  - add counterfactual action-value probe at fixed latent states (evaluate critic-implied preference for each discrete action from same state).
+  - goal: confirm whether critic systematically over-ranks one action independent of ball/paddle context.

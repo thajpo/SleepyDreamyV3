@@ -9,7 +9,7 @@ import torchvision
 
 class MLflowLogger:
     """
-    MLflow logger that provides an interface similar to TensorBoard SummaryWriter.
+    MLflow logger for logging metrics and artifacts.
 
     Handles:
     - Scalar metric logging with key conversion (/ → .)
@@ -52,10 +52,6 @@ class MLflowLogger:
         converted = {self._convert_key(k): v for k, v in metrics.items()}
         mlflow.log_metrics(converted, step=step)
 
-    def add_scalar(self, tag: str, scalar_value: float, global_step: int) -> None:
-        """TensorBoard-compatible scalar logging."""
-        self.log_scalar(tag, scalar_value, global_step)
-
     def log_image(self, key: str, tensor: torch.Tensor, step: int) -> None:
         """
         Log an image tensor as an artifact.
@@ -79,20 +75,6 @@ class MLflowLogger:
 
         # Log as artifact
         mlflow.log_artifact(filepath, artifact_path="images")
-
-    def add_image(self, tag: str, img_tensor: torch.Tensor, global_step: int) -> None:
-        """TensorBoard-compatible image logging."""
-        self.log_image(tag, img_tensor, global_step)
-
-    def add_images(self, tag: str, img_tensor: torch.Tensor, global_step: int) -> None:
-        """TensorBoard-compatible batch image logging."""
-        # For batch images, create a grid
-        if img_tensor.dim() == 4:
-            # (N, C, H, W) -> grid
-            grid = torchvision.utils.make_grid(img_tensor, nrow=int(img_tensor.shape[0] ** 0.5))
-            self.log_image(tag, grid, global_step)
-        else:
-            self.log_image(tag, img_tensor, global_step)
 
     def log_video(self, key: str, tensor: torch.Tensor, step: int, fps: int = 4) -> None:
         """
@@ -132,20 +114,6 @@ class MLflowLogger:
         # Log as artifact
         mlflow.log_artifact(filepath, artifact_path="videos")
 
-    def add_video(
-        self, tag: str, vid_tensor: torch.Tensor, global_step: int, fps: int = 4
-    ) -> None:
-        """TensorBoard-compatible video logging."""
-        self.log_video(tag, vid_tensor, global_step, fps=fps)
-
     def log_artifact(self, path: str, artifact_path: str | None = None) -> None:
         """Log a file as an artifact."""
         mlflow.log_artifact(path, artifact_path=artifact_path)
-
-    def flush(self) -> None:
-        """No-op for MLflow (metrics are logged immediately)."""
-        pass
-
-    def close(self) -> None:
-        """No-op - run lifecycle managed in train.py."""
-        pass

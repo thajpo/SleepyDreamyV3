@@ -1,5 +1,0 @@
-# @package _global_
-# Run B: No surprise gating, seq_len=32
-train:
-  surprise_scale_ac_lr: false
-  sequence_length: 32
