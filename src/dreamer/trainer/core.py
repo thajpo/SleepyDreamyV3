@@ -1,32 +1,25 @@
 import math
 import copy
 import json
-import random
 from dataclasses import asdict
 from typing import NamedTuple, Optional
-import numpy as np
 import torch
-import torch.distributions as dist
 import torch.nn.functional as F
 from queue import Full
 import mlflow
 import os
 import time
 
+from .logging import create_step_metrics, log_step_metrics, log_progress
+from .forward import dreamer_step
 from ..runtime.replay_buffer import EpisodeReplayBuffer
 from ..models import (
     symlog,
     symexp,
-    unimix_logits,
     resize_pixels_to_target,
-    twohot_encode,
     initialize_actor,
     initialize_critic,
     initialize_world_model,
-    compute_wm_loss,
-    compute_actor_critic_losses,
-    dream_sequence,
-    calculate_lambda_returns,
     LaProp,
     adaptive_gradient_clipping,
 )
@@ -48,6 +41,13 @@ class EnvData(NamedTuple):
 
 
 class WorldModelTrainer:
+    """Orchestrates DreamerV3 training: data loading, forward pass, optimization, logging.
+
+    Owns all models (encoder, world model, actor, critic), optimizers,
+    the replay buffer, and the MLflow logger. The actual algorithm lives
+    in forward.dreamer_step(); this class handles the outer loop.
+    """
+
     def __init__(
         self,
         config,
@@ -59,20 +59,19 @@ class WorldModelTrainer:
         dry_run=False,
         device="cpu",
     ):
+        # Passed in args
         self.config = config  # Store config for use in methods
         self.dry_run = dry_run
         self.device = torch.device(device)
-
         self.use_pixels = config.use_pixels
-        self.n_dream_steps = config.num_dream_steps
-        self.gamma = config.gamma
-        self.lam = config.lam
-        self.actor_entropy_coef = config.actor_entropy_coef
+
+        # EMA For Actor Critic
         self.S = 0.0
         self.ret_lo = None
         self.ret_hi = None
         self.retnorm_rate = 0.01
 
+        # Model Init
         self.actor = initialize_actor(self.device, config)
         self.critic = initialize_critic(self.device, config)
         self.encoder, self.world_model = initialize_world_model(
@@ -91,8 +90,7 @@ class WorldModelTrainer:
         )
         self.B = symexp(beta_range)
 
-        self.compile_models = config.compile_models
-        if self.compile_models and hasattr(torch, "compile"):
+        if config.compile_models and hasattr(torch, "compile"):
             try:
                 self.encoder = torch.compile(self.encoder)
                 self.world_model = torch.compile(self.world_model)
@@ -129,24 +127,9 @@ class WorldModelTrainer:
         for param in self.critic_ema.parameters():
             param.requires_grad = False
 
-        self.critic_ema_decay = config.critic_ema_decay
-        self.critic_ema_regularizer = config.critic_ema_regularizer
-        self.critic_replay_scale = config.critic_replay_scale
-
-        self.max_train_steps = config.max_train_steps
         self.train_step = 0
         self.data_queue = data_queue
         self.model_queue = model_queue
-        self.d_hidden = config.d_hidden
-        self.num_latents = config.num_latents  # L
-        self.num_classes = config.d_hidden // 16  # K
-        self.n_actions = config.n_actions
-        self.steps_per_weight_sync = config.steps_per_weight_sync
-        self.batch_size = config.batch_size
-        self.sequence_length = config.sequence_length
-        self.replay_ratio = config.replay_ratio
-        self.action_repeat = config.action_repeat
-        self.profile_enabled = config.profile
 
         # Replay buffer: background thread drains queue, sample() returns instantly
         self.replay_buffer = EpisodeReplayBuffer(
@@ -155,6 +138,8 @@ class WorldModelTrainer:
             min_episodes=config.min_buffer_episodes,
             sequence_length=config.sequence_length,
         )
+
+        self.batch_size = config.batch_size  # needed by get_data_from_buffer
         self.replay_buffer.start()
         print(f"Replay buffer started (max={config.replay_buffer_size} episodes)")
 
@@ -186,32 +171,12 @@ class WorldModelTrainer:
             # Lean mode still needs responsive MLflow curves on slow Atari runs.
             self.log_every = 25
             self.image_log_every = 250
-        # WM:AC update ratio (e.g., 4 = do 4 WM updates per 1 AC update)
-        self.wm_ac_ratio = config.wm_ac_ratio
         self._wm_ac_counter = 0  # Counts WM steps since last AC step
-
-        # Cosine LR decay
-        self.lr_cosine_decay = config.lr_cosine_decay
-        self.lr_cosine_min_factor = config.lr_cosine_min_factor
-
-        # Cosine WM:AC ratio schedule
-        self.wm_ac_ratio_cosine = config.wm_ac_ratio_cosine
-        self.wm_ac_ratio_max = config.wm_ac_ratio_max
-        self.wm_ac_ratio_min = config.wm_ac_ratio_min
-        self.wm_ac_ratio_invert = config.wm_ac_ratio_invert
-
-        # Deterministic evaluation
-        self.eval_every = config.eval_every
-        self.eval_episodes = config.eval_episodes
-        self._ac_training_started = False  # Track if we've entered AC training phase
-
-        # Early stopping (0 to disable)
-        self.early_stop_ep_length = getattr(config, "early_stop_ep_length", 0)
+        self._ac_training_started = False
 
         # Checkpointing
         self.checkpoint_dir = os.path.join(log_dir, "checkpoints")
         os.makedirs(self.checkpoint_dir, exist_ok=True)
-        self.checkpoint_interval = config.checkpoint_interval
 
         # Save config snapshot
         config_path = os.path.join(log_dir, "config.json")
@@ -219,24 +184,19 @@ class WorldModelTrainer:
             json.dump(asdict(config), f, indent=2)
 
         # Timing
-        self.step_times = []
         self.train_start_time = time.time()
         self.last_log_time = time.time()
         self.steps_since_log = 0
-        # Resume-aware replay gating baseline.
-        # On fresh runs this stays 0. On resumed runs we seed a baseline so
-        # replay_ratio gating does not stall waiting for impossible new env steps.
         self._resume_env_steps_offset = 0
 
-        # Checkpoint loading
         if checkpoint_path:
             self.load_checkpoint(checkpoint_path)
-            denom = max(1e-8, self.replay_ratio)
+            denom = max(1e-8, config.replay_ratio)
             self._resume_env_steps_offset = int(
                 self.train_step
-                * self.batch_size
-                * self.sequence_length
-                * self.action_repeat
+                * config.batch_size
+                * config.sequence_length
+                * config.action_repeat
                 / denom
             )
 
@@ -293,31 +253,37 @@ class WorldModelTrainer:
         )
 
     def prevent_stale_training(self):
+        """Gate training speed to match environment data collection rate.
+
+        Returns True (and sleeps briefly) if we've trained faster than
+        the replay ratio allows, preventing overfitting to stale data.
+        """
         # Replay ratio gating: wait if we've trained too fast relative to env steps
         env_steps = self.replay_buffer.total_env_steps + self._resume_env_steps_offset
         effective_burn_in = min(
             self.config.replay_burn_in,
-            self.sequence_length - 1,
+            self.config.sequence_length - 1,
         )
-        effective_seq_for_gate = max(1, self.sequence_length - effective_burn_in)
+        effective_seq_for_gate = max(1, self.config.sequence_length - effective_burn_in)
         target_train_steps = int(
             env_steps
-            * self.replay_ratio
-            / (self.batch_size * effective_seq_for_gate * self.action_repeat)
+            * self.config.replay_ratio
+            / (self.batch_size * effective_seq_for_gate * self.config.action_repeat)
         )
         if self.train_step >= target_train_steps and env_steps > 0:
             time.sleep(0.01)  # Brief wait for more data
             return True
         return False
 
-    def zeroize_state(self):
+    def zeroize_state(self, actual_batch_size, h_dim):
+        """Reset RSSM hidden state and zero all optimizer gradients for a new batch."""
         self.world_model.h_prev = torch.zeros(
             actual_batch_size, h_dim, device=self.device
         )
         self.world_model.z_prev = torch.zeros(
             actual_batch_size,
-            self.num_latents,
-            self.num_classes,
+            self.config.num_latents,
+            self.config.d_hidden // 16,
             device=self.device,
         )
 
@@ -333,11 +299,12 @@ class WorldModelTrainer:
         return total_wm_loss, total_actor_loss, total_critic_loss
 
     def train_models(self):
+        """Main training loop: sample → forward → backward → log → eval → checkpoint."""
         # Push current weights immediately so collectors do not spend startup
         # episodes in random-action mode when resuming from checkpoint.
         self.send_models_to_collector(self.train_step)
 
-        while self.train_step < self.max_train_steps:
+        while self.train_step < self.config.max_train_steps:
             if self.prevent_stale_training():
                 continue
             if not self.replay_buffer.is_ready:
@@ -350,41 +317,23 @@ class WorldModelTrainer:
 
             # Data loading
             batch = self.get_data_from_buffer()
+            B, T = batch.states.shape[:2]
 
             # Skip if no data was retrieved
-            if batch is None or batch.states.shape[1] == 0:
+            if batch is None or T == 0:
                 print(f"Trainer: No data was retrieved at step {self.train_step}.")
                 continue
 
             # Reset hidden states per trajectory - match actual input batch size
-            actual_batch_size = batch.states.shape[0]
             h_dim = self.world_model.h_prev.shape[1]
 
             # Reset hidden states per trajectory - match actual input batch size
-            total_wm_loss, total_actor_loss, total_critic_loss = self.zeroize_state()
+            total_wm_loss, total_actor_loss, total_critic_loss = self.zeroize_state(
+                B, h_dim
+            )
 
-            wm_loss_components = {
-                "prediction_pixel": torch.tensor(0.0, device=self.device),
-                "prediction_vector": torch.tensor(0.0, device=self.device),
-                "prediction_reward": torch.tensor(0.0, device=self.device),
-                "prediction_continue": torch.tensor(0.0, device=self.device),
-                "dynamics": torch.tensor(0.0, device=self.device),
-                "representation": torch.tensor(0.0, device=self.device),
-                "kl_dynamics_raw": torch.tensor(0.0, device=self.device),
-                "kl_representation_raw": torch.tensor(0.0, device=self.device),
-            }
-            # Accumulate dreamed trajectory stats for logging
-            dreamed_rewards_list = []
-            dreamed_values_list = []
-            actor_entropy_list = []  # Track actor entropy for monitoring
-            # Replay grounding accumulators (posterior states + value annotations)
-            replay_posterior_states = []
-            replay_value_annotations = []
-            replay_loss = None
-            replay_ema_reg = None
-
-            log_images = self.train_step % self.image_log_every == 0
-            viz_data = {} if log_images else None
+            do_log_images = self.train_step % self.image_log_every == 0
+            metrics = create_step_metrics(self.device, do_log_images)
 
             # Initialize loss variables in case loop doesn't execute
             t0 = time.perf_counter()
@@ -392,10 +341,10 @@ class WorldModelTrainer:
             total_wm_loss = None
             total_actor_loss = None
             total_critic_loss = None
-            B, T = batch.states.shape[:2]
-            burn_in_steps = min(self.config.replay_burn_in, T - 1)
-            train_start_t = burn_in_steps
+
+            train_start_t = min(self.config.replay_burn_in, T - 1)
             effective_train_steps = T - train_start_t
+
             states_flat = batch.states.view(
                 B * T, batch.states.shape[-1]
             )  # (B*T, n_obs)
@@ -414,289 +363,35 @@ class WorldModelTrainer:
             # Decide AC update once per batch (ratio)
             skip_ac_batch = self.should_skip_ac_update()
 
-            for t_step in range(T):
-                if self.use_pixels and batch.pixels is not None:
-                    obs_t = {
-                        "pixels": batch.pixels[:, t_step],
-                        "state": batch.states[:, t_step],
-                    }
-                else:
-                    obs_t = {"state": batch.states[:, t_step]}
-                action_t = batch.actions[:, t_step]
-                reward_t = batch.rewards[:, t_step]
-                is_terminal_t = batch.is_terminal[:, t_step]
-                sample_mask = batch.mask[:, t_step]
+            # Forward pass: RSSM rollout + dreaming + replay grounding
+            result = dreamer_step(
+                encoder=self.encoder,
+                world_model=self.world_model,
+                actor=self.actor,
+                critic=self.critic,
+                critic_ema=self.critic_ema,
+                batch=batch,
+                metrics=metrics,
+                all_tokens=all_tokens,
+                B=B,
+                T=T,
+                train_start_t=train_start_t,
+                skip_ac=skip_ac_batch,
+                bins=self.B,
+                return_scale=self.S,
+                config=self.config,
+                device=self.device,
+                use_pixels=self.use_pixels,
+                do_log_images=do_log_images,
+            )
+            total_wm_loss = result.total_wm_loss
+            total_actor_loss = result.total_actor_loss
+            total_critic_loss = result.total_critic_loss
+            metrics = result.metrics
 
-                tokens_t = all_tokens[:, t_step]
-
-                (
-                    obs_reconstruction,
-                    reward_dist,
-                    continue_logits,
-                    h_z_joined,
-                    posterior_z_sample,
-                    prior_logits,
-                    posterior_logits,
-                ) = self.world_model(tokens_t, action_t)
-
-                # Updating loss of encoder and world model
-                wm_loss, wm_loss_dict = compute_wm_loss(
-                    obs_reconstruction,
-                    obs_t,
-                    reward_dist,
-                    reward_t,
-                    is_terminal_t,
-                    continue_logits,
-                    posterior_logits,
-                    prior_logits,
-                    self.B,
-                    self.config,
-                    self.device,
-                    use_pixels=self.use_pixels,
-                    sample_mask=sample_mask,
-                )
-
-                # Store visualization data (only on log_images step, at the end of the batch)
-                if log_images and t_step == T - 1:
-                    if self.use_pixels and "pixels" in obs_t:
-                        viz_data["obs_pixels"] = obs_t["pixels"]
-                        viz_data["obs_pixels_original"] = batch.pixels_original[
-                            :, t_step
-                        ]
-                        viz_data["reconstruction_pixels"] = obs_reconstruction.get(
-                            "pixels"
-                        )
-                    viz_data["posterior_probs"] = F.softmax(
-                        posterior_logits, dim=-1
-                    ).detach()
-
-                # Initialize step losses for AC (WM is computed above)
-                actor_loss = torch.tensor(0.0, device=self.device)
-                critic_loss = torch.tensor(0.0, device=self.device)
-
-                # --- Dream Sequence for Actor-Critic ---
-                # Skip AC for this timestep if batch-level skip is active or no valid samples.
-                if t_step < train_start_t:
-                    continue
-
-                # Collect posterior states for replay grounding on the same
-                # post-burn-in window as replay value annotations.
-                if self.critic_replay_scale > 0.0:
-                    replay_posterior_states.append(h_z_joined.detach())
-
-                # Accumulate individual WM components on the same optimization
-                # window used for total_wm_loss (post-burn-in timesteps only).
-                for key in wm_loss_components:
-                    wm_loss_components[key] = (
-                        wm_loss_components[key] + wm_loss_dict[key].detach()
-                    )
-
-                valid_ac_step = sample_mask.sum() > 0
-                if not skip_ac_batch and valid_ac_step:
-                    h_prev_backup = self.world_model.h_prev.clone()
-                    (
-                        dreamed_recurrent_states,
-                        dreamed_actions_logits,
-                        dreamed_actions_sampled,
-                    ) = dream_sequence(
-                        h_z_joined,
-                        self.world_model.z_embedding(
-                            posterior_z_sample.view(actual_batch_size, -1)
-                        ),
-                        self.n_dream_steps,
-                        self.actor,
-                        self.world_model,
-                        self.n_actions,
-                        self.d_hidden,
-                    )
-                    self.world_model.h_prev = h_prev_backup
-
-                    # dreamed_recurrent_states includes initial state at index 0.
-                    # Reward/continue predictions correspond to transitions and are
-                    # therefore taken from post-action states [1:].
-                    dreamed_rewards_logits = self.world_model.reward_predictor(
-                        dreamed_recurrent_states[1:]
-                    ).detach()
-                    dreamed_rewards_probs = F.softmax(dreamed_rewards_logits, dim=-1)
-                    dreamed_rewards = torch.sum(
-                        dreamed_rewards_probs * self.B, dim=-1
-                    ).detach()
-                    dreamed_rewards_list.append(dreamed_rewards.detach().cpu())
-
-                    dreamed_continues = (
-                        self.world_model.continue_predictor(
-                            dreamed_recurrent_states[1:]
-                        )
-                        .detach()
-                        .squeeze(-1)
-                    )  # Remove trailing (1,) dimension
-
-                    dreamed_values_logits = self.critic(dreamed_recurrent_states)
-                    with torch.no_grad():
-                        dreamed_values_logits_ema = self.critic_ema(
-                            dreamed_recurrent_states
-                        )
-                    dreamed_values_probs = F.softmax(dreamed_values_logits, dim=-1)
-                    dreamed_values = torch.sum(dreamed_values_probs * self.B, dim=-1)
-                    dreamed_values_list.append(dreamed_values.detach().cpu())
-
-                    lambda_returns = calculate_lambda_returns(
-                        dreamed_rewards,
-                        dreamed_values,
-                        dreamed_continues,
-                        self.gamma,
-                        self.lam,
-                        self.n_dream_steps,
-                    )
-
-                    # Store per-timestep imagination return annotation for replay loss
-                    if self.critic_replay_scale > 0.0:
-                        replay_value_annotations.append(lambda_returns[0].detach())
-
-                    self.update_return_scale(lambda_returns)
-
-                    (
-                        actor_loss,
-                        critic_loss,
-                        entropy,
-                    ) = compute_actor_critic_losses(
-                        dreamed_values_logits,
-                        dreamed_values,
-                        lambda_returns,
-                        dreamed_continues,
-                        dreamed_actions_logits,
-                        dreamed_actions_sampled,
-                        self.B,
-                        self.S,
-                        self.gamma,
-                        actor_entropy_coef=self.actor_entropy_coef,
-                        dreamed_values_logits_ema=dreamed_values_logits_ema,
-                        critic_ema_coef=self.critic_ema_regularizer,
-                        sample_mask=sample_mask,
-                    )
-                    actor_entropy_list.append(entropy.detach().cpu())
-                else:
-                    actor_loss = torch.tensor(0.0, device=self.device)
-                    critic_loss = torch.tensor(0.0, device=self.device)
-                    # If this timestep is fully padded, append zero annotation to keep length
-                    if self.critic_replay_scale > 0.0 and not skip_ac_batch:
-                        replay_value_annotations.append(
-                            torch.zeros_like(sample_mask, device=self.device)
-                        )
-
-                    # Decode dreamed states for visualization
-                    if log_images and t_step == T - 1 and self.use_pixels:
-                        with torch.no_grad():
-                            try:
-                                # dreamed_recurrent_states: (n_dream_steps, batch, d_hidden)
-                                n_steps, batch_sz = dreamed_recurrent_states.shape[:2]
-                                # Flatten to (n_steps * batch, features) for decoder
-                                states_flat = dreamed_recurrent_states.view(
-                                    n_steps * batch_sz, -1
-                                )
-                                dreamed_obs = self.world_model.decoder(states_flat)
-                                pixels_flat = dreamed_obs.get("pixels")
-                                if pixels_flat is not None:
-                                    # Decoder flattens to (n_steps * batch, C, H, W), reshape back
-                                    C, H, W = pixels_flat.shape[1:]
-                                    viz_data["dreamed_pixels"] = torch.sigmoid(
-                                        pixels_flat.view(n_steps, batch_sz, C, H, W)
-                                    ).detach()
-                            except Exception:
-                                pass
-
-                # Accumulate losses (per-sample masking handled inside loss functions)
-                if total_wm_loss is None:
-                    total_wm_loss = wm_loss
-                    total_actor_loss = actor_loss
-                    total_critic_loss = critic_loss
-                else:
-                    total_wm_loss = total_wm_loss + wm_loss  # type: ignore
-                    total_actor_loss = total_actor_loss + actor_loss  # type: ignore
-                    total_critic_loss = total_critic_loss + critic_loss  # type: ignore
-
-            # --- Replay critic grounding (uses imagination annotations) ---
-            if (
-                self.critic_replay_scale > 0.0
-                and not skip_ac_batch
-                and len(replay_value_annotations) == effective_train_steps
-                and len(replay_posterior_states) == effective_train_steps
-            ):
-                # Stack replay data
-                replay_posterior = torch.stack(
-                    replay_posterior_states, dim=1
-                )  # [B, T, D]
-                replay_annotations = torch.stack(
-                    replay_value_annotations, dim=0
-                )  # [T, B]
-
-                replay_rewards = batch.rewards[:, train_start_t:].transpose(
-                    0, 1
-                )  # [T', B]
-                replay_is_last = batch.is_last[:, train_start_t:].transpose(0, 1)
-                replay_continues = (1.0 - batch.is_terminal.float()).transpose(0, 1)[
-                    train_start_t:
-                ]  # [T', B]
-                # Match Dreamer replay-return semantics: stop credit across episode
-                # boundaries and apply horizon discount in continuation signal.
-                replay_continues = replay_continues * (1.0 - replay_is_last.float())
-                replay_continues = replay_continues * (
-                    1.0 - 1.0 / float(max(1, getattr(self.config, "horizon", 333)))
-                )
-                replay_mask = batch.mask[:, train_start_t:].transpose(0, 1)  # [T', B]
-
-                # Compute replay lambda-returns with annotations (continues are probabilities)
-                replay_lambda_returns = calculate_lambda_returns(
-                    replay_rewards,
-                    replay_rewards,
-                    replay_continues,
-                    self.gamma,
-                    self.lam,
-                    effective_train_steps,
-                    value_annotations=replay_annotations,
-                    continues_are_logits=False,
-                ).transpose(0, 1)  # [B, T]
-
-                # Critic logits on posterior states (gradients to critic only)
-                replay_logits = self.critic(
-                    replay_posterior.detach()
-                )  # [B, T, num_bins]
-                logits_flat = replay_logits.reshape(-1, replay_logits.size(-1))
-                targets_flat = replay_lambda_returns.detach().reshape(-1)
-                mask_flat = replay_mask.reshape(-1).float()
-
-                targets_twohot = twohot_encode(targets_flat, self.B)
-                per_step_ce = -torch.sum(
-                    targets_twohot * F.log_softmax(logits_flat, dim=-1), dim=-1
-                )
-                replay_not_last = (1.0 - replay_is_last.float()).reshape(-1)
-                replay_weight = mask_flat * replay_not_last
-                replay_loss = (per_step_ce * replay_weight).sum() / (
-                    replay_weight.sum() + 1e-8
-                )
-
-                # EMA regularizer for replay pass (distributional)
-                with torch.no_grad():
-                    replay_logits_ema = self.critic_ema(replay_posterior.detach())
-                ema_logits_flat = replay_logits_ema.reshape(
-                    -1, replay_logits_ema.size(-1)
-                )
-                ema_probs = F.softmax(ema_logits_flat, dim=-1)
-                per_step_ema = -torch.sum(
-                    ema_probs * F.log_softmax(logits_flat, dim=-1), dim=-1
-                )
-                replay_ema_reg = (per_step_ema * replay_weight).sum() / (
-                    replay_weight.sum() + 1e-8
-                )
-
-                replay_loss_total = (
-                    replay_loss + self.critic_ema_regularizer * replay_ema_reg
-                )
-                total_critic_loss = (
-                    total_critic_loss + self.critic_replay_scale * replay_loss_total
-                )  # type: ignore
-
-            # End forward, start backward
+            # Update return normalization EMA
+            if result.last_lambda_returns is not None:
+                self.update_return_scale(result.last_lambda_returns)
 
             # Backprop
             assert (
@@ -739,8 +434,8 @@ class WorldModelTrainer:
                     for param, param_ema in zip(
                         self.critic.parameters(), self.critic_ema.parameters()
                     ):
-                        param_ema.data.mul_(self.critic_ema_decay).add_(
-                            param.data, alpha=1 - self.critic_ema_decay
+                        param_ema.data.mul_(self.config.critic_ema_decay).add_(
+                            param.data, alpha=1 - self.config.critic_ema_decay
                         )
 
             # End backward
@@ -749,113 +444,72 @@ class WorldModelTrainer:
             self.train_step += 1
 
             # Log metrics to MLflow
-            sequence_length = effective_train_steps
-            self.log_metrics(
+            log_step_metrics(
+                self.logger,
+                metrics,
                 total_wm_loss,
                 total_actor_loss,
                 total_critic_loss,
-                wm_loss_components,
-                sequence_length,
-                dreamed_rewards_list,
-                dreamed_values_list,
-                actor_entropy_list,
-                replay_loss,
-                replay_ema_reg,
-                viz_data=viz_data,
+                sequence_length=effective_train_steps,
                 step=log_step,
+                config=self.config,
+                has_pixel_obs=self._has_pixel_obs,
+                has_vector_obs=self._has_vector_obs,
+                log_every=self.log_every,
+                image_log_every=self.image_log_every,
+                log_profile=self.log_profile,
+                wm_optimizer=self.wm_optimizer,
+                actor_optimizer=self.actor_optimizer,
+                critic_optimizer=self.critic_optimizer,
+                wm_ac_ratio_cosine=self.config.wm_ac_ratio_cosine,
+                get_current_wm_ac_ratio=self.get_current_wm_ac_ratio,
             )
 
             # Send models to collector periodically
-            if self.train_step % self.steps_per_weight_sync == 0:
+            if self.train_step % self.config.steps_per_weight_sync == 0:
                 self.send_models_to_collector(self.train_step)
 
-            # Periodic logging (every 100 steps)
+            # Periodic progress logging
             self.steps_since_log += 1
             if self.train_step % 100 == 0:
                 elapsed = time.time() - self.last_log_time
-                steps_per_sec = self.steps_since_log / elapsed if elapsed > 0 else 0
-                seq_len = sequence_length if sequence_length > 0 else 1
-                eta_hours = (
-                    (self.max_train_steps - self.train_step) / steps_per_sec / 3600
-                    if steps_per_sec > 0
-                    else 0
+                sps = self.steps_since_log / elapsed if elapsed > 0 else 0
+                log_progress(
+                    self.logger,
+                    step=self.train_step,
+                    max_steps=self.config.max_train_steps,
+                    total_wm_loss=total_wm_loss,
+                    total_actor_loss=total_actor_loss,
+                    total_critic_loss=total_critic_loss,
+                    seq_len=effective_train_steps,
+                    steps_per_sec=sps,
+                    env_steps=self.replay_buffer.total_env_steps + self._resume_env_steps_offset,
+                    episodes_added=self.replay_buffer.total_episodes_added,
+                    avg_ep_len=self.replay_buffer.recent_avg_episode_length,
+                    elapsed_total=time.time() - self.train_start_time,
                 )
-
-                print(
-                    f"Step {self.train_step}/{self.max_train_steps} | "
-                    f"{steps_per_sec:.2f} steps/s | ETA: {eta_hours:.1f}h | "
-                    f"WM: {total_wm_loss.item() / seq_len:.4f} | "
-                    f"Actor: {total_actor_loss.item() / seq_len:.4f} | "
-                    f"Critic: {total_critic_loss.item() / seq_len:.4f}"
-                )
-
-                self.logger.add_scalar(
-                    "train/throughput", steps_per_sec, self.train_step
-                )
-                # Universal progress axes (environment and wall-clock)
-                self.logger.add_scalar(
-                    "train/updates_total", float(self.train_step), self.train_step
-                )
-                self.logger.add_scalar(
-                    "env/frames_total",
-                    float(
-                        self.replay_buffer.total_env_steps
-                        + self._resume_env_steps_offset
-                    ),
-                    self.train_step,
-                )
-                env_frames_total = float(
-                    self.replay_buffer.total_env_steps + self._resume_env_steps_offset
-                )
-                self.logger.add_scalar(
-                    "train/updates_per_env_step",
-                    float(self.train_step) / max(1.0, env_frames_total),
-                    self.train_step,
-                )
-                self.logger.add_scalar(
-                    "env/episodes_total",
-                    float(self.replay_buffer.total_episodes_added),
-                    self.train_step,
-                )
-                self.logger.add_scalar(
-                    "time/elapsed_sec",
-                    time.time() - self.train_start_time,
-                    self.train_step,
-                )
-
-                # Log avg episode length for convergence context (not solved metric)
-                avg_ep_len = self.replay_buffer.recent_avg_episode_length
-                if avg_ep_len > 0:
-                    self.logger.add_scalar(
-                        "env/episode_length", avg_ep_len, self.train_step
-                    )
                 self.last_log_time = time.time()
                 self.steps_since_log = 0
 
             if (
-                self.eval_every > 0
-                and self.eval_episodes > 0
+                self.config.eval_every > 0
+                and self.config.eval_episodes > 0
                 and self.train_step > 0
-                and self.train_step % self.eval_every == 0
+                and self.train_step % self.config.eval_every == 0
             ):
                 eval_avg_len = self.evaluate_policy(
-                    self.eval_episodes, step=self.train_step
+                    self.config.eval_episodes, step=self.train_step
                 )
-                # Early stopping based on eval (deterministic policy)
-                if (
-                    self.early_stop_ep_length > 0
-                    and eval_avg_len >= self.early_stop_ep_length
-                ):
-                    print(
-                        f"SOLVED! eval_avg_len={eval_avg_len:.1f} >= {self.early_stop_ep_length}"
-                    )
+                early_stop = getattr(self.config, "early_stop_ep_length", 0)
+                if early_stop > 0 and eval_avg_len >= early_stop:
+                    print(f"SOLVED! eval_avg_len={eval_avg_len:.1f} >= {early_stop}")
                     break
 
             # Checkpoint every N steps (skip in dry_run)
             if (
                 not self.dry_run
                 and self.train_step > 0
-                and self.train_step % self.checkpoint_interval == 0
+                and self.train_step % self.config.checkpoint_interval == 0
             ):
                 self.save_checkpoint()
 
@@ -880,6 +534,7 @@ class WorldModelTrainer:
             return False
 
     def update_return_scale(self, lambda_returns, decay=0.99):
+        """Update percentile-based return normalization EMA (DreamerV3 Appendix B)."""
         flat = lambda_returns.detach().reshape(-1)
         lo_batch = torch.quantile(flat, 0.05).item()
         hi_batch = torch.quantile(flat, 0.95).item()
@@ -896,27 +551,27 @@ class WorldModelTrainer:
 
     def get_cosine_schedule(self, max_val: float, min_val: float) -> float:
         """Cosine schedule from max_val to min_val over training."""
-        progress = min(1.0, self.train_step / max(1, self.max_train_steps))
+        progress = min(1.0, self.train_step / max(1, self.config.max_train_steps))
         return min_val + 0.5 * (max_val - min_val) * (1 + math.cos(math.pi * progress))
 
     def get_current_wm_ac_ratio(self) -> int:
         """Get current WM:AC ratio (possibly scheduled)."""
-        if not self.wm_ac_ratio_cosine:
-            return self.wm_ac_ratio
+        if not self.config.wm_ac_ratio_cosine:
+            return self.config.wm_ac_ratio
         # Normal: max→min (8→2), Inverted: min→max (2→8)
-        if self.wm_ac_ratio_invert:
+        if self.config.wm_ac_ratio_invert:
             ratio = self.get_cosine_schedule(
-                float(self.wm_ac_ratio_min), float(self.wm_ac_ratio_max)
+                float(self.config.wm_ac_ratio_min), float(self.config.wm_ac_ratio_max)
             )
         else:
             ratio = self.get_cosine_schedule(
-                float(self.wm_ac_ratio_max), float(self.wm_ac_ratio_min)
+                float(self.config.wm_ac_ratio_max), float(self.config.wm_ac_ratio_min)
             )
         return max(1, round(ratio))
 
     def apply_lr_schedule(self):
         """Apply cosine LR decay to all optimizers."""
-        scale = self.get_cosine_schedule(1.0, self.lr_cosine_min_factor)
+        scale = self.get_cosine_schedule(1.0, self.config.lr_cosine_min_factor)
         for pg in self.wm_optimizer.param_groups:
             pg["lr"] = self.config.wm_lr * scale
         for pg in self.actor_optimizer.param_groups:
@@ -962,9 +617,9 @@ class WorldModelTrainer:
                     self.config.d_hidden * self.config.rnn_n_blocks,
                     device=self.device,
                 )
-                action_onehot = torch.zeros(1, self.n_actions, device=self.device)
+                action_onehot = torch.zeros(1, self.config.n_actions, device=self.device)
                 z_prev = torch.zeros(
-                    1, self.num_latents, self.num_classes, device=self.device
+                    1, self.config.num_latents, self.config.d_hidden // 16, device=self.device
                 )
                 z_prev_embed = self.world_model.z_embedding(z_prev.view(1, -1))
 
@@ -1008,7 +663,7 @@ class WorldModelTrainer:
                     posterior_logits = self.world_model.compute_posterior(h, tokens)
                     z_indices = posterior_logits.argmax(dim=-1)
                     z_onehot = F.one_hot(
-                        z_indices, num_classes=self.d_hidden // 16
+                        z_indices, num_classes=self.config.d_hidden // 16
                     ).float()
                     z_sample = z_onehot
 
@@ -1016,7 +671,7 @@ class WorldModelTrainer:
                     action_logits = self.actor(actor_input)
                     action = action_logits.argmax(dim=-1)
                     action_onehot = F.one_hot(
-                        action, num_classes=self.n_actions
+                        action, num_classes=self.config.n_actions
                     ).float()
                     z_prev_embed = self.world_model.z_embedding(z_sample.view(1, -1))
 
@@ -1143,227 +798,9 @@ class WorldModelTrainer:
         self.train_step = checkpoint.get("step", 0)
         print(f"Resumed checkpoint from {checkpoint_path} at step {self.train_step}")
 
-    def log_metrics(
-        self,
-        total_wm_loss,
-        total_actor_loss,
-        total_critic_loss,
-        wm_loss_components,
-        sequence_length,
-        dreamed_rewards_list,
-        dreamed_values_list,
-        actor_entropy_list,
-        replay_loss=None,
-        replay_ema_reg=None,
-        viz_data=None,
-        step=None,
-    ):
-        """Log metrics to MLflow."""
-        if step is None:
-            step = self.train_step
-        log_scalars = step % self.log_every == 0
-        log_images = step % self.image_log_every == 0
-        if not (log_scalars or log_images):
-            return
-
-        if (
-            total_wm_loss is None
-            or total_actor_loss is None
-            or total_critic_loss is None
-        ):
-            return
-
-        if log_scalars:
-            is_full_profile = self.log_profile == "full"
-            metrics = {}
-
-            if sequence_length > 0:
-                norm = 1.0 / sequence_length
-                wm_components_cpu = {k: v.item() for k, v in wm_loss_components.items()}
-
-                metrics.update(
-                    {
-                        "loss/wm/total": total_wm_loss.item() * norm,
-                        "loss/actor/total": total_actor_loss.item() * norm,
-                        "loss/critic/total": total_critic_loss.item() * norm,
-                    }
-                )
-
-                if replay_loss is not None:
-                    metrics["loss/critic/replay"] = float(replay_loss.item())
-                if replay_ema_reg is not None:
-                    metrics["loss/critic/replay_ema_reg"] = float(replay_ema_reg.item())
-
-                pixel = wm_components_cpu["prediction_pixel"] * norm
-                state = wm_components_cpu["prediction_vector"] * norm
-                reward = wm_components_cpu["prediction_reward"] * norm
-                cont = wm_components_cpu["prediction_continue"] * norm
-                dyn = wm_components_cpu["dynamics"] * norm
-                rep = wm_components_cpu["representation"] * norm
-
-                if self._has_pixel_obs:
-                    metrics["wm/decoder/pixel_loss"] = pixel
-                if self._has_vector_obs:
-                    metrics["wm/decoder/state_loss"] = state
-
-                metrics.update(
-                    {
-                        "wm/reward_head/loss": reward,
-                        "wm/continue_head/loss": cont,
-                        "wm/rssm/kl_dynamics": dyn,
-                        "wm/rssm/kl_representation": rep,
-                    }
-                )
-
-                if is_full_profile:
-                    metrics.update(
-                        {
-                            "wm/scaled/prediction": self.config.beta_pred
-                            * (pixel + state + reward + cont),
-                            "wm/scaled/dynamics": self.config.beta_dyn * dyn,
-                            "wm/scaled/representation": self.config.beta_rep * rep,
-                            "wm/rssm/kl_dynamics_raw": wm_components_cpu[
-                                "kl_dynamics_raw"
-                            ]
-                            * norm,
-                            "wm/rssm/kl_representation_raw": wm_components_cpu[
-                                "kl_representation_raw"
-                            ]
-                            * norm,
-                        }
-                    )
-            else:
-                metrics.update(
-                    {
-                        "loss/wm/total": total_wm_loss.item(),
-                        "loss/actor/total": total_actor_loss.item(),
-                        "loss/critic/total": total_critic_loss.item(),
-                    }
-                )
-
-            if dreamed_rewards_list:
-                all_dreamed_rewards = torch.cat(dreamed_rewards_list, dim=0)
-                reward_stats = torch.stack(
-                    [
-                        all_dreamed_rewards.mean(),
-                        all_dreamed_rewards.std(),
-                        all_dreamed_rewards.min(),
-                        all_dreamed_rewards.max(),
-                    ]
-                ).cpu()
-                metrics.update(
-                    {
-                        "dream/wm_reward/mean": reward_stats[0].item(),
-                        "dream/wm_reward/std": reward_stats[1].item(),
-                    }
-                )
-                if is_full_profile:
-                    metrics.update(
-                        {
-                            "dream/wm_reward/min": reward_stats[2].item(),
-                            "dream/wm_reward/max": reward_stats[3].item(),
-                        }
-                    )
-
-            if dreamed_values_list:
-                all_dreamed_values = torch.cat(dreamed_values_list, dim=0)
-                value_stats = torch.stack(
-                    [all_dreamed_values.mean(), all_dreamed_values.std()]
-                ).cpu()
-                metrics.update(
-                    {
-                        "dream/critic_value/mean": value_stats[0].item(),
-                        "dream/critic_value/std": value_stats[1].item(),
-                    }
-                )
-                symlog_values = symlog(all_dreamed_values)
-                symlog_stats = torch.stack(
-                    [symlog_values.mean(), symlog_values.std()]
-                ).cpu()
-                metrics.update(
-                    {
-                        "dream/critic_value_symlog/mean": symlog_stats[0].item(),
-                        "dream/critic_value_symlog/std": symlog_stats[1].item(),
-                    }
-                )
-
-            if actor_entropy_list:
-                all_entropy = torch.stack(actor_entropy_list)
-                entropy_stats = torch.stack(
-                    [all_entropy.mean(), all_entropy.std()]
-                ).cpu()
-                metrics["actor/entropy/mean"] = entropy_stats[0].item()
-                if is_full_profile:
-                    metrics["actor/entropy/std"] = entropy_stats[1].item()
-
-            if is_full_profile:
-                metrics.update(
-                    {
-                        "train/lr/wm": self.wm_optimizer.param_groups[0]["lr"],
-                        "train/lr/actor": self.actor_optimizer.param_groups[0]["lr"],
-                        "train/lr/critic": self.critic_optimizer.param_groups[0]["lr"],
-                    }
-                )
-                if self.wm_ac_ratio_cosine:
-                    metrics["train/wm_ac_ratio"] = self.get_current_wm_ac_ratio()
-
-            self.logger.log_scalars(metrics, step)
-
-        if log_images and viz_data:
-            last_obs_pixels = viz_data.get("obs_pixels")
-            last_reconstruction_pixels = viz_data.get("reconstruction_pixels")
-            last_posterior_probs = viz_data.get("posterior_probs")
-            last_dreamed_pixels = viz_data.get("dreamed_pixels")
-            last_obs_pixels_original = viz_data.get("obs_pixels_original")
-
-            if last_obs_pixels is not None and last_reconstruction_pixels is not None:
-                actual = (last_obs_pixels[0] / 255.0).clamp(0, 1)
-                recon = torch.sigmoid(last_reconstruction_pixels[0]).clamp(0, 1)
-                if recon.shape != actual.shape:
-                    recon = F.interpolate(
-                        recon.unsqueeze(0),
-                        size=actual.shape[1:],
-                        mode="bilinear",
-                        align_corners=False,
-                    ).squeeze(0)
-
-                comparison = torch.cat([actual, recon], dim=2)
-                self.logger.log_image("viz/decoder/reconstruction", comparison, step)
-
-                error = torch.abs(actual - recon).mean(dim=0, keepdim=True)
-                error_norm = error / (error.max() + 1e-8)
-                error_heatmap = error_norm.repeat(3, 1, 1)
-                self.logger.log_image("viz/decoder/error", error_heatmap, step)
-
-            if last_posterior_probs is not None:
-                latent_probs = last_posterior_probs[0]  # (d_hidden, K)
-                latent_img = latent_probs.unsqueeze(
-                    0
-                )  # (1, d_hidden, K) -> treated as (C, H, W)
-                self.logger.log_image("viz/encoder/latent_posterior", latent_img, step)
-
-            if last_dreamed_pixels is not None and last_obs_pixels is not None:
-                actual = (last_obs_pixels[0] / 255.0).clamp(0, 1)
-                dream_frames = last_dreamed_pixels[:, 0]
-                if dream_frames.shape[2:] != actual.shape[1:]:
-                    dream_frames = F.interpolate(
-                        dream_frames,
-                        size=actual.shape[1:],
-                        mode="bilinear",
-                        align_corners=False,
-                    )
-                video = dream_frames.unsqueeze(0)
-                self.logger.log_video("viz/wm/dream_video", video, step, fps=4)
-
-                n_show = min(5, dream_frames.shape[0])
-                dream_strip = torch.cat([dream_frames[i] for i in range(n_show)], dim=2)
-                self.logger.log_image("viz/wm/dream_strip", dream_strip, step)
-
-            if last_obs_pixels_original is not None:
-                original = (last_obs_pixels_original[0] / 255.0).clamp(0, 1)
-                self.logger.log_image("viz/env/frame", original, step)
 
     def send_models_to_collector(self, step: int):
+        """Push current model weights to the data collection process."""
         if self.model_queue is None:
             return
 
@@ -1389,9 +826,7 @@ class WorldModelTrainer:
                 self.model_queue.get_nowait()
                 cleared += 1
             self.model_queue.put_nowait(models_to_send)
-            print(
-                f"Trainer: Sent models at step {training_step} (cleared {cleared} old)"
-            )
+            print(f"Trainer: Sent models at step {step} (cleared {cleared} old)")
         except Full:
             print("Trainer: Model queue was full. Skipping update.")
         except Exception as e:
@@ -1408,9 +843,10 @@ def train_world_model(
     dry_run=False,
     device="cpu",
 ):
+    """Entry point: construct a WorldModelTrainer and run the training loop."""
     # Set MLflow tracking URI and join existing run in this child process (skip in dry_run)
     if mlflow_run_id and not dry_run:
-        mlruns_dir = os.path.join(os.path.dirname(log_dir), "mlruns")
+        mlruns_dir = os.path.abspath(os.path.join("runs", "mlruns"))
         mlflow.set_tracking_uri(f"file://{os.path.abspath(mlruns_dir)}")
         # Join the existing run (subprocess doesn't inherit active run from parent)
         mlflow.start_run(run_id=mlflow_run_id)

@@ -47,6 +47,10 @@ class MLflowLogger:
         """Log a scalar metric."""
         mlflow.log_metric(self._convert_key(key), value, step=step)
 
+    def add_scalar(self, key: str, value: float, step: int) -> None:
+        """Backward-compatible alias for scalar logging."""
+        self.log_scalar(key, value, step)
+
     def log_scalars(self, metrics: dict, step: int) -> None:
         """Log multiple scalar metrics at once."""
         converted = {self._convert_key(k): v for k, v in metrics.items()}
@@ -76,7 +80,9 @@ class MLflowLogger:
         # Log as artifact
         mlflow.log_artifact(filepath, artifact_path="images")
 
-    def log_video(self, key: str, tensor: torch.Tensor, step: int, fps: int = 4) -> None:
+    def log_video(
+        self, key: str, tensor: torch.Tensor, step: int, fps: int = 4
+    ) -> None:
         """
         Log a video tensor as an artifact.
 
@@ -106,7 +112,9 @@ class MLflowLogger:
 
         # Convert to (T, H, W, C) uint8 for imageio
         # Input is (T, C, H, W) float in [0, 1]
-        video_np = (video_tensor.permute(0, 2, 3, 1) * 255).clamp(0, 255).byte().cpu().numpy()
+        video_np = (
+            (video_tensor.permute(0, 2, 3, 1) * 255).clamp(0, 255).byte().cpu().numpy()
+        )
 
         # Save video
         imageio.mimwrite(filepath, video_np, fps=fps)
@@ -117,3 +125,7 @@ class MLflowLogger:
     def log_artifact(self, path: str, artifact_path: str | None = None) -> None:
         """Log a file as an artifact."""
         mlflow.log_artifact(path, artifact_path=artifact_path)
+
+    def close(self) -> None:
+        """No-op close for interface compatibility."""
+        return None

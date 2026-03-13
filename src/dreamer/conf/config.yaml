@@ -5,7 +5,7 @@
 defaults:
   - _self_
   - env: cartpole_state_only  # default environment
-  - override /hydra/launcher: joblib
+  - override /hydra/launcher: basic
 
 # General settings
 general:
@@ -114,8 +114,5 @@ hydra:
   sweep:
     dir: experiments/sweeps/${now:%Y-%m-%d}_${now:%H%M}
     subdir: ${hydra.job.override_dirname}
-  launcher:
-    # Sequential execution - parallel n_jobs>1 conflicts with nested mp.Process
-    n_jobs: 1
   job:
     chdir: false  # Don't change working directory

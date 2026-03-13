@@ -107,8 +107,6 @@ class Config:
     wm_ac_ratio_min: int = 2
     wm_ac_ratio_invert: bool = False
 
-
-
     # ===== Training: early stopping =====
     early_stop_ep_length: int = 0
 
@@ -130,8 +128,6 @@ class Config:
     replay_ratio: float = 1.0
     action_repeat: int = 1
     recent_fraction: float = 0.0
-
-
 
 
 def default_config() -> Config:
@@ -247,5 +243,12 @@ def dump_config_json(cfg: Config, path: str) -> None:
     """Dump config to JSON for reproducibility."""
     import json
 
+    def to_jsonable(value):
+        if hasattr(value, "items"):
+            return {str(k): to_jsonable(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [to_jsonable(v) for v in value]
+        return value
+
     with open(path, "w") as f:
-        json.dump(asdict(cfg), f, indent=2)
+        json.dump(to_jsonable(asdict(cfg)), f, indent=2)

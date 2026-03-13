@@ -17,6 +17,7 @@ import os
 import subprocess
 import socket
 import tempfile
+from dataclasses import asdict
 from typing import List, Tuple
 from datetime import datetime
 from pathlib import Path
@@ -27,8 +28,6 @@ from omegaconf import DictConfig, OmegaConf
 os.environ.setdefault("HSA_OVERRIDE_GFX_VERSION", "11.0.0")
 import mlflow
 import torch
-import torch.serialization
-from dataclasses import asdict
 import multiprocessing as mp
 
 from dreamer.config import (
@@ -112,6 +111,8 @@ def dictconfig_to_config(cfg: DictConfig) -> Config:
             enc = models.encoder
             if "cnn" in enc:
                 for k, v in enc.cnn.items():
+                    if k == "target_size":
+                        v = tuple(v)
                     d[f"encoder_cnn_{k}"] = v
             if "mlp" in enc:
                 for k, v in enc.mlp.items():
@@ -121,7 +122,6 @@ def dictconfig_to_config(cfg: DictConfig) -> Config:
     if "train" in cfg:
         d.update(cfg.train)
 
-    # Filter out anything not in Config
     import inspect
 
     valid_keys = set(inspect.signature(Config).parameters.keys())
@@ -176,7 +176,7 @@ def run_training(
             print(f"  Warning: could not read MLflow run id from checkpoint: {exc}")
 
     if not flat_cfg.dry_run:
-        mlruns_dir = log_dir.parent / "mlruns"
+        mlruns_dir = Path("runs") / "mlruns"
         mlruns_dir.mkdir(parents=True, exist_ok=True)
         mlflow.set_tracking_uri(f"file://{mlruns_dir.resolve()}")
 
@@ -284,14 +284,11 @@ def main(cfg: DictConfig):
     print("====================")
 
     flat_cfg = dictconfig_to_config(cfg)
-
-    # Optional: support passing a checkpoint path through hydra overrides (e.g. +checkpoint_path=...)
     checkpoint_path = cfg.get("checkpoint_path", None)
 
     from hydra.core.hydra_config import HydraConfig
 
     run_name = Path(HydraConfig.get().runtime.output_dir).name
-
     run_training(flat_cfg, mlflow_run_name=run_name, checkpoint_path=checkpoint_path)
 
 
