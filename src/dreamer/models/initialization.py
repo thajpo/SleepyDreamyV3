@@ -59,6 +59,24 @@ def initialize_critic(device, cfg):
     return critic.to(device)
 
 
+def initialize_q_critic(device, cfg):
+    """Initialize an action-value critic that predicts two-hot Q(s, a)."""
+    import torch.nn as nn
+    from .encoder import ThreeLayerMLP
+
+    num_bins = int(getattr(cfg, "num_bins", 255))
+    num_classes = cfg.d_hidden // 16
+    d_in = (cfg.d_hidden * cfg.rnn_n_blocks) + (cfg.num_latents * num_classes)
+    q_critic = ThreeLayerMLP(
+        d_in=d_in,
+        d_hidden=cfg.d_hidden,
+        d_out=cfg.n_actions * num_bins,
+    )
+    nn.init.zeros_(q_critic.mlp[-1].weight)
+    nn.init.zeros_(q_critic.mlp[-1].bias)
+    return q_critic.to(device)
+
+
 def initialize_world_model(device, cfg, batch_size=1):
     """
     Initializes the encoder and world model.

@@ -13,6 +13,63 @@ except ImportError:
     pass
 
 
+class EasyBanditEnv(gym.Env):
+    """Tiny diagnostic env: action 1 gives reward 1, action 0 gives reward 0."""
+
+    metadata = {"render_modes": []}
+
+    def __init__(self, episode_length=16):
+        super().__init__()
+        self.episode_length = int(episode_length)
+        self.action_space = gym.spaces.Discrete(2)
+        self.observation_space = gym.spaces.Box(
+            low=-1.0,
+            high=1.0,
+            shape=(1,),
+            dtype=np.float32,
+        )
+        self._step = 0
+
+    def reset(self, *, seed=None, options=None):
+        super().reset(seed=seed)
+        self._step = 0
+        return np.zeros((1,), dtype=np.float32), {}
+
+    def step(self, action):
+        self._step += 1
+        reward = 1.0 if int(action) == 1 else 0.0
+        terminated = self._step >= self.episode_length
+        return np.zeros((1,), dtype=np.float32), reward, terminated, False, {}
+
+
+class EasySurvivalEnv(gym.Env):
+    """Diagnostic env: reward is always 1, action 1 survives, action 0 terminates."""
+
+    metadata = {"render_modes": []}
+
+    def __init__(self, episode_length=16):
+        super().__init__()
+        self.episode_length = int(episode_length)
+        self.action_space = gym.spaces.Discrete(2)
+        self.observation_space = gym.spaces.Box(
+            low=-1.0,
+            high=1.0,
+            shape=(1,),
+            dtype=np.float32,
+        )
+        self._step = 0
+
+    def reset(self, *, seed=None, options=None):
+        super().reset(seed=seed)
+        self._step = 0
+        return np.zeros((1,), dtype=np.float32), {}
+
+    def step(self, action):
+        self._step += 1
+        terminated = int(action) == 0 or self._step >= self.episode_length
+        return np.zeros((1,), dtype=np.float32), 1.0, terminated, False, {}
+
+
 class AtariPixelsStateWrapper(gym.ObservationWrapper):
     """Expose Atari observations as {'pixels', 'state'} for pixel pipelines."""
 
@@ -85,6 +142,11 @@ def create_env(env_name, render_mode="rgb_array", use_pixels=True, config=None):
     Returns:
         Configured gymnasium environment
     """
+    if env_name == "DreamerEasyBandit-v0":
+        return EasyBanditEnv()
+    if env_name == "DreamerEasySurvival-v0":
+        return EasySurvivalEnv()
+
     if use_pixels:
         atari_compat = bool(getattr(config, "atari_compat_mode", False))
         is_ale = env_name.startswith("ALE/")

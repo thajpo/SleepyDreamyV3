@@ -24,6 +24,7 @@ class Config:
     dry_run: bool = False
     experiment_name: Optional[str] = None
     log_profile: str = "lean"  # lean, full
+    seed: int = 0
 
     # ===== Environment =====
     environment_name: str = "CartPole-v1"
@@ -74,6 +75,9 @@ class Config:
     critic_ema_decay: float = 0.98
     critic_ema_regularizer: float = 1.0
     critic_replay_scale: float = 0.3
+    critic_real_return_scale: float = 0.0
+    q_critic_scale: float = 0.0
+    q_actor_temperature: float = 0.25
 
     # ===== Training: RL settings =====
     gamma: float = 0.997
@@ -83,11 +87,26 @@ class Config:
     num_dream_steps: int = 15
     actor_entropy_coef: float = 3e-4
     normalize_advantages: bool = True
+    actor_loss_mode: str = "reinforce"  # reinforce, enumerate, qcritic, mpc_teacher
+    actor_enum_horizon: int = 3
+    actor_enum_temperature: float = 0.25
+    actor_enum_loss_scale: float = 1.0
+    actor_enum_objective: str = "value"  # value, survival
+    mpc_teacher_horizon: int = 6
+    mpc_teacher_temperature: float = 0.1
+    mpc_teacher_loss_scale: float = 1.0
+    mpc_teacher_objective: str = "value"  # value, survival
+    mpc_teacher_target: str = "hard"  # hard, soft
+    mpc_teacher_margin_min: float = 0.0
+    mpc_teacher_normalize_values: bool = True
+    terminal_reward_penalty: float = 0.0
 
     # ===== Training: loss coefficients =====
     beta_dyn: float = 1.0
     beta_rep: float = 0.1
     beta_pred: float = 1.0
+    free_bits_straight_through: bool = True
+    prior_state_pred_scale: float = 0.0
 
     # ===== Training: reward bins =====
     b_start: int = -20
@@ -96,6 +115,7 @@ class Config:
 
     # ===== Training: WM-AC ratio =====
     wm_ac_ratio: int = 1
+    actor_warmup_steps: int = 0
 
     # ===== Training: LR schedule =====
     lr_cosine_decay: bool = False

@@ -6,6 +6,11 @@ import torch.nn.functional as F
 from .math_utils import symlog, twohot_encode, unimix_logits
 
 
+def _free_bits_straight_through(raw_kl, free_bits):
+    """Clamp KL in the forward pass while preserving raw-KL gradients."""
+    return raw_kl + (free_bits - raw_kl).clamp(min=0).detach()
+
+
 def compute_wm_loss(
     obs_reconstruction,
     obs_t,
@@ -61,8 +66,10 @@ def compute_wm_loss(
         and state_target.shape[-1] > 0
     )
     if has_state_targets:
-        obs_pred = symlog(state_pred)
-        obs_target = symlog(state_target)  # loss in symlog space
+        # Match DreamerV3 symlog_mse: the decoder predicts symlog-space
+        # vector observations and the raw target is squashed inside the loss.
+        obs_pred = state_pred
+        obs_target = symlog(state_target)
         pred_loss_vector = 1 / 2 * (obs_pred - obs_target) ** 2
         pred_loss_vector = pred_loss_vector.mean(dim=-1)  # (B,)
     else:
@@ -134,10 +141,17 @@ def compute_wm_loss(
         (posterior_probs * (log_posterior - log_prior_sg)).sum(dim=-1).sum(dim=-1)
     )  # (B,)
 
-    # Free-bits clamp: stop pushing KL lower once below the threshold.
-    # This matches DreamerV3's max(free_nats, KL) behavior.
-    l_dyn = torch.clamp(l_dyn_raw, min=free_bits)
-    l_rep = torch.clamp(l_rep_raw, min=free_bits)
+    if bool(getattr(config, "free_bits_straight_through", True)):
+        # Straight-through free bits:
+        # - Forward value matches max(free_bits, raw_kl) for logging/loss scale.
+        # - Backward pass still trains the prior/posterior when raw KL is below
+        #   the threshold. A hard torch.clamp() here previously froze the dynamics
+        #   loss on simple tasks where raw KL starts below 1.0.
+        l_dyn = _free_bits_straight_through(l_dyn_raw, free_bits)
+        l_rep = _free_bits_straight_through(l_rep_raw, free_bits)
+    else:
+        l_dyn = torch.clamp(l_dyn_raw, min=free_bits)
+        l_rep = torch.clamp(l_rep_raw, min=free_bits)
 
     total_loss_per_sample = beta_pred * l_pred + beta_dyn * l_dyn + beta_rep * l_rep
 
@@ -163,6 +177,7 @@ def compute_wm_loss(
         "representation": _masked_mean(l_rep),
         "kl_dynamics_raw": _masked_mean(l_dyn_raw),
         "kl_representation_raw": _masked_mean(l_rep_raw),
+        "prior_state": torch.zeros((), device=device, dtype=total_loss.dtype),
     }
 
     return total_loss, loss_dict
@@ -179,6 +194,7 @@ def compute_actor_critic_losses(
     S,  # EMA for returns
     gamma,
     actor_entropy_coef=0.003,
+    normalize_advantages=True,
     dreamed_values_logits_ema=None,
     critic_ema_coef=1.0,
     sample_mask=None,
@@ -197,6 +213,7 @@ def compute_actor_critic_losses(
         S: EMA for returns
         gamma: Discount factor
         actor_entropy_coef: Entropy regularization coefficient
+        normalize_advantages: Center and scale advantages within the imagined batch
         dreamed_values_logits_ema: Logits from EMA critic (for regularization)
         critic_ema_coef: Coefficient for EMA regularization
 
@@ -260,14 +277,21 @@ def compute_actor_critic_losses(
         critic_loss += critic_ema_coef * ema_reg_loss
     # -----------------------------------------------
 
-    # Actor Loss: Policy gradient with lambda returns as advantage
-    # advantage = (lambda_returns - dreamed_values).detach()
-
-    # Normalize advantages for training stability
-    # if normalize_advantages and advantage.numel() > 1:
-    # advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
+    # Actor Loss: Policy gradient with lambda returns as advantage. DreamerV3
+    # normalizes advantages; without centering, CartPole's mostly +1 imagined
+    # rewards can reinforce arbitrary early samples and collapse entropy.
     dreamed_values_train = dreamed_values[:H_train]
     advantage = ((lambda_returns_train - dreamed_values_train) / max(1, S)).detach()
+    if normalize_advantages:
+        if sample_mask is not None:
+            valid = sample_mask.bool().view(1, Bsz).expand_as(advantage)
+            valid_advantage = advantage[valid]
+        else:
+            valid_advantage = advantage.reshape(-1)
+        if valid_advantage.numel() > 1:
+            adv_mean = valid_advantage.mean()
+            adv_std = valid_advantage.std(unbiased=False).clamp_min(1e-6)
+            advantage = (advantage - adv_mean) / adv_std
 
     action_dist = torch.distributions.Categorical(
         logits=dreamed_actions_logits, validate_args=False
@@ -287,3 +311,83 @@ def compute_actor_critic_losses(
         entropy = entropy.mean()
 
     return actor_loss, critic_loss, entropy
+
+
+def compute_q_actor_critic_losses(
+    q_logits,
+    q_actor_values,
+    lambda_returns,
+    dreamed_continues,
+    dreamed_actions_logits,
+    dreamed_actions_sampled,
+    B,
+    gamma,
+    actor_entropy_coef=0.003,
+    temperature=0.25,
+    sample_mask=None,
+):
+    """Compute losses for an explicit discrete action-value critic.
+
+    The Q critic is trained only on the sampled dreamed action, while the actor
+    receives the full counterfactual action vector Q(s, a) at each dreamed state.
+    This tests whether direct state-action values give CartPole a cleaner signal
+    than a scalar V(s) plus REINFORCE advantage.
+    """
+    H, Bsz = lambda_returns.shape[:2]
+    H_train = max(1, H)
+    num_bins = q_logits.size(-1)
+
+    continue_probs = torch.sigmoid(dreamed_continues).detach()
+    discount = gamma * continue_probs
+    weight_prefix = torch.ones(1, Bsz, device=discount.device, dtype=discount.dtype)
+    if H > 1:
+        weights = torch.cumprod(torch.cat([weight_prefix, discount[:-1]], dim=0), dim=0)
+    else:
+        weights = weight_prefix
+
+    q_logits_train = q_logits[:H_train]
+    action_index = dreamed_actions_sampled[:H_train].view(H_train, Bsz, 1, 1)
+    action_index = action_index.expand(H_train, Bsz, 1, num_bins)
+    selected_q_logits = q_logits_train.gather(dim=2, index=action_index).squeeze(2)
+
+    targets = twohot_encode(lambda_returns[:H_train].detach().reshape(-1), B)
+    per_step_q = -torch.sum(
+        targets * F.log_softmax(selected_q_logits.reshape(-1, num_bins), dim=-1),
+        dim=-1,
+    ).view(H_train, Bsz)
+    per_step_q = per_step_q * weights[:H_train]
+
+    actor_logits = dreamed_actions_logits[:H_train]
+    actor_logits = unimix_logits(actor_logits, unimix_ratio=0.01)
+    log_probs = F.log_softmax(actor_logits, dim=-1)
+    target_probs = F.softmax(
+        q_actor_values[:H_train].detach() / max(float(temperature), 1e-6),
+        dim=-1,
+    )
+    action_dist = torch.distributions.Categorical(
+        logits=actor_logits, validate_args=False
+    )
+    entropy_per_step = action_dist.entropy()
+    per_step_actor = -torch.sum(target_probs * log_probs, dim=-1)
+    per_step_actor = per_step_actor - actor_entropy_coef * entropy_per_step
+    per_step_actor = per_step_actor * weights[:H_train]
+
+    margin_values = q_actor_values[:H_train].topk(
+        k=min(2, q_actor_values.size(-1)), dim=-1
+    ).values
+    per_step_margin = margin_values[..., 0] - margin_values[..., -1]
+
+    if sample_mask is not None:
+        mask = sample_mask.float().view(1, Bsz)
+        denom = mask.sum() * H_train + 1e-8
+        q_loss = (per_step_q * mask).sum() / denom
+        actor_loss = (per_step_actor * mask).sum() / denom
+        entropy = (entropy_per_step * mask).sum() / denom
+        margin = (per_step_margin * mask).sum() / denom
+    else:
+        q_loss = per_step_q.mean()
+        actor_loss = per_step_actor.mean()
+        entropy = entropy_per_step.mean()
+        margin = per_step_margin.mean()
+
+    return actor_loss, q_loss, entropy, margin.detach()

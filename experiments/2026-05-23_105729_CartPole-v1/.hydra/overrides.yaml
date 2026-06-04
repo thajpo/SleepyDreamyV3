@@ -1,0 +1,15 @@
+- env=cartpole_state_only
+- train.max_train_steps=20
+- general.dry_run=true
+- train.num_collectors=1
+- train.min_buffer_episodes=2
+- train.replay_buffer_size=10
+- train.batch_size=2
+- train.sequence_length=8
+- train.replay_burn_in=2
+- train.eval_every=0
+- train.actor_warmup_steps=0
+- train.actor_loss_mode=enumerate
+- train.actor_enum_objective=survival
+- train.actor_enum_horizon=3
+- train.actor_enum_temperature=0.25

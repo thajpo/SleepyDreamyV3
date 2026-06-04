@@ -15,6 +15,7 @@ general:
   compile_models: false
   dry_run: false  # Skip MLflow/checkpoints for smoke tests
   experiment_name: null  # MLflow experiment name (null = auto from env name)
+  seed: 0
 
 # Environment (overridden by env/*.yaml)
 environment:
@@ -56,6 +57,9 @@ train:
   critic_ema_decay: 0.98        # critic target network polyak decay
   critic_ema_regularizer: 1.0   # scale of critic EMA regularization loss
   critic_replay_scale: 0.3      # replay critic loss scale (βrepval)
+  critic_real_return_scale: 0.0 # direct replay Monte Carlo return scale
+  q_critic_scale: 0.0           # explicit Q(s,a) critic loss scale
+  q_actor_temperature: 0.25
 
   # RL settings
   gamma: 0.997  # paper: discount horizon 1/(1-γ)=333
@@ -63,11 +67,26 @@ train:
   num_dream_steps: 15
   actor_entropy_coef: 3e-4  # paper: η=3e-4
   normalize_advantages: true
+  actor_loss_mode: reinforce  # reinforce, enumerate, qcritic, mpc_teacher
+  actor_enum_horizon: 3       # used when actor_loss_mode=enumerate
+  actor_enum_temperature: 0.25
+  actor_enum_loss_scale: 1.0
+  actor_enum_objective: value # value, survival
+  mpc_teacher_horizon: 6      # used when actor_loss_mode=mpc_teacher
+  mpc_teacher_temperature: 0.1
+  mpc_teacher_loss_scale: 1.0
+  mpc_teacher_objective: value # value, survival
+  mpc_teacher_target: hard    # hard, soft
+  mpc_teacher_margin_min: 0.0
+  mpc_teacher_normalize_values: true
+  terminal_reward_penalty: 0.0
 
   # Loss coefficients (DreamerV3 paper: βpred=1, βdyn=1, βrep=0.1)
   beta_dyn: 1.0
   beta_rep: 0.1
   beta_pred: 1.0
+  free_bits_straight_through: true
+  prior_state_pred_scale: 0.0
 
   # Reward bins (symexp range)
   b_start: -20
@@ -75,6 +94,7 @@ train:
 
   # Training phases
   wm_ac_ratio: 1  # WM updates per AC update (e.g., 4 = train WM 4x more than AC)
+  actor_warmup_steps: 0  # WM-only updates before actor/critic training starts
 
   # Cosine LR decay (applies to all optimizers after warmup)
   lr_cosine_decay: false
@@ -101,6 +121,7 @@ train:
   replay_buffer_size: 1000
   min_buffer_episodes: 64
   steps_per_weight_sync: 5
+  replay_burn_in: 8
 
   # Replay ratio gating (DreamerV3 paper)
   replay_ratio: 1.0  # target train steps per env step

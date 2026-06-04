@@ -8,8 +8,27 @@ This matches DreamerV3's approach for consistent batch shapes.
 import threading
 import random
 import numpy as np
+import torch
 from collections import deque
 from queue import Empty
+from typing import NamedTuple, Optional
+
+from ..models.math_utils import resize_pixels_to_target
+
+
+class EnvData(NamedTuple):
+    """Immutable batch of environment data sampled from replay."""
+
+    states: torch.Tensor  # (B, T, n_obs) — raw env vectors
+    actions: torch.Tensor  # (B, T, n_actions)
+    rewards: torch.Tensor  # (B, T)
+    is_last: torch.Tensor  # (B, T)
+    is_terminal: torch.Tensor  # (B, T)
+    mask: torch.Tensor  # (B, T) — 1=real, 0=padded
+    pixels: Optional[torch.Tensor] = None  # (B, T, C, H, W)
+    pixels_original: Optional[torch.Tensor] = None  # (B, T, C, H, W)
+
+
 
 
 class EpisodeReplayBuffer:
@@ -197,8 +216,52 @@ class EpisodeReplayBuffer:
 
             indices = recent_indices + uniform_indices
 
-            # Extract fixed-length subsequences
             return [self._sample_subsequence(self.buffer[i]) for i in indices]
+
+    def sample_tensors(self, batch_size, device, use_pixels=False, target_size=None, recent_fraction=0.2) -> EnvData:
+        """
+        Samples a batch and returns an EnvData namedtuple with ready-to-use PyTorch tensors.
+        Handles pixels resizing and symlog of state.
+        """
+        raw_batch = self.sample(batch_size, recent_fraction)
+
+        batch_pixels, batch_pixels_original = [], []
+        batch_states, batch_actions, batch_rewards = [], [], []
+        batch_is_last, batch_is_terminal, batch_mask = [], [], []
+
+        for pixels, states, actions, rewards, is_last, is_terminal, mask in raw_batch:
+            if use_pixels and pixels is not None:
+                pixels_tensor = torch.from_numpy(pixels).permute(0, 3, 1, 2)
+                batch_pixels_original.append(pixels_tensor)
+                if target_size and pixels_tensor.shape[-2:] != target_size:
+                    pixels_tensor = resize_pixels_to_target(pixels_tensor, target_size)
+                batch_pixels.append(pixels_tensor)
+
+            batch_states.append(torch.from_numpy(states))
+            batch_actions.append(torch.from_numpy(actions))
+            batch_rewards.append(torch.from_numpy(rewards))
+            batch_is_last.append(torch.from_numpy(is_last))
+            batch_is_terminal.append(torch.from_numpy(is_terminal))
+            batch_mask.append(torch.from_numpy(mask))
+
+        if use_pixels and batch_pixels:
+            pixels_out = torch.stack(batch_pixels).to(device).float()
+            pixels_original_out = torch.stack(batch_pixels_original).to(device).float()
+        else:
+            pixels_out, pixels_original_out = None, None
+
+        states_out = torch.stack(batch_states).to(device)
+
+        return EnvData(
+            states=states_out,
+            actions=torch.stack(batch_actions).to(device),
+            rewards=torch.stack(batch_rewards).to(device),
+            is_last=torch.stack(batch_is_last).to(device),
+            is_terminal=torch.stack(batch_is_terminal).to(device),
+            mask=torch.stack(batch_mask).to(device),
+            pixels=pixels_out,
+            pixels_original=pixels_original_out,
+        )
 
     def __len__(self):
         """Current number of episodes in buffer."""

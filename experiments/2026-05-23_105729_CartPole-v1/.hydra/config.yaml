@@ -1,0 +1,82 @@
+general:
+  device: auto
+  use_pixels: false
+  profile: false
+  compile_models: false
+  dry_run: true
+  experiment_name: null
+environment:
+  environment_name: CartPole-v1
+  n_actions: 2
+  n_observations: 4
+models:
+  d_hidden: 64
+  num_latents: 32
+  encoder:
+    cnn:
+      stride: 2
+      kernel_size: 2
+      padding: 0
+      input_channels: 3
+      num_layers: 4
+      final_feature_size: 4
+      target_size:
+      - 64
+      - 64
+    mlp:
+      hidden_dim_ratio: 8
+      n_layers: 3
+  rnn:
+    n_blocks: 4
+train:
+  max_train_steps: 20
+  batch_size: 2
+  sequence_length: 8
+  wm_lr: 4.0e-05
+  actor_lr: 4.0e-05
+  critic_lr: 3.0e-05
+  weight_decay: 0.0
+  critic_ema_decay: 0.98
+  critic_ema_regularizer: 1.0
+  critic_replay_scale: 0.3
+  critic_real_return_scale: 0.0
+  q_critic_scale: 0.0
+  q_actor_temperature: 0.25
+  gamma: 0.997
+  lam: 0.95
+  num_dream_steps: 15
+  actor_entropy_coef: 0.0003
+  normalize_advantages: true
+  actor_loss_mode: enumerate
+  actor_enum_horizon: 3
+  actor_enum_temperature: 0.25
+  actor_enum_loss_scale: 1.0
+  actor_enum_objective: survival
+  terminal_reward_penalty: 0.0
+  beta_dyn: 1.0
+  beta_rep: 0.1
+  beta_pred: 1.0
+  free_bits_straight_through: true
+  prior_state_pred_scale: 0.0
+  b_start: -5
+  b_end: 6
+  wm_ac_ratio: 1
+  actor_warmup_steps: 0
+  lr_cosine_decay: false
+  lr_cosine_min_factor: 0.1
+  wm_ac_ratio_cosine: false
+  wm_ac_ratio_max: 8
+  wm_ac_ratio_min: 2
+  wm_ac_ratio_invert: false
+  early_stop_ep_length: 500
+  eval_every: 0
+  eval_episodes: 5
+  checkpoint_interval: 5000
+  num_collectors: 1
+  replay_buffer_size: 10
+  min_buffer_episodes: 2
+  steps_per_weight_sync: 5
+  replay_burn_in: 2
+  replay_ratio: 1.0
+  action_repeat: 1
+  recent_fraction: 0.2

@@ -1,5 +1,6 @@
 import numpy as np
 import os
+import random
 import time
 import torch
 import torch.nn.functional as F
@@ -16,6 +17,7 @@ def collect_experiences(
     stop_event,
     log_dir=None,
     checkpoint_path=None,
+    collector_id=0,
 ):
     """
     Continuously collects experiences from the environment and puts them on a queue.
@@ -29,6 +31,12 @@ def collect_experiences(
     device = "cpu"
     n_actions = config.n_actions
     action_repeat = getattr(config, "action_repeat", 1)
+    base_seed = int(getattr(config, "seed", 0)) + 1000 + int(collector_id) * 10000
+    random.seed(base_seed)
+    np.random.seed(base_seed % (2**32 - 1))
+    torch.manual_seed(base_seed)
+    if hasattr(env, "action_space"):
+        env.action_space.seed(base_seed)
 
     # Fresh runs begin random; resumed runs can warm start from checkpoint.
     use_random_actions = checkpoint_path is None
@@ -97,7 +105,7 @@ def collect_experiences(
         pull_latest_models()
 
         episode_count += 1
-        obs, info = env.reset()
+        obs, info = env.reset(seed=base_seed + episode_count)
 
         (
             episode_pixels,

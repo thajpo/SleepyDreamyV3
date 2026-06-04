@@ -26,10 +26,15 @@ class StepMetrics:
     dreamed_rewards: list[torch.Tensor] = field(default_factory=list)
     dreamed_values: list[torch.Tensor] = field(default_factory=list)
     actor_entropy: list[torch.Tensor] = field(default_factory=list)
+    actor_enum_margin: list[torch.Tensor] = field(default_factory=list)
+    actor_mpc_margin: list[torch.Tensor] = field(default_factory=list)
+    actor_mpc_mask_frac: list[torch.Tensor] = field(default_factory=list)
+    actor_q_margin: list[torch.Tensor] = field(default_factory=list)
     replay_posterior_states: list[torch.Tensor] = field(default_factory=list)
     replay_value_annotations: list[torch.Tensor] = field(default_factory=list)
     replay_loss: Optional[torch.Tensor] = None
     replay_ema_reg: Optional[torch.Tensor] = None
+    replay_mc_loss: Optional[torch.Tensor] = None
     viz_data: Optional[dict[str, torch.Tensor]] = None
 
 
@@ -44,6 +49,7 @@ def create_step_metrics(device: torch.device, do_log_images: bool) -> StepMetric
         "representation": torch.tensor(0.0, device=device),
         "kl_dynamics_raw": torch.tensor(0.0, device=device),
         "kl_representation_raw": torch.tensor(0.0, device=device),
+        "prior_state": torch.tensor(0.0, device=device),
     }
     return StepMetrics(
         wm_components=wm_components,
@@ -116,6 +122,8 @@ def log_step_metrics(
                 m["loss/critic/replay"] = float(metrics.replay_loss.item())
             if metrics.replay_ema_reg is not None:
                 m["loss/critic/replay_ema_reg"] = float(metrics.replay_ema_reg.item())
+            if metrics.replay_mc_loss is not None:
+                m["loss/critic/replay_mc_return"] = float(metrics.replay_mc_loss.item())
 
             pixel = wm_cpu["prediction_pixel"] * norm
             state = wm_cpu["prediction_vector"] * norm
@@ -123,11 +131,13 @@ def log_step_metrics(
             cont = wm_cpu["prediction_continue"] * norm
             dyn = wm_cpu["dynamics"] * norm
             rep = wm_cpu["representation"] * norm
+            prior_state = wm_cpu["prior_state"] * norm
 
             if has_pixel_obs:
                 m["wm/decoder/pixel_loss"] = pixel
             if has_vector_obs:
                 m["wm/decoder/state_loss"] = state
+                m["wm/prior/state_loss"] = prior_state
 
             m["wm/reward_head/loss"] = reward
             m["wm/continue_head/loss"] = cont
@@ -166,6 +176,24 @@ def log_step_metrics(
             m["actor/entropy/mean"] = ae.mean().item()
             if is_full:
                 m["actor/entropy/std"] = ae.std().item()
+        if metrics.actor_enum_margin:
+            margins = torch.stack(metrics.actor_enum_margin)
+            m["actor/enum_q_margin/mean"] = margins.mean().item()
+            if is_full:
+                m["actor/enum_q_margin/std"] = margins.std().item()
+        if metrics.actor_mpc_margin:
+            margins = torch.stack(metrics.actor_mpc_margin)
+            m["actor/mpc_teacher_margin/mean"] = margins.mean().item()
+            if is_full:
+                m["actor/mpc_teacher_margin/std"] = margins.std().item()
+        if metrics.actor_mpc_mask_frac:
+            mask_fracs = torch.stack(metrics.actor_mpc_mask_frac)
+            m["actor/mpc_teacher_mask_frac/mean"] = mask_fracs.mean().item()
+        if metrics.actor_q_margin:
+            margins = torch.stack(metrics.actor_q_margin)
+            m["actor/qcritic_margin/mean"] = margins.mean().item()
+            if is_full:
+                m["actor/qcritic_margin/std"] = margins.std().item()
 
         if is_full:
             if wm_optimizer:

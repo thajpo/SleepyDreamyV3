@@ -1053,3 +1053,267 @@ The 4:1 ratio successfully keeps WM ahead of AC, preventing the "WM exploitation
 - **Next debug check (high priority)**:
   - add counterfactual action-value probe at fixed latent states (evaluate critic-implied preference for each discrete action from same state).
   - goal: confirm whether critic systematically over-ranks one action independent of ball/paddle context.
+
+### 05-23-26 Overnight CartPole Convergence Audit
+- **Starting contradiction**:
+  - Logs said straight-through free bits fixed poor CartPole convergence, but code had been reverted to Dreamer-source hard clamp (`max/free_nats`).
+  - Upstream Dreamer does use hard free-nats, so the revert matched source, but this small PyTorch codebase repeatedly drives raw KL below 1.0 where hard clamp blocks prior/posterior gradients.
+- **Code fixes made before benchmarking**:
+  - Reintroduced configurable straight-through free bits (`train.free_bits_straight_through`, default `true`) and added gradient tests for ST vs hard clamp.
+  - Fixed vector observation target handling: replay now returns raw states, encoder gets `symlog(raw)`, decoder loss compares decoder output to `symlog(raw)` exactly once.
+  - Added `actor_warmup_steps` so fresh runs can collect random data and train WM before actor/critic starts.
+  - Wired existing `normalize_advantages` into the actor loss; constant positive imagined returns no longer automatically reinforce every sampled action.
+  - Added trainer guard so actor/critic backward is skipped when a short-episode batch has no valid AC grad graph.
+  - Added two diagnostic envs:
+    - `DreamerEasyBandit-v0`: action 1 gives reward 1, action 0 gives reward 0.
+    - `DreamerEasySurvival-v0`: reward is always 1; action 1 survives, action 0 terminates.
+- **Free-bits benchmark result**:
+  - `straight_through_v3` (MLflow `725a7253672b41f694b93475ca2de5ba`): eval stayed ~9, but raw dynamics KL fell to ~0.02 final / ~0.06 last-10.
+  - `hard_clamp_v1` (MLflow `b3bfe23e03694e33b62dcc94c4b91974`): eval stayed ~9-10, raw dynamics KL stayed ~0.20.
+  - Interpretation: hard clamp is source-faithful, but likely not the right default here; ST gives a healthier matching gradient on small tasks.
+- **CartPole probes**:
+  - Fast actor settings (`actor_lr=3e-5`, entropy `1e-3`, warmup 1k) still collapsed to near-single-action behavior by ~2k, even with advantage normalization.
+  - Lower actor pressure (`actor_lr=1e-5`, entropy `3e-3`) delayed but did not prevent collapse; 2k eval ~9.
+  - Longer horizon (`num_dream_steps=50`) did not help; entropy collapsed and 2k eval dropped to 9.
+  - Longer WM/random warmup (`actor_warmup_steps=3000`, batch 8) prevented catastrophic replay collapse, but deterministic eval stayed ~9 through 5k. Final checkpoint inspection:
+    - argmax avg return 8.9; action histogram action 0 = 100%.
+    - sampled avg return 19.2; essentially random.
+    - WM reward error ~0 and vector recon error ~0.
+    - continue predictor does notice failure (`continue_pred_not_done ~0.99`, `continue_pred_done ~0.25-0.42`).
+  - Batch 32 did not help; entropy collapsed by ~3.7k and 4k eval was 9.4.
+- **Simple-task result**:
+  - `DreamerEasyBandit-v0` solved immediately: eval reward 16/16 by step 250.
+  - `DreamerEasySurvival-v0` also solved immediately: eval reward/length 16/16 by step 250.
+  - This rules out a totally broken actor/reward path and a totally broken continue path.
+- **Current diagnosis**:
+  - The revert to hard clamp was probably not the right move for this repo, despite matching upstream source.
+  - The main remaining CartPole bottleneck is actor/value extraction of a state-dependent discrete control policy from imagined returns. The WM can reconstruct state, predict reward, and recognize termination, but REINFORCE-style sampled discrete actor updates still either collapse to a constant action or remain high-entropy/random.
+  - Highest-value next experiment: add a counterfactual discrete action-value probe/action-enumeration actor loss for small discrete action spaces, so each latent state directly compares action 0 vs action 1 under the learned model instead of relying only on sampled-action REINFORCE credit assignment.
+
+### 05-23-26 CartPole Control-Ablation Results
+- **Ablations run under low VRAM**:
+  - Baseline reference: `runs/free_bits_bench/cartpole_st_normadv_warm3k_h15_5k`
+  - Enumerated first-action loss, horizon 1: `runs/control_ablation/cartpole_enum_h1_warm3k_5k`
+  - Enumerated planning loss, horizon 3, temp 0.25: `runs/control_ablation/cartpole_enum_h3_warm3k_5k`
+  - Terminal risk penalty only: `runs/control_ablation/cartpole_terminal_penalty5_warm3k_5k`
+  - Strong replay critic grounding: `runs/control_ablation/cartpole_replaycritic1_warm3k_5k`
+  - Enumerated planning loss, horizon 3, sharp temp 0.02: `runs/control_ablation/cartpole_enum_h3_temp002_warm3k_5k`
+- **Training outcome**:
+  - No isolated option produced a CartPole Pareto improvement at 5k updates.
+  - Gentle enumeration stayed high-entropy/random: deterministic eval stayed roughly 9-12.
+  - Stronger pressure variants made the actor commit, but usually to a bad near-constant action: deterministic eval stayed roughly 9-10.
+  - Conclusion: there is no winner to aggregate yet, and Pong transfer is premature.
+- **Counterfactual Q probe**:
+  - Script: `scripts/probe_cartpole_q.py`
+  - Main artifact: `runs/control_ablation/q_probe_cartpole_512_dynamics/summary.json`
+  - Probe method: sample 512 real CartPole states, compare model-imagined `Q(action1)-Q(action0)` against real short-horizon simulator advantage from the same physical state.
+  - Baseline: Q-vs-real accuracy `0.596`, Q/real-delta Pearson `0.185`, Q preferred action 0 in `497/512` states.
+  - Enum h1: accuracy `0.393`, Pearson `0.003`, Q preferred action 1 in `511/512` states.
+  - Enum h3: accuracy `0.404`, Pearson `0.060`, Q preferred action 1 in `512/512` states.
+  - Terminal penalty: accuracy `0.528`, Pearson `-0.195`, larger Q margins but wrong direction.
+  - Replay critic scale 1.0: accuracy `0.404`, Pearson `0.196`, Q preferred action 1 in `512/512` while actor preferred action 0 in `512/512`.
+  - Enum h3 temp 0.02: accuracy `0.371`, Pearson `-0.189`, actor/Q mostly preferred action 1.
+  - Heuristic controller reference agreed with the simulator-preferred first action `~91%` of actionable states, so the probe is discriminative.
+- **One-step dynamics split**:
+  - The learned world model usually gets the immediate sign of the action effect right (`x_dot` and `theta_dot` delta sign accuracy `1.0` on this probe).
+  - However, Q/action preferences remain weak or constant-action.
+  - Interpretation: the model is not completely missing left/right physics; the failure is that local action-conditioned dynamics plus continue prediction are not being converted into useful multi-step state-action values.
+- **Frozen-latent actor-supervision probe**:
+  - Script: `scripts/probe_cartpole_actor_supervision.py`
+  - Baseline frozen WM + fresh actor + heuristic labels:
+    - `runs/control_ablation/supervised_actor_probe_baseline_fresh/summary.json`
+    - train accuracy `0.759`, eval mean length `67.5`.
+  - Larger baseline probe:
+    - `runs/control_ablation/supervised_actor_probe_baseline_fresh_moredata/summary.json`
+    - train accuracy `0.776`, eval mean length `71.9`.
+  - Enum-h3 frozen WM + fresh actor:
+    - `runs/control_ablation/supervised_actor_probe_enum_h3_fresh/summary.json`
+    - train accuracy `0.772`, eval mean length `57.8`.
+  - Interpretation: the latent state contains enough control information for much better-than-random CartPole behavior when the actor receives a clean target, but not enough / not cleanly enough to solve CartPole with a small supervised head. This strengthens the diagnosis that the main bottleneck is value/actor target quality, with representation quality as a secondary limiter.
+- **Next experiment direction**:
+  - Do not aggregate the tested actor-pressure options.
+  - Next high-value isolated option is real-return critic grounding: train critic values on actual replay Monte Carlo / n-step returns, then re-run the Q probe to see whether counterfactual Q preferences become state-conditioned before trying Pong.
+
+### 05-23-26 Real-Return Critic Grounding Probe
+- **Code change**:
+  - Added `critic_real_return_scale` as a separate critic loss knob.
+  - This trains replay posterior states against direct discounted returns from real replay subsequences, independent of the existing Dreamer-style imagined/replay value annotation path.
+- **Run**:
+  - `runs/control_ablation/cartpole_realreturn1_warm3k_5k`
+  - Same main setup as the warmup baseline: 5k updates, 3k actor warmup, batch 8, sequence 16, one collector.
+  - Extra knob: `critic_real_return_scale=1.0`.
+- **Behavioral result**:
+  - Argmax inspection: mean return `9.45`.
+  - Sample inspection: mean return `10.9`.
+  - No behavioral improvement over the warmup baseline.
+- **Q-probe result**:
+  - Artifact: `runs/control_ablation/q_probe_realreturn1/summary.json`
+  - Q-vs-real accuracy `0.607`, Q/real-delta Pearson `-0.083`.
+  - Q preferred action 0 in `504/512` states; actor preferred action 0 in `512/512`.
+  - One-step action-effect signs are still correct, but multi-step Q preference remains essentially constant-action.
+- **Interpretation**:
+  - Direct real-return value grounding alone is not enough. A state-value target from replay does not create useful counterfactual action preferences if the actor/critic still cannot turn local action-conditioned dynamics into better first-action values.
+  - This joins terminal penalty, stronger replay critic scale, and enumeration as a non-winner. Do not aggregate it or transfer it to Pong yet.
+
+### 05-23-26 A/C Pipeline Options: Direct Q, Survival Risk, Prior-State Control
+- **Code changes**:
+  - Added an optional explicit discrete `q_critic` with `train.q_critic_scale`, `train.q_actor_temperature`, checkpoint support, and Q-probe loading.
+  - Added `train.actor_enum_objective=survival`, where first-action enumeration trains the actor on predicted continuation/risk instead of scalar reward/value.
+  - Added `train.prior_state_pred_scale`, a prior-path state reconstruction auxiliary for state-only CartPole to encourage action-conditioned latent dynamics to carry control-relevant state.
+  - Added Q-probe diagnostics for direct Q-head preference, direct Q/real accuracy, direct Q/real correlation, and actor/Q preference histograms.
+- **Low-VRAM setup held fixed**:
+  - CartPole state-only, `d_hidden=128`, `batch_size=8`, `sequence_length=16`, `actor_warmup_steps=3000`, one collector, 5k updates unless otherwise noted.
+- **Isolated option results**:
+  - Explicit Q critic, temp `0.25`: `runs/control_ablation/cartpole_qcritic1_warm3k_5k`
+    - argmax `9.50`, sample `19.70`.
+    - direct Q head mostly constant action 0 (`505/512`), direct Q/real corr `0.185`.
+    - Interpretation: Q head does not fix sampled-action coverage/target bias by itself.
+  - Survival enumeration, horizon 3, temp `0.25`: `runs/control_ablation/cartpole_survival_enum_h3_warm3k_5k`
+    - argmax `15.00`, sample `23.05`.
+    - actor stayed near-uniform; Q/real corr `-0.222`.
+    - Interpretation: raw length improved mostly because the policy stayed random/high entropy, not because it learned a clean controller.
+  - Prior-state auxiliary: `runs/control_ablation/cartpole_priorstate1_warm3k_5k`
+    - argmax `9.45`, sample `11.85`.
+    - best diagnostic value-Q correlation so far (`0.437`), but actor still collapsed to action 0.
+    - Interpretation: improves parts of the representation/value geometry, but actor still does not use the signal.
+- **Follow-up/aggregate results**:
+  - Survival horizon 6, temp `0.1`: `runs/control_ablation/cartpole_survival_enum_h6_temp01_warm3k_5k`
+    - argmax `13.65`, sample `21.10`, Q/real corr `-0.062`, Q pref action 0 in `512/512`.
+    - Longer survival lookahead did not create a useful action-dependent risk signal.
+  - Prior-state + survival h6 temp `0.1`: `runs/control_ablation/cartpole_priorstate1_survival_enum_h6_temp01_warm3k_5k`
+    - argmax `17.70`, sample `19.65`.
+    - actor-vs-real accuracy `0.629`, but Q/real accuracy `0.461`, Q/real corr `0.064`, and one-step MSE worsened to `0.618`.
+    - Interpretation: best behavioral blip, but not a clean Pareto winner because diagnostics are weak and sample behavior remains random-like.
+  - Prior-state + survival h6 temp `0.05`: `runs/control_ablation/cartpole_priorstate1_survival_enum_h6_temp005_warm3k_5k`
+    - argmax `9.60`, sample `22.00`, actor-vs-real accuracy `0.438`.
+    - Sharper actor pressure collapses the modest h6/temp0.1 gain.
+  - Prior-state + survival h6 temp `0.1`, resumed 5k -> 10k: `runs/control_ablation/cartpole_priorstate1_survival_enum_h6_temp01_warm3k_10k`
+    - argmax `13.95`, sample `19.60`, Q/real corr `-0.183`.
+    - The 5k improvement did not compound with more training.
+  - Explicit Q critic, temp `0.05`: `runs/control_ablation/cartpole_qcritic1_temp005_warm3k_5k`
+    - argmax `11.10`, sample `20.70`.
+    - direct Q head became less constant (`action1=289`, `action0=223`) but direct Q/real corr stayed near zero (`0.051`).
+    - Stronger Q pressure still did not produce useful behavior.
+- **Current conclusion**:
+  - None of these options is a true CartPole Pareto improvement. Prior-state + survival h6 temp `0.1` is the best weak candidate, but it is not stable across sharper pressure or longer training.
+  - The consistent pattern is: one-step action-conditioned dynamics are often directionally correct, but actor/critic targets are not turning that into reliable multi-step state-action preference. This is more specific than "Dreamer is broken": the WM can learn local control physics, and simple bandit/survival envs are solved, but CartPole needs a cleaner counterfactual/policy-improvement mechanism than the current sampled discrete actor signal.
+  - Do not move these changes to Pong as a performance improvement yet. The next better experiment should change the actor-learning mechanism itself, for example differentiable soft-action imagination, model-predictive teacher distillation, or a counterfactual all-actions Q target rather than sampled-action Q updates.
+
+### 05-23-26 50k CartPole Control Run - Baseline
+- **Code/setup note**:
+  - Added explicit `general.seed` plumbing for Python/NumPy/Torch, collector env resets, action-space seeding, and deterministic eval resets so 50k comparisons are reproducible.
+  - Verified after seed patch with `uv run python -m compileall -q src scripts tests`, `uv run pytest -q tests`, `git diff --check`, and a short CPU dry-run.
+- **Run**:
+  - `runs/long50k/cartpole_baseline_st_normadv_seed0_50k`
+  - CartPole state-only, seed `0`, `d_hidden=128`, `batch_size=8`, `sequence_length=16`, one collector, `actor_warmup_steps=3000`, `max_train_steps=50000`.
+  - Baseline knobs: straight-through free bits, normalized advantages, `wm_ac_ratio=1`, `critic_replay_scale=0.3`, `actor_lr=3e-5`, `critic_lr=8e-5`.
+- **Behavior checkpoints**:
+  - 30k: argmax `14.20`, sample `20.05`.
+  - 35k: argmax `14.30`, sample `20.25`.
+  - 40k: argmax `9.45`, sample `9.55`.
+  - 45k: argmax `9.25`, sample `9.40`.
+  - 50k final: argmax `8.95`, sample `17.60`.
+- **Q-probe diagnostics**:
+  - 30k artifact: `runs/long50k/q_probe_baseline_seed0_step30000/summary.json`
+    - Q-vs-real accuracy `0.618`, Q/real-delta Pearson `0.323`, actor-vs-real accuracy `0.449`.
+    - Actor preference was mixed but weak (`action1=322`, `action0=190`).
+  - Final artifact: `runs/long50k/q_probe_baseline_seed0_final/summary.json`
+    - Q-vs-real accuracy `0.742`, Q/real-delta Pearson `0.555`.
+    - Actor-vs-real accuracy `0.596`, but actor collapsed to constant action 0 (`512/512`).
+    - Direct Q head remains unhelpful in this baseline checkpoint (`direct_q_pref_hist: action0=512`).
+- **Interpretation**:
+  - More wall clock alone did not fix CartPole. The baseline stayed random-like through 35k, then collapsed around 40k and ended with deterministic return under 10.
+  - This strengthens the A/C-pipeline diagnosis: by final, the value probe has a moderately useful counterfactual action ranking, but the deployed actor still collapses to a constant action. Loss curves also became easier after collapse because failed episodes are short, so loss/throughput are misleading without policy eval.
+  - Next isolated 50k run: prior-state auxiliary only, to test whether the representation/value improvement seen at 5k can prevent late actor collapse when trained longer.
+
+### 05-23-26 50k Matrix Triage - Prior-State Auxiliary
+- **Run**:
+  - `runs/long50k/cartpole_priorstate1_seed0_50k`
+  - Same seeded low-VRAM setup as the baseline, with only `train.prior_state_pred_scale=1.0` added.
+- **Behavior checkpoints**:
+  - 5k: argmax `9.25`, sample `9.80`.
+  - 10k: argmax `11.45`, sample `13.60`.
+  - 15k: argmax `9.45`, sample `10.15`.
+  - 20k: argmax `9.35`, sample `11.65`.
+- **Q-probe diagnostics**:
+  - 5k artifact: `runs/long50k/q_probe_priorstate1_seed0_step5000/summary.json`
+    - Q-vs-real accuracy `0.517`, Q/real-delta Pearson `0.119`, actor-vs-real accuracy `0.404`.
+    - Actor already collapsed to action 1 (`512/512`).
+  - 10k artifact: `runs/long50k/q_probe_priorstate1_seed0_step10000/summary.json`
+    - Q-vs-real accuracy `0.438`, Q/real-delta Pearson `0.441`.
+    - Q and actor both mostly preferred action 1, while one-step state MSE worsened sharply (`5.98`).
+- **Decision**:
+  - Stopped at 20k instead of spending the full 50k budget.
+  - This seeded long run does not support prior-state auxiliary as a Pareto improvement. It was worse than baseline behavior at 5k/10k/15k/20k and showed constant-action collapse rather than delayed recovery.
+  - Next isolated run: survival enumeration h6/temp `0.1`, because it previously gave random-like but slightly longer episodes without the same immediate deterministic collapse.
+
+### 05-23-26 50k Matrix Triage - Survival Enumeration H6 Temp 0.1
+- **Run**:
+  - `runs/long50k/cartpole_survival_h6_temp01_seed0_50k`
+  - Same seeded low-VRAM setup as baseline, with `train.actor_loss_mode=enumerate`, `train.actor_enum_objective=survival`, `train.actor_enum_horizon=6`, `train.actor_enum_temperature=0.1`.
+- **Behavior checkpoints**:
+  - 5k: argmax `28.55`, sample `22.30`.
+  - 10k: argmax `24.05`, sample `21.10`.
+  - 15k: argmax `13.25`, sample `20.95`.
+- **Q-probe diagnostics**:
+  - 5k artifact: `runs/long50k/q_probe_survival_h6_temp01_seed0_step5000/summary.json`
+    - Q-vs-real accuracy `0.461`, Q/real-delta Pearson `0.187`, actor-vs-real accuracy `0.494`.
+    - Actor entropy stayed high (`0.675`) with near-balanced action probabilities (`mean_actor_prob_action1=0.492`).
+- **Decision**:
+  - Stopped at 15k. Survival h6/temp `0.1` is the first seeded variant with a real early behavior edge over baseline, but the edge fades by 15k and diagnostics do not show better counterfactual value learning.
+  - Interpretation: survival enumeration is an anti-collapse/entropy-preserving regularizer, not yet a control-learning improvement. It may be useful as one component, but not as a standalone Pareto winner.
+  - Next run: aggregate prior-state + survival h6/temp `0.1`, because this was the best weak 5k candidate in the earlier unseeded ablation.
+
+### 05-23-26 50k Matrix Triage - Prior-State + Survival H6 Temp 0.1
+- **Run**:
+  - `runs/long50k/cartpole_priorstate1_survival_h6_temp01_seed0_50k`
+  - Same seeded low-VRAM setup as baseline, with both `train.prior_state_pred_scale=1.0` and survival enumeration h6/temp `0.1`.
+- **Behavior checkpoint**:
+  - 5k: argmax `9.55`, sample `22.70`.
+- **Decision**:
+  - Stopped at 5k. This aggregate is much slower after actor warmup (`~0.8` updates/sec, extrapolated 15+ hours for 50k) and does not beat survival-only behavior.
+  - The combination does not aggregate constructively under the fixed-seed matrix: prior-state appears to harm deterministic action selection while survival keeps sampling random-like.
+  - Current best option remains survival-only as an anti-collapse regularizer, but it is not strong enough to move to Pong as a performance improvement.
+
+### 05-23-26 50k Matrix Triage - Explicit Q Critic Temp 0.05
+- **Run**:
+  - `runs/long50k/cartpole_qcritic1_temp005_seed0_50k`
+  - Same seeded low-VRAM setup as baseline, with `train.q_critic_scale=1.0`, `train.actor_loss_mode=qcritic`, `train.q_actor_temperature=0.05`.
+- **Behavior checkpoint**:
+  - 5k: argmax `9.35`, sample `16.60`.
+- **Decision**:
+  - Stopped at 5k. This path is also much slower after actor warmup (`~0.7` updates/sec, extrapolated ~18 hours for 50k) and is behaviorally worse than both baseline and survival-only at the same checkpoint.
+  - Explicit Q pressure with a sharp temperature is not currently a useful actor-learning fix in this implementation.
+- **Matrix conclusion so far**:
+  - Baseline 50k: eventually collapses; final argmax `8.95`, sample `17.60`.
+  - Prior-state: worse than baseline through 20k; not a Pareto improvement.
+  - Survival h6/temp `0.1`: best early isolated behavior (`5k` argmax `28.55`), but decays by 15k and diagnostics show entropy preservation rather than better Q/value learning.
+  - Prior-state + survival: no constructive aggregation and too slow.
+  - Explicit Q critic: no behavior gain and too slow.
+  - Working diagnosis is now sharper: the most useful observed effect is anti-collapse regularization, not improved control. The missing piece is still a policy-improvement target that turns locally correct action-conditioned dynamics into reliable state-dependent first-action choices.
+
+### 06-01-26 MPC Teacher Distillation Probe
+- **Code change**:
+  - Added config-gated `train.actor_loss_mode=mpc_teacher`.
+  - The teacher enumerates short action sequences in the learned world model, scores first actions, and distills the planner target into the actor.
+  - Added knobs: `mpc_teacher_horizon`, `mpc_teacher_temperature`, `mpc_teacher_loss_scale`, `mpc_teacher_objective`, `mpc_teacher_target`, `mpc_teacher_margin_min`, and `mpc_teacher_normalize_values`.
+  - Default behavior is unchanged unless `actor_loss_mode=mpc_teacher`.
+- **Smoke verification**:
+  - CPU dry-run with `actor_loss_mode=mpc_teacher`, horizon `2`, and no actor warmup completed without exceptions.
+- **Hard teacher run**:
+  - `runs/mpc_teacher/cartpole_mpc_survival_h6_hard_m02_seed0_10k`
+  - Settings: survival objective, horizon `6`, hard argmax teacher, margin gate `0.02`, stopped after 5k diagnostics.
+  - 5k behavior: argmax `11.50`, sample `11.55`.
+  - Q probe: Q-vs-real accuracy `0.607`, Q/real Pearson `-0.126`, actor-vs-real `0.596`.
+  - Actor collapsed mostly to action 0 (`actor_pref_hist: action0=489, action1=23`) with very low entropy (`0.034`).
+- **Soft teacher run**:
+  - `runs/mpc_teacher/cartpole_mpc_survival_h6_soft_seed0_5k`
+  - Settings: survival objective, horizon `6`, soft teacher, no margin gate, no value normalization.
+  - 5k behavior: argmax `9.60`, sample `23.50`.
+  - Q probe: Q-vs-real accuracy `0.427`, Q/real Pearson `-0.069`, actor-vs-real `0.461`.
+  - Actor stayed high-entropy (`0.686`) and near-balanced (`mean_actor_prob_action1=0.501`), so the sample return is random-like rather than learned control.
+- **Interpretation**:
+  - Naive MPC teacher distillation does not solve the A/C issue yet.
+  - Hard planner labels are too brittle because the learned model/continue signal is not reliable enough; they force constant-action collapse.
+  - Soft planner labels behave like the earlier survival enumeration: useful entropy preservation, but no deterministic state-dependent controller.
+  - This rules out the simple version of "just distill the learned-model planner" as the missing piece. A stronger next architecture experiment should either improve the teacher source, e.g. true-state/decoded-state MPC or heuristic bootstrapping for CartPole diagnostics, or improve actor observability with a state/decoded-state skip before expecting model-only MPC to work.

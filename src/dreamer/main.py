@@ -14,6 +14,7 @@ Usage:
 """
 
 import os
+import random
 import subprocess
 import socket
 import tempfile
@@ -27,6 +28,7 @@ from omegaconf import DictConfig, OmegaConf
 
 os.environ.setdefault("HSA_OVERRIDE_GFX_VERSION", "11.0.0")
 import mlflow
+import numpy as np
 import torch
 import multiprocessing as mp
 
@@ -47,6 +49,16 @@ def resolve_device(device_str: str) -> str:
             return "mps"
         return "cpu"
     return device_str
+
+
+def seed_everything(seed: int) -> None:
+    """Seed process-local RNGs used by training orchestration."""
+    seed = int(seed)
+    random.seed(seed)
+    np.random.seed(seed % (2**32 - 1))
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def is_port_in_use(port: int) -> bool:
@@ -153,7 +165,10 @@ def run_training(
     print(f"  batch_size: {flat_cfg.batch_size}")
     print(f"  actor_lr: {flat_cfg.actor_lr}")
     print(f"  actor_entropy_coef: {flat_cfg.actor_entropy_coef}")
+    print(f"  seed: {flat_cfg.seed}")
     print(f"  Output: {log_dir}")
+
+    seed_everything(flat_cfg.seed)
 
     if checkpoint_path:
         print(f"  Checkpoint: {checkpoint_path}")
@@ -229,7 +244,7 @@ def run_training(
         stop_event = mp_ctx.Event()
 
         experience_loops = []
-        for _ in range(max(1, flat_cfg.num_collectors)):
+        for collector_id in range(max(1, flat_cfg.num_collectors)):
             p = mp_ctx.Process(
                 target=collect_experiences,
                 args=(
@@ -239,6 +254,7 @@ def run_training(
                     stop_event,
                     str(log_dir),
                     checkpoint_path,
+                    collector_id,
                 ),
             )
             experience_loops.append(p)

@@ -1,24 +1,28 @@
 import math
 import copy
 import json
+import random
 from dataclasses import asdict
 from typing import NamedTuple, Optional
 import torch
 import torch.nn.functional as F
 from queue import Full
 import mlflow
+import numpy as np
 import os
 import time
 
 from .logging import create_step_metrics, log_step_metrics, log_progress
 from .forward import dreamer_step
-from ..runtime.replay_buffer import EpisodeReplayBuffer
+from ..runtime.replay_buffer import EpisodeReplayBuffer, EnvData
+from .checkpoints import save_checkpoint, load_checkpoint
 from ..models import (
     symlog,
     symexp,
     resize_pixels_to_target,
     initialize_actor,
     initialize_critic,
+    initialize_q_critic,
     initialize_world_model,
     LaProp,
     adaptive_gradient_clipping,
@@ -27,17 +31,14 @@ from .mlflow_logger import MLflowLogger
 from ..runtime.env import create_env
 
 
-class EnvData(NamedTuple):
-    """Immutable batch of environment data sampled from replay."""
-
-    states: torch.Tensor  # (B, T, n_obs) — symlog'd
-    actions: torch.Tensor  # (B, T, n_actions)
-    rewards: torch.Tensor  # (B, T)
-    is_last: torch.Tensor  # (B, T)
-    is_terminal: torch.Tensor  # (B, T)
-    mask: torch.Tensor  # (B, T) — 1=real, 0=padded
-    pixels: Optional[torch.Tensor] = None  # (B, T, C, H, W)
-    pixels_original: Optional[torch.Tensor] = None  # (B, T, C, H, W)
+def seed_everything(seed: int) -> None:
+    """Seed process-local RNGs for reproducible long-run comparisons."""
+    seed = int(seed)
+    random.seed(seed)
+    np.random.seed(seed % (2**32 - 1))
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 class WorldModelTrainer:
@@ -64,6 +65,7 @@ class WorldModelTrainer:
         self.dry_run = dry_run
         self.device = torch.device(device)
         self.use_pixels = config.use_pixels
+        seed_everything(int(getattr(config, "seed", 0)) + 2000)
 
         # EMA For Actor Critic
         self.S = 0.0
@@ -74,6 +76,7 @@ class WorldModelTrainer:
         # Model Init
         self.actor = initialize_actor(self.device, config)
         self.critic = initialize_critic(self.device, config)
+        self.q_critic = initialize_q_critic(self.device, config)
         self.encoder, self.world_model = initialize_world_model(
             self.device, config, batch_size=config.batch_size
         )
@@ -96,6 +99,7 @@ class WorldModelTrainer:
                 self.world_model = torch.compile(self.world_model)
                 self.actor = torch.compile(self.actor)
                 self.critic = torch.compile(self.critic)
+                self.q_critic = torch.compile(self.q_critic)
                 print("torch.compile enabled for trainer models.")
             except Exception as exc:
                 print(f"torch.compile failed ({exc}); running uncompiled.")
@@ -111,8 +115,11 @@ class WorldModelTrainer:
             lr=config.wm_lr,
             weight_decay=config.weight_decay,
         )
+        self.critic_params = list(self.critic.parameters()) + list(
+            self.q_critic.parameters()
+        )
         self.critic_optimizer = LaProp(
-            self.critic.parameters(),
+            self.critic_params,
             lr=config.critic_lr,
             weight_decay=config.weight_decay,
         )
@@ -125,6 +132,9 @@ class WorldModelTrainer:
         # distinct critic target network for stability (DreamerV3)
         self.critic_ema = copy.deepcopy(self.critic)
         for param in self.critic_ema.parameters():
+            param.requires_grad = False
+        self.q_critic_ema = copy.deepcopy(self.q_critic)
+        for param in self.q_critic_ema.parameters():
             param.requires_grad = False
 
         self.train_step = 0
@@ -190,7 +200,27 @@ class WorldModelTrainer:
         self._resume_env_steps_offset = 0
 
         if checkpoint_path:
-            self.load_checkpoint(checkpoint_path)
+            chk = load_checkpoint(
+                checkpoint_path,
+                self.device,
+                self.encoder,
+                self.world_model,
+                self.actor,
+                self.critic,
+                self.critic_ema,
+                self.q_critic,
+                self.q_critic_ema,
+                self.wm_optimizer,
+                self.actor_optimizer,
+                self.critic_optimizer,
+                self.S,
+                self.ret_lo,
+                self.ret_hi,
+            )
+            self.train_step = chk["step"]
+            self.S = chk["return_scale"]
+            self.ret_lo = chk["ret_lo"]
+            self.ret_hi = chk["ret_hi"]
             denom = max(1e-8, config.replay_ratio)
             self._resume_env_steps_offset = int(
                 self.train_step
@@ -238,8 +268,7 @@ class WorldModelTrainer:
             pixels_out = None
             pixels_original_out = None
 
-        # wonder if we should not do this here...
-        states_out = symlog(torch.stack(batch_states).to(self.device))
+        states_out = torch.stack(batch_states).to(self.device)
 
         return EnvData(
             states=states_out,
@@ -252,7 +281,7 @@ class WorldModelTrainer:
             pixels_original=pixels_original_out,
         )
 
-    def prevent_stale_training(self):
+    def prevent_stale_training(self) -> bool:
         """Gate training speed to match environment data collection rate.
 
         Returns True (and sleeps briefly) if we've trained faster than
@@ -275,34 +304,13 @@ class WorldModelTrainer:
             return True
         return False
 
-    def zeroize_state(self, actual_batch_size, h_dim):
-        """Reset RSSM hidden state and zero all optimizer gradients for a new batch."""
-        self.world_model.h_prev = torch.zeros(
-            actual_batch_size, h_dim, device=self.device
-        )
-        self.world_model.z_prev = torch.zeros(
-            actual_batch_size,
-            self.config.num_latents,
-            self.config.d_hidden // 16,
-            device=self.device,
-        )
-
-        # Zero gradients before accumulating losses
-        self.wm_optimizer.zero_grad()
-        self.critic_optimizer.zero_grad()
-        self.actor_optimizer.zero_grad()
-
-        # Initialize loss accumulators - will be set on first iteration
-        total_wm_loss = None
-        total_actor_loss = None
-        total_critic_loss = None
-        return total_wm_loss, total_actor_loss, total_critic_loss
-
     def train_models(self):
         """Main training loop: sample → forward → backward → log → eval → checkpoint."""
-        # Push current weights immediately so collectors do not spend startup
-        # episodes in random-action mode when resuming from checkpoint.
-        self.send_models_to_collector(self.train_step)
+        # Keep fresh runs in random-action collection during WM warmup. Once
+        # warmup is over, send policy weights so the collector switches to the
+        # learned actor. Resumed checkpoints beyond warmup still sync at startup.
+        if self.train_step >= self.config.actor_warmup_steps:
+            self.send_models_to_collector(self.train_step)
 
         while self.train_step < self.config.max_train_steps:
             if self.prevent_stale_training():
@@ -316,7 +324,12 @@ class WorldModelTrainer:
                 self.apply_lr_schedule()
 
             # Data loading
-            batch = self.get_data_from_buffer()
+            batch = self.replay_buffer.sample_tensors(
+                self.batch_size,
+                self.device,
+                use_pixels=self.use_pixels,
+                target_size=self.config.encoder_cnn_target_size,
+            )
             B, T = batch.states.shape[:2]
 
             # Skip if no data was retrieved
@@ -325,12 +338,15 @@ class WorldModelTrainer:
                 continue
 
             # Reset hidden states per trajectory - match actual input batch size
-            h_dim = self.world_model.h_prev.shape[1]
+            self.world_model.init_state(B, self.device)
 
-            # Reset hidden states per trajectory - match actual input batch size
-            total_wm_loss, total_actor_loss, total_critic_loss = self.zeroize_state(
-                B, h_dim
-            )
+            self.wm_optimizer.zero_grad()
+            self.critic_optimizer.zero_grad()
+            self.actor_optimizer.zero_grad()
+
+            total_wm_loss = None
+            total_actor_loss = None
+            total_critic_loss = None
 
             do_log_images = self.train_step % self.image_log_every == 0
             metrics = create_step_metrics(self.device, do_log_images)
@@ -345,9 +361,10 @@ class WorldModelTrainer:
             train_start_t = min(self.config.replay_burn_in, T - 1)
             effective_train_steps = T - train_start_t
 
-            states_flat = batch.states.view(
+            states_flat_raw = batch.states.view(
                 B * T, batch.states.shape[-1]
             )  # (B*T, n_obs)
+            states_flat = symlog(states_flat_raw)
 
             if self.use_pixels and batch.pixels is not None:
                 pixels_flat = batch.pixels.view(
@@ -360,8 +377,10 @@ class WorldModelTrainer:
             all_tokens = self.encoder(encoder_input)  # (B*T, token_dim)
             all_tokens = all_tokens.view(B, T, -1)
 
-            # Decide AC update once per batch (ratio)
-            skip_ac_batch = self.should_skip_ac_update()
+            # Decide AC update once per batch. During warmup, train only the
+            # world model so actor/critic do not optimize against a cold RSSM.
+            in_actor_warmup = self.train_step < self.config.actor_warmup_steps
+            skip_ac_batch = in_actor_warmup or self.should_skip_ac_update()
 
             # Forward pass: RSSM rollout + dreaming + replay grounding
             result = dreamer_step(
@@ -370,6 +389,8 @@ class WorldModelTrainer:
                 actor=self.actor,
                 critic=self.critic,
                 critic_ema=self.critic_ema,
+                q_critic=self.q_critic,
+                q_critic_ema=self.q_critic_ema,
                 batch=batch,
                 metrics=metrics,
                 all_tokens=all_tokens,
@@ -413,30 +434,43 @@ class WorldModelTrainer:
             else:
                 # Full training: WM + critic + actor
                 total_wm_loss.backward()
-                total_critic_loss.backward()
-                total_actor_loss.backward()
+                has_critic_grad = bool(total_critic_loss.requires_grad)
+                has_actor_grad = bool(total_actor_loss.requires_grad)
+                if has_critic_grad:
+                    total_critic_loss.backward()
+                if has_actor_grad:
+                    total_actor_loss.backward()
                 # AGC: clip gradients based on param/grad norm ratio (DreamerV3)
                 # Use more aggressive clipping for pixel observations (prevent NaN)
                 agc_clip = 0.15 if self.use_pixels else 0.3
                 adaptive_gradient_clipping(self.wm_params, clip_factor=agc_clip)
-                adaptive_gradient_clipping(
-                    self.critic.parameters(), clip_factor=agc_clip
-                )
-                adaptive_gradient_clipping(
-                    self.actor.parameters(), clip_factor=agc_clip
-                )
                 self.wm_optimizer.step()
-                self.critic_optimizer.step()
-                self.actor_optimizer.step()
+                if has_critic_grad:
+                    adaptive_gradient_clipping(
+                        self.critic_params, clip_factor=agc_clip
+                    )
+                    self.critic_optimizer.step()
+                if has_actor_grad:
+                    adaptive_gradient_clipping(
+                        self.actor.parameters(), clip_factor=agc_clip
+                    )
+                    self.actor_optimizer.step()
 
                 # Polyak update for critic EMA
-                with torch.no_grad():
-                    for param, param_ema in zip(
-                        self.critic.parameters(), self.critic_ema.parameters()
-                    ):
-                        param_ema.data.mul_(self.config.critic_ema_decay).add_(
-                            param.data, alpha=1 - self.config.critic_ema_decay
-                        )
+                if has_critic_grad:
+                    with torch.no_grad():
+                        for param, param_ema in zip(
+                            self.critic.parameters(), self.critic_ema.parameters()
+                        ):
+                            param_ema.data.mul_(self.config.critic_ema_decay).add_(
+                                param.data, alpha=1 - self.config.critic_ema_decay
+                            )
+                        for param, param_ema in zip(
+                            self.q_critic.parameters(), self.q_critic_ema.parameters()
+                        ):
+                            param_ema.data.mul_(self.config.critic_ema_decay).add_(
+                                param.data, alpha=1 - self.config.critic_ema_decay
+                            )
 
             # End backward
 
@@ -466,7 +500,10 @@ class WorldModelTrainer:
             )
 
             # Send models to collector periodically
-            if self.train_step % self.config.steps_per_weight_sync == 0:
+            if (
+                self.train_step >= self.config.actor_warmup_steps
+                and self.train_step % self.config.steps_per_weight_sync == 0
+            ):
                 self.send_models_to_collector(self.train_step)
 
             # Periodic progress logging
@@ -511,11 +548,46 @@ class WorldModelTrainer:
                 and self.train_step > 0
                 and self.train_step % self.config.checkpoint_interval == 0
             ):
-                self.save_checkpoint()
+                save_checkpoint(
+                    self.checkpoint_dir,
+                    self.train_step,
+                    self.encoder,
+                    self.world_model,
+                    self.actor,
+                    self.critic,
+                    self.critic_ema,
+                    self.q_critic,
+                    self.q_critic_ema,
+                    self.wm_optimizer,
+                    self.actor_optimizer,
+                    self.critic_optimizer,
+                    self.S,
+                    self.ret_lo,
+                    self.ret_hi,
+                    self.mlflow_run_id,
+                )
 
         # Final save (skip in dry_run)
         if not self.dry_run:
-            self.save_checkpoint(final=True)
+            save_checkpoint(
+                self.checkpoint_dir,
+                self.train_step,
+                self.encoder,
+                self.world_model,
+                self.actor,
+                self.critic,
+                self.critic_ema,
+                self.q_critic,
+                self.q_critic_ema,
+                self.wm_optimizer,
+                self.actor_optimizer,
+                self.critic_optimizer,
+                self.S,
+                self.ret_lo,
+                self.ret_hi,
+                self.mlflow_run_id,
+                final=True,
+            )
             print(f"Training complete. Final checkpoint saved to {self.checkpoint_dir}")
         else:
             print("DRY RUN complete - no checkpoint saved.")
@@ -610,8 +682,9 @@ class WorldModelTrainer:
         episode_rewards = []
 
         with torch.no_grad():
-            for _ in range(num_episodes):
-                obs, _info = env.reset()
+            eval_seed = int(getattr(self.config, "seed", 0)) + 1_000_000 + step * 1000
+            for episode_idx in range(num_episodes):
+                obs, _info = env.reset(seed=eval_seed + episode_idx)
                 h = torch.zeros(
                     1,
                     self.config.d_hidden * self.config.rnn_n_blocks,
@@ -718,86 +791,6 @@ class WorldModelTrainer:
     def _get_model(self, model):
         """Get underlying model (handles both compiled and non-compiled)."""
         return getattr(model, "_orig_mod", model)
-
-    def save_checkpoint(self, final=False):
-        """Save all model checkpoints."""
-        suffix = "final" if final else f"step_{self.train_step}"
-        checkpoint = {
-            "step": self.train_step,
-            "encoder": self._get_model(self.encoder).state_dict(),
-            "world_model": {
-                k: v
-                for k, v in self._get_model(self.world_model).state_dict().items()
-                if k not in ("h_prev", "z_prev")
-            },
-            "actor": self._get_model(self.actor).state_dict(),
-            "critic": self._get_model(self.critic).state_dict(),
-            "critic_ema": self._get_model(self.critic_ema).state_dict(),
-            "wm_optimizer": self.wm_optimizer.state_dict(),
-            "actor_optimizer": self.actor_optimizer.state_dict(),
-            "critic_optimizer": self.critic_optimizer.state_dict(),
-            "return_scale": self.S,
-            "ret_lo": self.ret_lo,
-            "ret_hi": self.ret_hi,
-            "mlflow_run_id": self.mlflow_run_id,
-        }
-        path = os.path.join(self.checkpoint_dir, f"checkpoint_{suffix}.pt")
-        torch.save(checkpoint, path)
-        print(f"Checkpoint saved: {path}")
-
-    def load_checkpoint(self, checkpoint_path):
-        """
-        Load full checkpoint (encoder, world model, actor, critic, optimizers).
-
-        Args:
-            checkpoint_path: Path to checkpoint file
-        """
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
-
-        # Load encoder and world_model
-        self._get_model(self.encoder).load_state_dict(checkpoint["encoder"])
-        self._get_model(self.world_model).load_state_dict(
-            checkpoint["world_model"], strict=False
-        )
-
-        # Load actor/critic
-        if "actor" in checkpoint:
-            self._get_model(self.actor).load_state_dict(checkpoint["actor"])
-            self._get_model(self.critic).load_state_dict(checkpoint["critic"])
-            if "critic_ema" in checkpoint:
-                self._get_model(self.critic_ema).load_state_dict(
-                    checkpoint["critic_ema"]
-                )
-            else:
-                # Backward compatibility: old checkpoints did not save critic_ema.
-                self._get_model(self.critic_ema).load_state_dict(
-                    self._get_model(self.critic).state_dict()
-                )
-
-        # Restore optimizers (skip if architecture changed)
-        if "wm_optimizer" in checkpoint:
-            try:
-                self.wm_optimizer.load_state_dict(checkpoint["wm_optimizer"])
-            except ValueError as e:
-                if "doesn't match the size" in str(e):
-                    print(
-                        f"Warning: Skipping WM optimizer state (architecture changed)"
-                    )
-                else:
-                    raise
-        if "actor_optimizer" in checkpoint:
-            self.actor_optimizer.load_state_dict(checkpoint["actor_optimizer"])
-        if "critic_optimizer" in checkpoint:
-            self.critic_optimizer.load_state_dict(checkpoint["critic_optimizer"])
-
-        # Restore auxiliary training state when available.
-        self.S = float(checkpoint.get("return_scale", self.S))
-        self.ret_lo = checkpoint.get("ret_lo", self.ret_lo)
-        self.ret_hi = checkpoint.get("ret_hi", self.ret_hi)
-
-        self.train_step = checkpoint.get("step", 0)
-        print(f"Resumed checkpoint from {checkpoint_path} at step {self.train_step}")
-
 
     def send_models_to_collector(self, step: int):
         """Push current model weights to the data collection process."""

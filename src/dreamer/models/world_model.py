@@ -248,6 +248,15 @@ class RSSMWorldModel(nn.Module):
         z_flat = z.view(z.size(0), -1)
         return torch.cat([h, z_flat], dim=-1)
 
+    def init_state(self, batch_size, device="cpu"):
+        """Initialize recurrent states to zero for a new batch sequence."""
+        self.h_prev = torch.zeros(
+            batch_size, self.d_hidden * self.n_blocks, device=device
+        )
+        self.z_prev = torch.zeros(
+            batch_size, self.n_latents, self.n_classes, device=device
+        )
+
 
 class GatedRecurrentUnit(nn.Module):
     """

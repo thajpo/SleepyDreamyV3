@@ -3,7 +3,8 @@ from types import SimpleNamespace
 import torch
 
 from dreamer.models.decoder import ObservationDecoder
-from dreamer.models.losses import compute_wm_loss
+from dreamer.models.losses import compute_actor_critic_losses, compute_wm_loss
+from dreamer.models.math_utils import symlog
 
 
 def test_compute_wm_loss_pixel_only_no_state_is_finite():
@@ -21,7 +22,6 @@ def test_compute_wm_loss_pixel_only_no_state_is_finite():
     continue_logits = torch.randn(batch_size, 1)
 
     posterior_logits = torch.randn(batch_size, n_latents, n_classes)
-    posterior_dist = torch.distributions.Categorical(logits=posterior_logits)
     prior_logits = torch.randn(batch_size, n_latents, n_classes)
 
     bins = torch.linspace(-2.0, 2.0, n_bins)
@@ -34,7 +34,7 @@ def test_compute_wm_loss_pixel_only_no_state_is_finite():
         reward_t=reward_target,
         terminated_t=terminated,
         continue_logits=continue_logits,
-        posterior_dist=posterior_dist,
+        posterior_logits=posterior_logits,
         prior_logits=prior_logits,
         B=bins,
         config=cfg,
@@ -46,6 +46,131 @@ def test_compute_wm_loss_pixel_only_no_state_is_finite():
     assert torch.isfinite(total_loss)
     assert torch.isfinite(loss_dict["prediction_pixel"])
     assert loss_dict["prediction_vector"].item() == 0.0
+
+
+def _free_bits_gradient_case(straight_through):
+    batch_size = 4
+    n_bins = 5
+    n_latents = 8
+    n_classes = 4
+
+    posterior_logits = torch.randn(batch_size, n_latents, n_classes)
+    prior_logits = (posterior_logits + 0.01 * torch.randn_like(posterior_logits))
+    prior_logits = prior_logits.detach().requires_grad_()
+
+    cfg = SimpleNamespace(
+        beta_dyn=1.0,
+        beta_rep=0.0,
+        beta_pred=0.0,
+        free_bits_straight_through=straight_through,
+    )
+    total_loss, loss_dict = compute_wm_loss(
+        obs_reconstruction={"state": torch.zeros(batch_size, 1)},
+        obs_t={"state": torch.zeros(batch_size, 1)},
+        reward_dist=torch.zeros(batch_size, n_bins),
+        reward_t=torch.zeros(batch_size),
+        terminated_t=torch.zeros(batch_size, dtype=torch.bool),
+        continue_logits=torch.zeros(batch_size, 1),
+        posterior_logits=posterior_logits,
+        prior_logits=prior_logits,
+        B=torch.linspace(-2.0, 2.0, n_bins),
+        config=cfg,
+        device=prior_logits.device,
+        use_pixels=False,
+        sample_mask=torch.ones(batch_size),
+    )
+
+    assert loss_dict["kl_dynamics_raw"].item() < 1.0
+    assert loss_dict["dynamics"].item() == 1.0
+
+    total_loss.backward()
+    return prior_logits.grad
+
+
+def test_free_bits_preserves_prior_gradient_below_threshold():
+    grad = _free_bits_gradient_case(straight_through=True)
+    assert grad is not None
+    assert grad.norm().item() > 0.0
+
+
+def test_hard_free_bits_clamp_blocks_prior_gradient_below_threshold():
+    grad = _free_bits_gradient_case(straight_through=False)
+    assert grad is not None
+    assert grad.norm().item() == 0.0
+
+
+def test_state_decoder_loss_uses_raw_target_symlog_once():
+    batch_size = 3
+    n_bins = 5
+    n_latents = 8
+    n_classes = 4
+    raw_state = torch.tensor(
+        [[0.0, 1.0, -2.0, 3.0], [0.5, -0.5, 2.0, -3.0], [1.5, 0.0, -1.0, 2.5]]
+    )
+
+    cfg = SimpleNamespace(beta_dyn=0.0, beta_rep=0.0, beta_pred=1.0)
+    _total_loss, loss_dict = compute_wm_loss(
+        obs_reconstruction={"state": symlog(raw_state)},
+        obs_t={"state": raw_state},
+        reward_dist=torch.zeros(batch_size, n_bins),
+        reward_t=torch.zeros(batch_size),
+        terminated_t=torch.zeros(batch_size, dtype=torch.bool),
+        continue_logits=torch.zeros(batch_size, 1),
+        posterior_logits=torch.zeros(batch_size, n_latents, n_classes),
+        prior_logits=torch.zeros(batch_size, n_latents, n_classes),
+        B=torch.linspace(-2.0, 2.0, n_bins),
+        config=cfg,
+        device=raw_state.device,
+        use_pixels=False,
+        sample_mask=torch.ones(batch_size),
+    )
+
+    assert loss_dict["prediction_vector"].item() == 0.0
+
+
+def test_actor_advantage_normalization_centers_constant_returns():
+    horizon = 2
+    batch_size = 3
+    n_bins = 5
+    n_actions = 2
+    bins = torch.linspace(-2.0, 2.0, n_bins)
+
+    values = torch.zeros(horizon, batch_size)
+    lambda_returns = torch.ones(horizon, batch_size)
+    value_logits = torch.zeros(horizon, batch_size, n_bins)
+    continues = torch.zeros(horizon, batch_size)
+    action_logits = torch.zeros(horizon, batch_size, n_actions)
+    sampled_actions = torch.zeros(horizon, batch_size, dtype=torch.long)
+
+    normalized_actor_loss, _critic_loss, _entropy = compute_actor_critic_losses(
+        value_logits,
+        values,
+        lambda_returns,
+        continues,
+        action_logits,
+        sampled_actions,
+        bins,
+        S=1.0,
+        gamma=0.997,
+        actor_entropy_coef=0.0,
+        normalize_advantages=True,
+    )
+    raw_actor_loss, _critic_loss, _entropy = compute_actor_critic_losses(
+        value_logits,
+        values,
+        lambda_returns,
+        continues,
+        action_logits,
+        sampled_actions,
+        bins,
+        S=1.0,
+        gamma=0.997,
+        actor_entropy_coef=0.0,
+        normalize_advantages=False,
+    )
+
+    assert normalized_actor_loss.item() == 0.0
+    assert raw_actor_loss.item() > 0.0
 
 
 def test_observation_decoder_skips_state_head_when_n_observations_zero():

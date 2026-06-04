@@ -1,4 +1,7 @@
-"""Checkpoint saving and loading for DreamerV3 training."""
+"""Checkpoint saving and loading for DreamerV3 training.
+
+Abstracts file I/O out of the training loop to keep the Trainer stateless.
+"""
 import os
 import torch
 
@@ -15,31 +18,19 @@ def save_checkpoint(
     world_model,
     actor,
     critic,
+    critic_ema,
+    q_critic,
+    q_critic_ema,
     wm_optimizer,
     actor_optimizer,
     critic_optimizer,
-    final=False,
+    return_scale,
+    ret_lo,
+    ret_hi,
     mlflow_run_id=None,
+    final=False,
 ):
-    """
-    Save all model checkpoints.
-
-    Args:
-        checkpoint_dir: Directory to save checkpoints
-        train_step: Current training step
-        encoder: Encoder network
-        world_model: World model network
-        actor: Actor network
-        critic: Critic network
-        wm_optimizer: World model optimizer
-        actor_optimizer: Actor optimizer
-        critic_optimizer: Critic optimizer
-        final: If True, save as final checkpoint
-        mlflow_run_id: MLflow run ID for resume support
-
-    Returns:
-        Path to saved checkpoint
-    """
+    """Save all model checkpoints and auxiliary training state."""
     suffix = "final" if final else f"step_{train_step}"
     checkpoint = {
         "step": train_step,
@@ -51,15 +42,20 @@ def save_checkpoint(
         },
         "actor": get_model(actor).state_dict(),
         "critic": get_model(critic).state_dict(),
+        "critic_ema": get_model(critic_ema).state_dict(),
+        "q_critic": get_model(q_critic).state_dict(),
+        "q_critic_ema": get_model(q_critic_ema).state_dict(),
         "wm_optimizer": wm_optimizer.state_dict(),
         "actor_optimizer": actor_optimizer.state_dict(),
         "critic_optimizer": critic_optimizer.state_dict(),
+        "return_scale": return_scale,
+        "ret_lo": ret_lo,
+        "ret_hi": ret_hi,
         "mlflow_run_id": mlflow_run_id,
     }
     path = os.path.join(checkpoint_dir, f"checkpoint_{suffix}.pt")
     torch.save(checkpoint, path)
     print(f"Checkpoint saved: {path}")
-    return path
 
 
 def load_checkpoint(
@@ -69,50 +65,73 @@ def load_checkpoint(
     world_model,
     actor,
     critic,
+    critic_ema,
+    q_critic,
+    q_critic_ema,
     wm_optimizer,
     actor_optimizer,
     critic_optimizer,
+    current_return_scale,
+    current_ret_lo,
+    current_ret_hi,
 ):
     """
     Load full checkpoint (encoder, world model, actor, critic, optimizers).
-
-    Args:
-        checkpoint_path: Path to checkpoint file
-        device: Torch device
-        encoder: Encoder network
-        world_model: World model network
-        actor: Actor network
-        critic: Critic network
-        wm_optimizer: World model optimizer
-        actor_optimizer: Actor optimizer
-        critic_optimizer: Critic optimizer
-
-    Returns:
-        train_step: Step to resume from
+    Returns a dictionary of extra state (step, return scales).
     """
     checkpoint = torch.load(checkpoint_path, map_location=device)
 
     # Load encoder and world_model
     get_model(encoder).load_state_dict(checkpoint["encoder"])
-    get_model(world_model).load_state_dict(
-        checkpoint["world_model"], strict=False
-    )
+    get_model(world_model).load_state_dict(checkpoint["world_model"], strict=False)
 
-    # Load actor/critic if present
+    # Load actor/critic
     if "actor" in checkpoint:
         get_model(actor).load_state_dict(checkpoint["actor"])
         get_model(critic).load_state_dict(checkpoint["critic"])
+        if "critic_ema" in checkpoint:
+            get_model(critic_ema).load_state_dict(checkpoint["critic_ema"])
+        else:
+            # Backward compatibility: old checkpoints did not save critic_ema.
+            get_model(critic_ema).load_state_dict(get_model(critic).state_dict())
+        if "q_critic" in checkpoint:
+            get_model(q_critic).load_state_dict(checkpoint["q_critic"])
+            if "q_critic_ema" in checkpoint:
+                get_model(q_critic_ema).load_state_dict(checkpoint["q_critic_ema"])
+            else:
+                get_model(q_critic_ema).load_state_dict(get_model(q_critic).state_dict())
 
-    # Restore optimizers if present
+    # Restore optimizers (skip if architecture changed)
     if "wm_optimizer" in checkpoint:
-        wm_optimizer.load_state_dict(checkpoint["wm_optimizer"])
+        try:
+            wm_optimizer.load_state_dict(checkpoint["wm_optimizer"])
+        except ValueError as e:
+            if "doesn't match the size" in str(e):
+                print(f"Warning: Skipping WM optimizer state (architecture changed)")
+            else:
+                raise
     if "actor_optimizer" in checkpoint:
         actor_optimizer.load_state_dict(checkpoint["actor_optimizer"])
     if "critic_optimizer" in checkpoint:
-        critic_optimizer.load_state_dict(checkpoint["critic_optimizer"])
+        try:
+            critic_optimizer.load_state_dict(checkpoint["critic_optimizer"])
+        except ValueError as e:
+            if "different number of parameter groups" in str(e) or "size" in str(e):
+                print("Warning: Skipping critic optimizer state (architecture changed)")
+            else:
+                raise
 
-    train_step = checkpoint.get("step", 0)
-    print(
-        f"Resumed checkpoint from {checkpoint_path} at step {train_step}"
-    )
-    return train_step
+    # Package returns
+    step = checkpoint.get("step", 0)
+    S = float(checkpoint.get("return_scale", current_return_scale))
+    ret_lo = checkpoint.get("ret_lo", current_ret_lo)
+    ret_hi = checkpoint.get("ret_hi", current_ret_hi)
+
+    print(f"Resumed checkpoint from {checkpoint_path} at step {step}")
+
+    return {
+        "step": step,
+        "return_scale": S,
+        "ret_lo": ret_lo,
+        "ret_hi": ret_hi,
+    }
