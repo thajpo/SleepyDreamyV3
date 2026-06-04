@@ -175,6 +175,39 @@ src/dreamer/
 4. Actor-critic trains on imagined trajectories (dream rollouts)
 5. Updated policy weights are synced back to the collector
 
+## Reviewer Notes
+
+This repository is intended to show ML engineering depth: paper-to-code
+translation, modular model components, config-driven training, process-separated
+collection/training, experiment logging, and tests around the highest-risk math
+and runtime pieces.
+
+What is straightforward to inspect:
+
+- `src/dreamer/models/`: RSSM world model, encoder/decoder, losses, dreaming,
+  optimizer helpers, and DreamerV3 math utilities.
+- `src/dreamer/trainer/`: training loop, checkpointing, MLflow logging, and
+  forward-pass helpers.
+- `src/dreamer/runtime/`: environment construction, collector process, and
+  replay buffer.
+- `tests/`: unit/component tests for config behavior, simple custom
+  environments, two-hot encoding, pixel-only world-model loss, free-bits
+  gradients, actor advantage normalization, and decoder edge cases.
+- `.github/workflows/pr-checks.yml`: baseline pull-request checks with stable
+  `lint` and `test` jobs.
+
+Current limitations:
+
+- Full training is intentionally not run in hosted CI; CI verifies syntax and
+  fast tests only.
+- The README still needs a reproduced experiment report for the extended run
+  that solved the environment: config, seed, runtime, return curve, checkpoint
+  hash, and evaluation video/GIF.
+- Generated checkpoints, MLflow runs, and videos should stay out of normal Git
+  history and be linked as release artifacts or external experiment artifacts.
+- The next portfolio polish pass should add one short result section with a
+  plot and one trained-policy clip.
+
 ## Troubleshooting
 
 ### Common Issues
