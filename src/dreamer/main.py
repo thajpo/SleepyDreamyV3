@@ -19,7 +19,7 @@ import subprocess
 import socket
 import tempfile
 from dataclasses import asdict
-from typing import List, Tuple
+from typing import Protocol, Sequence
 from datetime import datetime
 from pathlib import Path
 
@@ -38,6 +38,29 @@ from dreamer.config import (
 )
 from dreamer.trainer import train_world_model
 from dreamer.runtime.collector import collect_experiences
+
+
+class ChildProcessHandle(Protocol):
+    """Process operations needed by the parent shutdown contract."""
+
+    @property
+    def exitcode(self) -> int | None: ...
+
+    def join(self, timeout: float | None = None) -> None: ...
+
+    def is_alive(self) -> bool: ...
+
+    def terminate(self) -> None: ...
+
+
+class StopEvent(Protocol):
+    """Minimal event interface used to stop collector processes."""
+
+    def set(self) -> None: ...
+
+
+class ChildProcessError(RuntimeError):
+    """Raised when a required training subprocess fails or cannot stop."""
 
 
 def resolve_device(device_str: str) -> str:
@@ -104,6 +127,40 @@ def start_mlflow_ui(mlruns_dir: str, port: int = 5000) -> subprocess.Popen | Non
     )
     print(f"  MLflow UI started at http://localhost:{port}")
     return proc
+
+
+def join_training_processes(
+    trainer: ChildProcessHandle,
+    collectors: Sequence[ChildProcessHandle],
+    stop_event: StopEvent,
+    collector_timeout: float = 5.0,
+) -> None:
+    """Join the trainer, stop collectors, and propagate every child failure.
+
+    The parent command is the public reliability boundary. A child process that
+    crashes or ignores shutdown must therefore make the command exit nonzero.
+    """
+    trainer.join()
+    failures: list[str] = []
+    if trainer.exitcode != 0:
+        failures.append(f"trainer exited with code {trainer.exitcode}")
+
+    stop_event.set()
+    for index, collector in enumerate(collectors):
+        collector.join(timeout=collector_timeout)
+        if collector.is_alive():
+            collector.terminate()
+            collector.join(timeout=collector_timeout)
+            failures.append(
+                f"collector[{index}] did not stop within {collector_timeout:.1f}s"
+            )
+        elif collector.exitcode != 0:
+            failures.append(
+                f"collector[{index}] exited with code {collector.exitcode}"
+            )
+
+    if failures:
+        raise ChildProcessError("; ".join(failures))
 
 
 def dictconfig_to_config(cfg: DictConfig) -> Config:
@@ -276,17 +333,7 @@ def run_training(
             p.start()
         trainer_loop.start()
 
-        trainer_loop.join()
-        if trainer_loop.exitcode not in (0, None):
-            print(f"Trainer exited with code {trainer_loop.exitcode}")
-        stop_event.set()
-        for idx, p in enumerate(experience_loops):
-            p.join(timeout=5.0)
-            if p.is_alive():
-                p.terminate()
-            if p.exitcode not in (0, None):
-                print(f"Collector[{idx}] exited with code {p.exitcode}")
-
+        join_training_processes(trainer_loop, experience_loops, stop_event)
         print("Training complete.")
     finally:
         if not flat_cfg.dry_run:

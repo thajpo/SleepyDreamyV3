@@ -25,6 +25,8 @@ DreamerPaper.pdf
 source/
 videos/
 .uv_cache/
+.lavish/
+experiments/
 
 # MLflow tracking and Hydra outputs
 runs/

@@ -47,7 +47,7 @@ Requires Python 3.13+.
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/SleepyDreamyV3.git
+git clone https://github.com/thajpo/SleepyDreamyV3.git
 cd SleepyDreamyV3
 
 # Install with uv (recommended)
@@ -71,13 +71,14 @@ pip install -e .
 uv run dreamer-train
 
 # Override parameters via CLI
-uv run dreamer-train train.actor_lr=3e-5 train.max_steps=50000
-
-# Use a different environment config
-uv run dreamer-train +env=cartpole_vision
+uv run dreamer-train train.actor_lr=3e-5 train.max_train_steps=50000
 
 # Smoke test / dry run (no MLflow, no checkpoints, temp directory)
-uv run dreamer-train general.dry_run=true train.max_steps=100
+uv run dreamer-train \
+  general.dry_run=true general.device=cpu \
+  train.max_train_steps=1 train.min_buffer_episodes=2 \
+  train.batch_size=2 train.sequence_length=4 \
+  train.replay_burn_in=1 train.eval_every=0
 ```
 
 ### Hyperparameter Sweeps
@@ -90,18 +91,19 @@ uv run dreamer-train --multirun train.actor_lr=1e-5,3e-5,1e-4
 uv run dreamer-train --multirun +sweep=ac_params
 ```
 
-### Evaluation
+### Evaluation and Visualization
 
 ```bash
-# Evaluate a trained checkpoint
-uv run dreamer-eval --checkpoint runs/01-17_1234/checkpoints/checkpoint_final.pt
-```
+# Deterministic checkpoint evaluation with diagnostics
+uv run dreamer-inspect \
+  runs/example/checkpoints/checkpoint_final.pt \
+  --episodes 20 --policy_mode argmax
 
-### Visualization
-
-```bash
-# Generate dream videos from a checkpoint
-uv run dreamer-viz --checkpoint runs/01-17_1234/checkpoints/checkpoint_final.pt
+# Add rollout and side-by-side debug videos
+uv run dreamer-inspect \
+  runs/example/checkpoints/checkpoint_final.pt \
+  --episodes 5 --policy_mode argmax \
+  --save_video --compose_debug_video
 ```
 
 ### Monitoring
@@ -109,7 +111,7 @@ uv run dreamer-viz --checkpoint runs/01-17_1234/checkpoints/checkpoint_final.pt
 View training metrics with MLflow UI:
 
 ```bash
-mlflow ui --backend-store-uri file://runs/mlruns
+uv run mlflow ui --backend-store-uri "file://$(pwd)/runs/mlruns"
 ```
 
 Then open http://localhost:5000 in your browser.
@@ -122,7 +124,7 @@ Configuration is managed via Hydra with layered YAML files found in `src/dreamer
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `train.max_steps` | 30000 | Total training steps |
+| `train.max_train_steps` | 30000 | Total training updates |
 | `train.batch_size` | 32 | Batch size |
 | `train.sequence_length` | 25 | Sequence length for training |
 | `models.d_hidden` | 64 | Hidden dimension |
@@ -133,29 +135,20 @@ Configuration is managed via Hydra with layered YAML files found in `src/dreamer
 ```
 src/dreamer/
 ├── main.py              # Training entry point (dreamer-train)
+├── config.py            # Typed runtime configuration
+├── inspect.py           # Checkpoint evaluation and diagnostics
 ├── conf/                # Hydra default configs
-├── data/
-│   └── replay_buffer.py # Episode storage
-├── envs/
+├── runtime/
 │   ├── collector.py     # Data collection process
-│   └── utils.py         # Gym environment creation
+│   ├── env.py           # Gym environment construction
+│   └── replay_buffer.py # Episode storage and sampling
 ├── models/              # World Model & Actor-Critic
 │   ├── encoder.py       # Observation encoders
 │   ├── decoder.py       # Observation decoders
 │   ├── world_model.py   # RSSM dynamics model
 │   └── ...
-├── scripts/             # Utility scripts
-│   ├── evaluate.py      # dreamer-eval
-│   ├── visualize.py     # dreamer-viz
+└── trainer/             # Training loop, checkpoints, logging
 ```
-
-## Training Modes
-
-1. **`train`** (default): Full training with warmup period where only the world model trains before actor-critic
-
-2. **`bootstrap`**: Train only the world model using random actions. Useful for pre-training dynamics.
-
-3. **`dreamer`**: Train actor-critic with a frozen pre-trained world model. Requires `--checkpoint`.
 
 ## Key Implementation Details
 
@@ -200,9 +193,12 @@ Current limitations:
 
 - Full training is intentionally not run in hosted CI; CI verifies syntax and
   fast tests only.
-- The README still needs a reproduced experiment report for the extended run
-  that solved the environment: config, seed, runtime, return curve, checkpoint
-  hash, and evaluation video/GIF.
+- Current retained CartPole runs do not provide a reproduced solved checkpoint.
+  The latest research notes localize the remaining problem to policy improvement:
+  learned latents contain useful control information, but the actor often
+  collapses to a constant action or remains random-like.
+- The README still needs a reproduced experiment report with config, seeds,
+  runtime, return curve, checkpoint hash, and evaluation video/GIF.
 - Generated checkpoints, MLflow runs, and videos should stay out of normal Git
   history and be linked as release artifacts or external experiment artifacts.
 - The next portfolio polish pass should add one short result section with a
@@ -229,4 +225,5 @@ Current limitations:
 
 ## License
 
-MIT
+No license file is currently included. Add an explicit license before
+redistributing the project.
