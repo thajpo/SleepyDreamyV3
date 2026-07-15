@@ -26,6 +26,8 @@ untracked.
 uv sync --frozen
 uv run pytest -q
 uv run python -m compileall -q src tests
+pyright src/dreamer/main.py src/dreamer/run_manifest.py \
+  src/dreamer/trainer/checkpoints.py src/dreamer/runtime/replay_buffer.py
 uv run dreamer-train --help
 uv run dreamer-inspect --help
 ```
@@ -45,6 +47,8 @@ uv run dreamer-train \
 - Reproduce runtime bugs through a supported CLI or a focused integration test.
 - A trainer or collector subprocess failure must make the parent command fail.
 - Preserve periodic, final, and best-checkpoint semantics as separate concepts.
+- Every non-dry run must retain `run_manifest.json`; checkpoint artifacts must
+  carry its run ID and preserve the configured evaluation metric on resume.
 - Keep long training out of hosted CI; use fast deterministic environments for
   integration coverage.
 - Do not start broad sweeps without a hypothesis, primary metric, fixed seed

@@ -18,7 +18,9 @@ class MLflowLogger:
     - Artifact management
     """
 
-    def __init__(self, log_dir: str, run_id: str | None = None):
+    def __init__(
+        self, log_dir: str, run_id: str | None = None, enabled: bool = True
+    ):
         """
         Initialize MLflow logger.
 
@@ -28,6 +30,7 @@ class MLflowLogger:
         """
         self.log_dir = log_dir
         self.run_id = run_id
+        self.enabled = enabled
 
         # Create artifacts subdirectory
         self.artifacts_dir = os.path.join(log_dir, "artifacts")
@@ -45,6 +48,8 @@ class MLflowLogger:
 
     def log_scalar(self, key: str, value: float, step: int) -> None:
         """Log a scalar metric."""
+        if not self.enabled:
+            return
         mlflow.log_metric(self._convert_key(key), value, step=step)
 
     def add_scalar(self, key: str, value: float, step: int) -> None:
@@ -53,6 +58,8 @@ class MLflowLogger:
 
     def log_scalars(self, metrics: dict, step: int) -> None:
         """Log multiple scalar metrics at once."""
+        if not self.enabled:
+            return
         converted = {self._convert_key(k): v for k, v in metrics.items()}
         mlflow.log_metrics(converted, step=step)
 
@@ -65,6 +72,8 @@ class MLflowLogger:
             tensor: Image tensor of shape (C, H, W) with values in [0, 1]
             step: Training step
         """
+        if not self.enabled:
+            return
         # Create safe filename from key
         safe_key = key.replace("/", "_").replace(".", "_")
         filename = f"{safe_key}_step{step}.png"
@@ -92,6 +101,8 @@ class MLflowLogger:
             step: Training step
             fps: Frames per second
         """
+        if not self.enabled:
+            return
         try:
             import imageio
         except ImportError:
@@ -124,6 +135,8 @@ class MLflowLogger:
 
     def log_artifact(self, path: str, artifact_path: str | None = None) -> None:
         """Log a file as an artifact."""
+        if not self.enabled:
+            return
         mlflow.log_artifact(path, artifact_path=artifact_path)
 
     def close(self) -> None:

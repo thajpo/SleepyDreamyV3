@@ -182,6 +182,10 @@ def run_inspection(
     summary = {
         "checkpoint": str(checkpoint_path),
         "checkpoint_step": int(ckpt.get("step", -1)),
+        "run_manifest_id": ckpt.get("run_id"),
+        "best_eval_score": ckpt.get("best_eval_score"),
+        "best_eval_step": ckpt.get("best_eval_step"),
+        "best_eval_metric": ckpt.get("best_eval_metric"),
         "episodes": episodes,
         "max_steps_per_episode": max_steps_per_episode,
         "policy_mode": policy_mode,

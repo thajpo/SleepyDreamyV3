@@ -133,6 +133,7 @@ class Config:
     # ===== Training: evaluation =====
     eval_every: int = 1000
     eval_episodes: int = 5
+    eval_metric: str = "episode_reward"  # episode_reward, episode_length, win_rate
 
     # ===== Training: checkpointing =====
     checkpoint_interval: int = 5000

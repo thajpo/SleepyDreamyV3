@@ -36,6 +36,7 @@ from dreamer.config import (
     Config,
     dump_config_json,
 )
+from dreamer.run_manifest import create_run_manifest, finish_run_manifest
 from dreamer.trainer import train_world_model
 from dreamer.runtime.collector import collect_experiences
 
@@ -88,23 +89,6 @@ def is_port_in_use(port: int) -> bool:
     """Check if a port is already in use."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         return s.connect_ex(("localhost", port)) == 0
-
-
-# move this mf outta main
-def get_git_commit() -> str | None:
-    """Get current git commit hash."""
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except Exception:
-        pass
-    return None
 
 
 def start_mlflow_ui(mlruns_dir: str, port: int = 5000) -> subprocess.Popen | None:
@@ -238,6 +222,13 @@ def run_training(
     # Setup MLflow
     mlflow_run_id = None
     checkpoint_mlflow_run_id = None
+    obs_mode = (
+        "hybrid"
+        if flat_cfg.use_pixels and flat_cfg.n_observations > 0
+        else "vision"
+        if flat_cfg.use_pixels
+        else "vector"
+    )
     if checkpoint_path and os.path.exists(checkpoint_path):
         try:
             checkpoint = torch.load(
@@ -267,19 +258,6 @@ def run_training(
         print(f"  MLflow run ID: {mlflow_run_id}")
         print(f"  MLflow tracking: {mlruns_dir}")
 
-        # Tags
-        git_commit = get_git_commit()
-        if git_commit:
-            mlflow.set_tag("git_commit", git_commit)
-        obs_mode = (
-            "hybrid"
-            if flat_cfg.use_pixels and flat_cfg.n_observations > 0
-            else "vision"
-            if flat_cfg.use_pixels
-            else "vector"
-        )
-        mlflow.set_tag("obs_mode", obs_mode)
-
         start_mlflow_ui(str(mlruns_dir), port=5000)
 
         if checkpoint_mlflow_run_id:
@@ -290,6 +268,24 @@ def run_training(
                 if isinstance(v, str) and len(v) > 250:
                     v = v[:250] + "..."
                 mlflow.log_param(k, str(v))
+
+    manifest = create_run_manifest(
+        log_dir=log_dir,
+        config=flat_cfg,
+        device=device,
+        mlflow_run_id=mlflow_run_id,
+        checkpoint_path=checkpoint_path,
+    )
+    if not flat_cfg.dry_run:
+        source = manifest["source"]
+        if source["commit"]:
+            mlflow.set_tag("git_commit", source["commit"])
+        if source["branch"]:
+            mlflow.set_tag("git_branch", source["branch"])
+        if source["dirty"] is not None:
+            mlflow.set_tag("git_dirty", str(source["dirty"]).lower())
+        mlflow.set_tag("run_manifest_id", manifest["run_id"])
+        mlflow.set_tag("obs_mode", obs_mode)
 
     try:
         mp_ctx = mp.get_context("spawn")
@@ -334,7 +330,21 @@ def run_training(
         trainer_loop.start()
 
         join_training_processes(trainer_loop, experience_loops, stop_event)
+        finish_run_manifest(log_dir, status="completed")
         print("Training complete.")
+    except BaseException as exc:
+        status = "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed"
+        try:
+            finish_run_manifest(
+                log_dir,
+                status=status,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        except Exception as manifest_exc:
+            # Preserve the training failure as the command's primary error. A
+            # secondary metadata write failure is still useful diagnostic data.
+            print(f"  Warning: could not finalize run manifest: {manifest_exc}")
+        raise
     finally:
         if not flat_cfg.dry_run:
             mlflow.end_run()

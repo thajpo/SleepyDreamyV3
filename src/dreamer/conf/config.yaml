@@ -112,6 +112,7 @@ train:
   # Evaluation (deterministic policy)
   eval_every: 1000  # 0 to disable
   eval_episodes: 5
+  eval_metric: episode_reward  # episode_reward, episode_length, win_rate
 
   # Checkpointing
   checkpoint_interval: 5000

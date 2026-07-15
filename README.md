@@ -96,12 +96,12 @@ uv run dreamer-train --multirun +sweep=ac_params
 ```bash
 # Deterministic checkpoint evaluation with diagnostics
 uv run dreamer-inspect \
-  runs/example/checkpoints/checkpoint_final.pt \
+  runs/example/checkpoints/checkpoint_best.pt \
   --episodes 20 --policy_mode argmax
 
 # Add rollout and side-by-side debug videos
 uv run dreamer-inspect \
-  runs/example/checkpoints/checkpoint_final.pt \
+  runs/example/checkpoints/checkpoint_best.pt \
   --episodes 5 --policy_mode argmax \
   --save_video --compose_debug_video
 ```
@@ -116,6 +116,12 @@ uv run mlflow ui --backend-store-uri "file://$(pwd)/runs/mlruns"
 
 Then open http://localhost:5000 in your browser.
 
+Each non-dry training run writes a versioned `run_manifest.json` beside its
+configuration. The manifest records the full Git revision and dirty state,
+runtime versions, configuration hash, progress, stop reason, and hashes for the
+best and final checkpoints. `checkpoint_best.pt` is selected by deterministic
+evaluation reward by default; `checkpoint_final.pt` is only the last state.
+
 ## Configuration
 
 Configuration is managed via Hydra with layered YAML files found in `src/dreamer/conf/`.
@@ -126,7 +132,8 @@ Configuration is managed via Hydra with layered YAML files found in `src/dreamer
 |-----------|---------|-------------|
 | `train.max_train_steps` | 30000 | Total training updates |
 | `train.batch_size` | 32 | Batch size |
-| `train.sequence_length` | 25 | Sequence length for training |
+| `train.sequence_length` | 32 | Sequence length for training |
+| `train.eval_metric` | episode_reward | Metric used to preserve the best checkpoint |
 | `models.d_hidden` | 64 | Hidden dimension |
 | `general.use_pixels` | false | Use pixel observations |
 
@@ -191,8 +198,8 @@ What is straightforward to inspect:
 
 Current limitations:
 
-- Full training is intentionally not run in hosted CI; CI verifies syntax and
-  fast tests only.
+- Full training is intentionally not run in hosted CI; CI verifies syntax,
+  scoped reliability types, and fast tests only.
 - Current retained CartPole runs do not provide a reproduced solved checkpoint.
   The latest research notes localize the remaining problem to policy improvement:
   learned latents contain useful control information, but the actor often

@@ -2,7 +2,7 @@ import math
 import copy
 import json
 import random
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from typing import NamedTuple, Optional
 import torch
 import torch.nn.functional as F
@@ -29,6 +29,7 @@ from ..models import (
 )
 from .mlflow_logger import MLflowLogger
 from ..runtime.env import create_env
+from ..run_manifest import file_sha256, read_run_manifest, update_run_manifest
 
 
 def seed_everything(seed: int) -> None:
@@ -39,6 +40,29 @@ def seed_everything(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+@dataclass(frozen=True)
+class EvaluationResult:
+    """Deterministic evaluation metrics used for logging and checkpoint choice."""
+
+    avg_length: float
+    avg_reward: float
+    win_rate: float
+
+    def metric_value(self, metric: str) -> float:
+        values = {
+            "episode_length": self.avg_length,
+            "episode_reward": self.avg_reward,
+            "win_rate": self.win_rate,
+        }
+        try:
+            return values[metric]
+        except KeyError as exc:
+            supported = ", ".join(sorted(values))
+            raise ValueError(
+                f"Unsupported eval_metric={metric!r}; choose one of: {supported}"
+            ) from exc
 
 
 class WorldModelTrainer:
@@ -65,6 +89,13 @@ class WorldModelTrainer:
         self.dry_run = dry_run
         self.device = torch.device(device)
         self.use_pixels = config.use_pixels
+        self.log_dir = log_dir
+        try:
+            self.run_manifest_id = read_run_manifest(log_dir)["run_id"]
+        except (FileNotFoundError, KeyError) as exc:
+            raise RuntimeError(
+                "training requires a run_manifest.json created by run_training"
+            ) from exc
         seed_everything(int(getattr(config, "seed", 0)) + 2000)
 
         # EMA For Actor Critic
@@ -155,8 +186,9 @@ class WorldModelTrainer:
 
         # Initialize MLflow logger with the provided log directory
         self.mlflow_run_id = mlflow_run_id
-        self.logger = MLflowLogger(log_dir=log_dir, run_id=mlflow_run_id)
-        self.log_dir = log_dir
+        self.logger = MLflowLogger(
+            log_dir=log_dir, run_id=mlflow_run_id, enabled=not dry_run
+        )
         print(f"MLflow logging to: {log_dir}")
         self.log_profile = getattr(config, "log_profile", "lean")
         if self.log_profile not in ("lean", "full"):
@@ -198,6 +230,9 @@ class WorldModelTrainer:
         self.last_log_time = time.time()
         self.steps_since_log = 0
         self._resume_env_steps_offset = 0
+        self.best_eval_score = None
+        self.best_eval_step = None
+        self.best_eval_metric = getattr(config, "eval_metric", "episode_reward")
 
         if checkpoint_path:
             chk = load_checkpoint(
@@ -221,6 +256,11 @@ class WorldModelTrainer:
             self.S = chk["return_scale"]
             self.ret_lo = chk["ret_lo"]
             self.ret_hi = chk["ret_hi"]
+            self.best_eval_score = chk["best_eval_score"]
+            self.best_eval_step = chk["best_eval_step"]
+            checkpoint_metric = chk["best_eval_metric"]
+            if checkpoint_metric is not None:
+                self.best_eval_metric = checkpoint_metric
             denom = max(1e-8, config.replay_ratio)
             self._resume_env_steps_offset = int(
                 self.train_step
@@ -312,6 +352,7 @@ class WorldModelTrainer:
         if self.train_step >= self.config.actor_warmup_steps:
             self.send_models_to_collector(self.train_step)
 
+        stop_reason = "max_train_steps"
         while self.train_step < self.config.max_train_steps:
             if self.prevent_stale_training():
                 continue
@@ -534,12 +575,56 @@ class WorldModelTrainer:
                 and self.train_step > 0
                 and self.train_step % self.config.eval_every == 0
             ):
-                eval_avg_len = self.evaluate_policy(
+                eval_result = self.evaluate_policy(
                     self.config.eval_episodes, step=self.train_step
                 )
+                eval_score = eval_result.metric_value(self.best_eval_metric)
+                is_new_best = (
+                    self.best_eval_score is None
+                    or eval_score > self.best_eval_score
+                )
+                if is_new_best:
+                    self.best_eval_score = eval_score
+                    self.best_eval_step = self.train_step
+                    if not self.dry_run:
+                        best_path = self.save_training_checkpoint(label="best")
+                        update_run_manifest(
+                            self.log_dir,
+                            {
+                                "artifacts": {
+                                    "best_checkpoint": {
+                                        "path": os.path.relpath(
+                                            best_path, self.log_dir
+                                        ),
+                                        "sha256": file_sha256(best_path),
+                                    }
+                                }
+                            },
+                        )
+                update_run_manifest(
+                    self.log_dir,
+                    {
+                        "evaluation": {
+                            "metric": self.best_eval_metric,
+                            "latest_score": eval_score,
+                            "latest_step": self.train_step,
+                            "best_score": self.best_eval_score,
+                            "best_step": self.best_eval_step,
+                            "latest_metrics": {
+                                "episode_length": eval_result.avg_length,
+                                "episode_reward": eval_result.avg_reward,
+                                "win_rate": eval_result.win_rate,
+                            },
+                        }
+                    },
+                )
                 early_stop = getattr(self.config, "early_stop_ep_length", 0)
-                if early_stop > 0 and eval_avg_len >= early_stop:
-                    print(f"SOLVED! eval_avg_len={eval_avg_len:.1f} >= {early_stop}")
+                if early_stop > 0 and eval_result.avg_length >= early_stop:
+                    print(
+                        f"SOLVED! eval_avg_len={eval_result.avg_length:.1f} "
+                        f">= {early_stop}"
+                    )
+                    stop_reason = "early_stop"
                     break
 
             # Checkpoint every N steps (skip in dry_run)
@@ -548,53 +633,75 @@ class WorldModelTrainer:
                 and self.train_step > 0
                 and self.train_step % self.config.checkpoint_interval == 0
             ):
-                save_checkpoint(
-                    self.checkpoint_dir,
-                    self.train_step,
-                    self.encoder,
-                    self.world_model,
-                    self.actor,
-                    self.critic,
-                    self.critic_ema,
-                    self.q_critic,
-                    self.q_critic_ema,
-                    self.wm_optimizer,
-                    self.actor_optimizer,
-                    self.critic_optimizer,
-                    self.S,
-                    self.ret_lo,
-                    self.ret_hi,
-                    self.mlflow_run_id,
-                )
+                self.save_training_checkpoint()
 
         # Final save (skip in dry_run)
         if not self.dry_run:
-            save_checkpoint(
-                self.checkpoint_dir,
-                self.train_step,
-                self.encoder,
-                self.world_model,
-                self.actor,
-                self.critic,
-                self.critic_ema,
-                self.q_critic,
-                self.q_critic_ema,
-                self.wm_optimizer,
-                self.actor_optimizer,
-                self.critic_optimizer,
-                self.S,
-                self.ret_lo,
-                self.ret_hi,
-                self.mlflow_run_id,
-                final=True,
+            final_path = self.save_training_checkpoint(final=True)
+            update_run_manifest(
+                self.log_dir,
+                {
+                    "artifacts": {
+                        "final_checkpoint": {
+                            "path": os.path.relpath(final_path, self.log_dir),
+                            "sha256": file_sha256(final_path),
+                        }
+                    }
+                },
             )
             print(f"Training complete. Final checkpoint saved to {self.checkpoint_dir}")
         else:
             print("DRY RUN complete - no checkpoint saved.")
 
+        update_run_manifest(
+            self.log_dir,
+            {
+                "progress": {
+                    "train_step": self.train_step,
+                    "env_steps": self.replay_buffer.total_env_steps
+                    + self._resume_env_steps_offset,
+                },
+                "evaluation": {
+                    "best_score": self.best_eval_score,
+                    "best_step": self.best_eval_step,
+                    "metric": self.best_eval_metric,
+                },
+                "outcome": {"stop_reason": stop_reason},
+            },
+        )
+
         # Cleanup
         self.replay_buffer.stop()
         self.logger.close()
+
+    def save_training_checkpoint(
+        self, *, final: bool = False, label: str | None = None
+    ) -> str:
+        """Persist the complete trainer state using the shared checkpoint contract."""
+        return save_checkpoint(
+            self.checkpoint_dir,
+            self.train_step,
+            self.encoder,
+            self.world_model,
+            self.actor,
+            self.critic,
+            self.critic_ema,
+            self.q_critic,
+            self.q_critic_ema,
+            self.wm_optimizer,
+            self.actor_optimizer,
+            self.critic_optimizer,
+            self.S,
+            self.ret_lo,
+            self.ret_hi,
+            self.mlflow_run_id,
+            final=final,
+            label=label,
+            best_eval_score=self.best_eval_score,
+            best_eval_step=self.best_eval_step,
+            best_eval_metric=self.best_eval_metric,
+            run_id=self.run_manifest_id,
+        )
 
     def should_skip_ac_update(self) -> bool:
         """Decide if we should skip the Actor-Critic update this batch based on WM:AC ratio."""
@@ -651,14 +758,14 @@ class WorldModelTrainer:
         for pg in self.critic_optimizer.param_groups:
             pg["lr"] = self.config.critic_lr * scale
 
-    def evaluate_policy(self, num_episodes: int, step: int) -> float:
+    def evaluate_policy(self, num_episodes: int, step: int) -> EvaluationResult:
         """Run deterministic evaluation episodes and log summary metrics.
 
         Returns:
-            Average episode length across evaluation episodes.
+            Aggregate deterministic evaluation metrics.
         """
         if num_episodes <= 0:
-            return 0.0
+            return EvaluationResult(0.0, 0.0, 0.0)
 
         was_training = (
             self.encoder.training,
@@ -786,7 +893,7 @@ class WorldModelTrainer:
         )
         self.logger.add_scalar("eval_frames/win_rate", win_rate, env_frames_total)
 
-        return avg_len
+        return EvaluationResult(avg_len, avg_reward, win_rate)
 
     def _get_model(self, model):
         """Get underlying model (handles both compiled and non-compiled)."""

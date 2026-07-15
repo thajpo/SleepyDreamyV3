@@ -84,10 +84,13 @@ class EpisodeReplayBuffer:
 
     def _drain_loop(self):
         """Background thread: continuously move episodes from queue to buffer."""
+        data_queue = self.data_queue
+        if data_queue is None:
+            return
         while not self._stop:
             try:
                 # Short timeout so we can check stop flag regularly
-                episode = self.data_queue.get(timeout=0.1)
+                episode = data_queue.get(timeout=0.1)
                 self.add_episode(episode)
             except Empty:
                 continue

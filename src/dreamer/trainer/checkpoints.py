@@ -3,6 +3,10 @@
 Abstracts file I/O out of the training loop to keep the Trainer stateless.
 """
 import os
+from pathlib import Path
+from typing import Any
+from uuid import uuid4
+
 import torch
 
 
@@ -29,9 +33,16 @@ def save_checkpoint(
     ret_hi,
     mlflow_run_id=None,
     final=False,
-):
-    """Save all model checkpoints and auxiliary training state."""
-    suffix = "final" if final else f"step_{train_step}"
+    label=None,
+    best_eval_score=None,
+    best_eval_step=None,
+    best_eval_metric=None,
+    run_id=None,
+) -> str:
+    """Save training state atomically and return the checkpoint path."""
+    if final and label is not None:
+        raise ValueError("final and label are mutually exclusive")
+    suffix = "final" if final else label or f"step_{train_step}"
     checkpoint = {
         "step": train_step,
         "encoder": get_model(encoder).state_dict(),
@@ -52,10 +63,22 @@ def save_checkpoint(
         "ret_lo": ret_lo,
         "ret_hi": ret_hi,
         "mlflow_run_id": mlflow_run_id,
+        "best_eval_score": best_eval_score,
+        "best_eval_step": best_eval_step,
+        "best_eval_metric": best_eval_metric,
+        "run_id": run_id,
     }
-    path = os.path.join(checkpoint_dir, f"checkpoint_{suffix}.pt")
-    torch.save(checkpoint, path)
+    destination = Path(checkpoint_dir) / f"checkpoint_{suffix}.pt"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
+    try:
+        torch.save(checkpoint, temporary)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    path = str(destination)
     print(f"Checkpoint saved: {path}")
+    return path
 
 
 def load_checkpoint(
@@ -79,7 +102,9 @@ def load_checkpoint(
     Load full checkpoint (encoder, world model, actor, critic, optimizers).
     Returns a dictionary of extra state (step, return scales).
     """
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint: dict[str, Any] = torch.load(
+        checkpoint_path, map_location=device, weights_only=False
+    )
 
     # Load encoder and world_model
     get_model(encoder).load_state_dict(checkpoint["encoder"])
@@ -134,4 +159,8 @@ def load_checkpoint(
         "return_scale": S,
         "ret_lo": ret_lo,
         "ret_hi": ret_hi,
+        "best_eval_score": checkpoint.get("best_eval_score"),
+        "best_eval_step": checkpoint.get("best_eval_step"),
+        "best_eval_metric": checkpoint.get("best_eval_metric"),
+        "run_id": checkpoint.get("run_id"),
     }
