@@ -50,17 +50,22 @@ Requires Python 3.13+.
 git clone https://github.com/thajpo/SleepyDreamyV3.git
 cd SleepyDreamyV3
 
-# Install with uv (recommended)
-uv sync
-
-# Or with pip
-pip install -e .
+# Lightweight CPU development environment
+uv sync --extra cpu
 ```
 
-### GPU Support
+PyTorch is an explicit environment choice rather than an implicit platform
+guess. Use the CPU extra for development and hosted CI. For AMD training,
+create a separate environment so ROCm packages never inflate the CPU install:
 
-- **NVIDIA CUDA**: Works out of the box with PyTorch
-- **AMD ROCm**: Configured in `pyproject.toml` for ROCm 6.4 (set `HSA_OVERRIDE_GFX_VERSION` if needed)
+```bash
+UV_PROJECT_ENVIRONMENT=.venv-rocm uv sync --extra rocm
+```
+
+ROCm 6.4 is the configured workstation backend. Set
+`HSA_OVERRIDE_GFX_VERSION` only when the local GPU requires it. CUDA is not a
+locked project environment yet; add it as a separate accelerator extra rather
+than replacing the CPU or ROCm contract.
 
 ## Quick Start
 
@@ -68,39 +73,48 @@ pip install -e .
 
 ```bash
 # Full training with default config (CartPole, state-only)
-uv run dreamer-train
+uv run --extra cpu dreamer-train
 
 # Override parameters via CLI
-uv run dreamer-train train.actor_lr=3e-5 train.max_train_steps=50000
+uv run --extra cpu dreamer-train train.actor_lr=3e-5 train.max_train_steps=50000
 
 # Smoke test / dry run (no MLflow, no checkpoints, temp directory)
-uv run dreamer-train \
+uv run --extra cpu dreamer-train \
   general.dry_run=true general.device=cpu \
   train.max_train_steps=1 train.min_buffer_episodes=2 \
   train.batch_size=2 train.sequence_length=4 \
   train.replay_burn_in=1 train.eval_every=0
 ```
 
+Resume into a new output directory while restoring the checkpoint's trainer
+state and MLflow run identity:
+
+```bash
+uv run --extra cpu dreamer-train \
+  checkpoint_path=runs/example/checkpoints/checkpoint_final.pt \
+  train.max_train_steps=20000
+```
+
 ### Hyperparameter Sweeps
 
 ```bash
 # Grid search over learning rates
-uv run dreamer-train --multirun train.actor_lr=1e-5,3e-5,1e-4
+uv run --extra cpu dreamer-train --multirun train.actor_lr=1e-5,3e-5,1e-4
 
 # Use predefined sweep config
-uv run dreamer-train --multirun +sweep=ac_params
+uv run --extra cpu dreamer-train --multirun +sweep=ac_params
 ```
 
 ### Evaluation and Visualization
 
 ```bash
 # Deterministic checkpoint evaluation with diagnostics
-uv run dreamer-inspect \
+uv run --extra cpu dreamer-inspect \
   runs/example/checkpoints/checkpoint_best.pt \
   --episodes 20 --policy_mode argmax
 
 # Add rollout and side-by-side debug videos
-uv run dreamer-inspect \
+uv run --extra cpu dreamer-inspect \
   runs/example/checkpoints/checkpoint_best.pt \
   --episodes 5 --policy_mode argmax \
   --save_video --compose_debug_video
@@ -111,7 +125,7 @@ uv run dreamer-inspect \
 View training metrics with MLflow UI:
 
 ```bash
-uv run mlflow ui --backend-store-uri "file://$(pwd)/runs/mlruns"
+uv run --extra cpu mlflow ui --backend-store-uri "file://$(pwd)/runs/mlruns"
 ```
 
 Then open http://localhost:5000 in your browser.
@@ -125,6 +139,22 @@ evaluation reward by default; `checkpoint_final.pt` is only the last state.
 ## Configuration
 
 Configuration is managed via Hydra with layered YAML files found in `src/dreamer/conf/`.
+Hydra YAML is the authored source; `Config` is its typed runtime projection.
+Invalid configurations are rejected before MLflow or training subprocesses
+start.
+
+### Run Evidence Registry
+
+Index local manifests and legacy config snapshots without loading checkpoint
+contents or deleting raw artifacts:
+
+```bash
+uv run --extra cpu python scripts/index_runs.py
+```
+
+This writes `reports/runs.csv` and `reports/runs.md`. Exact comparison keys are
+only assigned to completed, clean, manifest-backed runs with a complete
+evaluation protocol. Legacy runs remain visible but are marked for review.
 
 ### Key Parameters
 
