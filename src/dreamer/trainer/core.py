@@ -15,6 +15,7 @@ import time
 from .logging import create_step_metrics, log_step_metrics, log_progress
 from .forward import dreamer_step
 from ..runtime.replay_buffer import EpisodeReplayBuffer, EnvData
+from ..runtime.model_transport import serialize_model_states
 from .checkpoints import save_checkpoint, load_checkpoint
 from ..models import (
     symlog,
@@ -85,6 +86,8 @@ class WorldModelTrainer:
         device="cpu",
     ):
         # Passed in args
+        if data_queue is None:
+            raise ValueError("WorldModelTrainer requires a collector data queue")
         self.config = config  # Store config for use in methods
         self.dry_run = dry_run
         self.device = torch.device(device)
@@ -914,11 +917,11 @@ class WorldModelTrainer:
             for k, v in wm.state_dict().items()
             if k not in ("h_prev", "z_prev")
         }
-        models_to_send = {
+        models_to_send = serialize_model_states({
             "actor": {k: v.cpu() for k, v in actor.state_dict().items()},
             "encoder": {k: v.cpu() for k, v in encoder.state_dict().items()},
             "world_model": wm_state,
-        }
+        })
         try:
             # Clear queue to ensure collector gets the latest version
             cleared = 0

@@ -15,8 +15,6 @@ Usage:
 
 import os
 import random
-import subprocess
-import socket
 import tempfile
 from dataclasses import asdict
 from typing import Protocol, Sequence
@@ -35,6 +33,7 @@ import multiprocessing as mp
 from dreamer.config import (
     Config,
     dump_config_json,
+    validate_config,
 )
 from dreamer.run_manifest import create_run_manifest, finish_run_manifest
 from dreamer.trainer import train_world_model
@@ -83,34 +82,6 @@ def seed_everything(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-
-
-def is_port_in_use(port: int) -> bool:
-    """Check if a port is already in use."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        return s.connect_ex(("localhost", port)) == 0
-
-
-def start_mlflow_ui(mlruns_dir: str, port: int = 5000) -> subprocess.Popen | None:
-    """Start MLflow UI server in background if not already running."""
-    if is_port_in_use(port):
-        print(f"  MLflow UI already running at http://localhost:{port}")
-        return None
-
-    proc = subprocess.Popen(
-        [
-            "mlflow",
-            "ui",
-            "--backend-store-uri",
-            f"file://{mlruns_dir}",
-            "--port",
-            str(port),
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    print(f"  MLflow UI started at http://localhost:{port}")
-    return proc
 
 
 def join_training_processes(
@@ -178,9 +149,17 @@ def dictconfig_to_config(cfg: DictConfig) -> Config:
     import inspect
 
     valid_keys = set(inspect.signature(Config).parameters.keys())
-    filtered_d = {k: v for k, v in d.items() if k in valid_keys}
+    unexpected = sorted(set(d) - valid_keys)
+    if unexpected:
+        raise ValueError(f"Unknown runtime configuration keys: {unexpected}")
+    missing = sorted(valid_keys - set(d))
+    if missing:
+        raise ValueError(
+            "Hydra config is missing runtime fields; YAML must be canonical: "
+            f"{missing}"
+        )
 
-    return Config(**filtered_d)
+    return Config(**d)
 
 
 def run_training(
@@ -189,6 +168,7 @@ def run_training(
     checkpoint_path: str | None = None,
 ):
     """Run training with the given configuration."""
+    validate_config(flat_cfg)
     device = resolve_device(flat_cfg.device)
 
     if flat_cfg.dry_run:
@@ -257,8 +237,6 @@ def run_training(
         mlflow_run_id = run.info.run_id
         print(f"  MLflow run ID: {mlflow_run_id}")
         print(f"  MLflow tracking: {mlruns_dir}")
-
-        start_mlflow_ui(str(mlruns_dir), port=5000)
 
         if checkpoint_mlflow_run_id:
             mlflow.set_tag("resumed_from_checkpoint", checkpoint_path)

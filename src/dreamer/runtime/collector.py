@@ -8,6 +8,7 @@ from queue import Empty
 
 from ..models import initialize_actor, initialize_world_model, symlog, unimix_logits
 from .env import create_env
+from .model_transport import deserialize_model_states
 
 
 def collect_experiences(
@@ -70,19 +71,20 @@ def collect_experiences(
     def pull_latest_models() -> int:
         """Drain model queue and apply only the newest update."""
         nonlocal actor, encoder, world_model, use_random_actions
-        latest_model_states = None
+        latest_model_payload = None
         updates = 0
         while True:
             try:
-                latest_model_states = model_queue.get_nowait()
+                latest_model_payload = model_queue.get_nowait()
                 updates += 1
             except Empty:
                 break
 
-        if latest_model_states is None:
+        if latest_model_payload is None:
             return 0
 
         initialize_models()
+        latest_model_states = deserialize_model_states(latest_model_payload, device)
 
         actor.load_state_dict(latest_model_states["actor"])
         encoder.load_state_dict(latest_model_states["encoder"])

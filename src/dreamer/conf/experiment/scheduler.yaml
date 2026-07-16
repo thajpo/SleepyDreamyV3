@@ -3,9 +3,9 @@
 # Usage: uv run python -m src.train +experiment=scheduler general.experiment_name=sched_X
 # Uses dreamer mode with d_hidden=256 WM checkpoint
 
-# Use pre-trained WM checkpoint (d_hidden=256)
-mode: dreamer
-checkpoint: /home/j/Projects/SleepyDreamyV3/runs/01-20_181847/checkpoints/checkpoint_step_5000.pt
+# Supply a portable checkpoint explicitly when launching this experiment:
+#   +experiment=scheduler checkpoint_path=/path/to/checkpoint_step_5000.pt
+checkpoint_path: null
 
 models:
   d_hidden: 256

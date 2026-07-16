@@ -7,6 +7,10 @@ defaults:
   - env: cartpole_state_only  # default environment
   - override /hydra/launcher: basic
 
+# Optional checkpoint used to resume a run. This orchestration field is not
+# part of the flattened model/training Config snapshot.
+checkpoint_path: null
+
 # General settings
 general:
   device: auto  # auto, cuda, mps, cpu
@@ -15,6 +19,7 @@ general:
   compile_models: false
   dry_run: false  # Skip MLflow/checkpoints for smoke tests
   experiment_name: null  # MLflow experiment name (null = auto from env name)
+  log_profile: lean  # lean, full
   seed: 0
 
 # Environment (overridden by env/*.yaml)
@@ -22,6 +27,14 @@ environment:
   environment_name: CartPole-v1
   n_actions: 2
   n_observations: 4
+  atari_compat_mode: false
+  atari_noop_max: 30
+  atari_frame_skip: 4
+  atari_terminal_on_life_loss: false
+  atari_sticky_action_prob: 0.25
+  atari_full_action_space: false
+  atari_fire_reset: false
+  atari_screen_size: 84
 
 # Model architecture
 models:
@@ -64,6 +77,8 @@ train:
   # RL settings
   gamma: 0.997  # paper: discount horizon 1/(1-γ)=333
   lam: 0.95
+  horizon: 333
+  contdisc: true
   num_dream_steps: 15
   actor_entropy_coef: 3e-4  # paper: η=3e-4
   normalize_advantages: true
@@ -91,6 +106,7 @@ train:
   # Reward bins (symexp range)
   b_start: -20
   b_end: 20
+  num_bins: 255
 
   # Training phases
   wm_ac_ratio: 1  # WM updates per AC update (e.g., 4 = train WM 4x more than AC)

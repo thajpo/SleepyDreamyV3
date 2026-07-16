@@ -2,14 +2,17 @@
 Flat dataclass-based config for DreamerV3 training.
 
 Design:
-- Single flat dataclass with all training knobs
-- Functions for base configs and experiments ("function pattern")
-- Flat CLI arguments via argparse (e.g., --wm_lr 5e-4)
-- JSON snapshots written to run_dir/config.json for reproducibility
+- Hydra YAML is the authored configuration source for training.
+- This flat dataclass is the typed runtime projection and snapshot schema.
+- JSON snapshots are written to each run directory for reproducibility.
 """
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from typing import Optional
+
+
+class ConfigValidationError(ValueError):
+    """Raised before side effects when a training configuration is impossible."""
 
 
 @dataclass
@@ -152,72 +155,12 @@ class Config:
 
 
 def default_config() -> Config:
-    """Default Dreamer config (paper values, slow/stable)."""
+    """Legacy inspector fallback when a checkpoint has no config snapshot."""
     return Config()
 
 
-def cartpole_config() -> Config:
-    """CartPole config for fast iteration."""
-    cfg = default_config()
-    cfg.environment_name = "CartPole-v1"
-    cfg.n_actions = 2
-    cfg.n_observations = 4
-    cfg.d_hidden = 128
-    cfg.max_train_steps = 10000
-    cfg.batch_size = 8
-    cfg.sequence_length = 16
-    cfg.num_dream_steps = 10
-    cfg.actor_entropy_coef = 1e-3
-    cfg.wm_ac_ratio = 1
-    cfg.b_start = -5
-    cfg.b_end = 6
-    cfg.replay_buffer_size = 10000
-    cfg.replay_ratio = 16
-    cfg.min_buffer_episodes = 32
-    cfg.num_collectors = 8
-    cfg.eval_every = 1000
-    cfg.checkpoint_interval = 10000
-    return cfg
-
-
-def ratio_sweep_5e4_config() -> Config:
-    """Config for WM:AC ratio sweep at LR=5e-4."""
-    cfg = cartpole_config()
-    cfg.experiment_name = "ratio_sweep_5e4"
-    cfg.wm_lr = 5e-4
-    cfg.actor_lr = 5e-4
-    cfg.critic_lr = 5e-4
-    cfg.wm_ac_ratio = 1
-    return cfg
-
-
-def paper_cartpole_config() -> Config:
-    """Paper-accurate CartPole config (slower but stable)."""
-    cfg = default_config()
-    cfg.environment_name = "CartPole-v1"
-    cfg.n_actions = 2
-    cfg.n_observations = 4
-    cfg.d_hidden = 128  # Keep 128 for capacity
-    cfg.max_train_steps = 25000
-    cfg.batch_size = 16  # Paper value
-    cfg.sequence_length = 64  # Paper value
-    cfg.num_dream_steps = 15  # Paper value
-    cfg.actor_entropy_coef = 3e-4  # Paper value (not 1e-3)
-    cfg.wm_ac_ratio = 1
-    cfg.b_start = -5
-    cfg.b_end = 6
-    cfg.replay_buffer_size = 10000
-    cfg.replay_ratio = 1.0  # Paper value (not 16)
-    cfg.min_buffer_episodes = 64  # Paper value
-    cfg.num_collectors = 8
-    cfg.eval_every = 1000
-    cfg.checkpoint_interval = 5000  # Checkpoint every 5k steps
-    cfg.experiment_name = "paper_cartpole_baseline"
-    return cfg
-
-
 def atari100k_pong_config() -> Config:
-    """Atari100k Pong config aligned to DreamerV3 task setup."""
+    """Legacy inspector fallback for old Pong checkpoints without config.json."""
     cfg = default_config()
     cfg.environment_name = "ALE/Pong-v5"
     cfg.n_actions = 6
@@ -258,6 +201,87 @@ def atari100k_pong_config() -> Config:
 def atari_pong_config() -> Config:
     """Backwards-compatible alias for Atari100k Pong config."""
     return atari100k_pong_config()
+
+
+def validate_config(cfg: Config) -> None:
+    """Reject invalid training configurations before creating run side effects."""
+    errors: list[str] = []
+
+    positive_ints = {
+        "max_train_steps": cfg.max_train_steps,
+        "batch_size": cfg.batch_size,
+        "sequence_length": cfg.sequence_length,
+        "d_hidden": cfg.d_hidden,
+        "num_latents": cfg.num_latents,
+        "rnn_n_blocks": cfg.rnn_n_blocks,
+        "n_actions": cfg.n_actions,
+        "num_dream_steps": cfg.num_dream_steps,
+        "checkpoint_interval": cfg.checkpoint_interval,
+        "num_collectors": cfg.num_collectors,
+        "replay_buffer_size": cfg.replay_buffer_size,
+        "min_buffer_episodes": cfg.min_buffer_episodes,
+        "steps_per_weight_sync": cfg.steps_per_weight_sync,
+        "action_repeat": cfg.action_repeat,
+    }
+    for name, value in positive_ints.items():
+        if value <= 0:
+            errors.append(f"{name} must be > 0 (got {value!r})")
+
+    if cfg.d_hidden < 16 or cfg.d_hidden % 16 != 0:
+        errors.append("d_hidden must be at least 16 and divisible by 16")
+    if not 0 <= cfg.replay_burn_in < cfg.sequence_length:
+        errors.append("replay_burn_in must satisfy 0 <= burn-in < sequence_length")
+    if cfg.min_buffer_episodes > cfg.replay_buffer_size:
+        errors.append("min_buffer_episodes cannot exceed replay_buffer_size")
+    if cfg.replay_ratio <= 0:
+        errors.append("replay_ratio must be > 0")
+    if not 0.0 <= cfg.recent_fraction <= 1.0:
+        errors.append("recent_fraction must be between 0 and 1")
+    if not 0.0 < cfg.gamma <= 1.0:
+        errors.append("gamma must be in (0, 1]")
+    if not 0.0 <= cfg.lam <= 1.0:
+        errors.append("lam must be between 0 and 1")
+    if cfg.b_end <= cfg.b_start:
+        errors.append("b_end must be greater than b_start")
+    if cfg.num_bins < 2:
+        errors.append("num_bins must be at least 2")
+    if cfg.eval_every < 0 or cfg.eval_episodes < 0:
+        errors.append("eval_every and eval_episodes cannot be negative")
+    if cfg.eval_metric not in {"episode_length", "episode_reward", "win_rate"}:
+        errors.append(f"unsupported eval_metric: {cfg.eval_metric!r}")
+    if cfg.actor_loss_mode not in {
+        "reinforce",
+        "enumerate",
+        "qcritic",
+        "mpc_teacher",
+    }:
+        errors.append(f"unsupported actor_loss_mode: {cfg.actor_loss_mode!r}")
+    if cfg.actor_enum_objective not in {"value", "survival"}:
+        errors.append(f"unsupported actor_enum_objective: {cfg.actor_enum_objective!r}")
+    if cfg.mpc_teacher_objective not in {"value", "survival"}:
+        errors.append(f"unsupported mpc_teacher_objective: {cfg.mpc_teacher_objective!r}")
+    if cfg.mpc_teacher_target not in {"hard", "soft"}:
+        errors.append(f"unsupported mpc_teacher_target: {cfg.mpc_teacher_target!r}")
+    if cfg.device not in {"auto", "cpu", "cuda", "mps"}:
+        errors.append(f"unsupported device: {cfg.device!r}")
+    if cfg.log_profile not in {"lean", "full"}:
+        errors.append(f"unsupported log_profile: {cfg.log_profile!r}")
+    if cfg.use_pixels:
+        target = cfg.encoder_cnn_target_size
+        if (
+            not isinstance(target, (list, tuple))
+            or len(target) != 2
+            or any(int(dimension) <= 0 for dimension in target)
+        ):
+            errors.append("pixel runs require a positive two-dimensional target_size")
+        if cfg.encoder_cnn_input_channels <= 0:
+            errors.append("pixel runs require encoder_cnn_input_channels > 0")
+    elif cfg.n_observations <= 0:
+        errors.append("state-only runs require n_observations > 0")
+
+    if errors:
+        details = "\n".join(f"- {error}" for error in errors)
+        raise ConfigValidationError(f"Invalid Dreamer configuration:\n{details}")
 
 
 def dump_config_json(cfg: Config, path: str) -> None:
