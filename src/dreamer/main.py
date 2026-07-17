@@ -15,8 +15,6 @@ Usage:
 
 import os
 import random
-import subprocess
-import socket
 import tempfile
 from dataclasses import asdict
 from typing import Protocol, Sequence
@@ -35,6 +33,7 @@ import multiprocessing as mp
 from dreamer.config import (
     Config,
     dump_config_json,
+    validate_config,
 )
 from dreamer.run_manifest import create_run_manifest, finish_run_manifest
 from dreamer.trainer import train_world_model
@@ -54,10 +53,12 @@ class ChildProcessHandle(Protocol):
     def terminate(self) -> None: ...
 
 
-class StopEvent(Protocol):
-    """Minimal event interface used to stop collector processes."""
+class ProcessEvent(Protocol):
+    """Event operations used by the parent/child shutdown handshake."""
 
     def set(self) -> None: ...
+
+    def wait(self, timeout: float | None = None) -> bool: ...
 
 
 class ChildProcessError(RuntimeError):
@@ -85,49 +86,47 @@ def seed_everything(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def is_port_in_use(port: int) -> bool:
-    """Check if a port is already in use."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        return s.connect_ex(("localhost", port)) == 0
-
-
-def start_mlflow_ui(mlruns_dir: str, port: int = 5000) -> subprocess.Popen | None:
-    """Start MLflow UI server in background if not already running."""
-    if is_port_in_use(port):
-        print(f"  MLflow UI already running at http://localhost:{port}")
-        return None
-
-    proc = subprocess.Popen(
-        [
-            "mlflow",
-            "ui",
-            "--backend-store-uri",
-            f"file://{mlruns_dir}",
-            "--port",
-            str(port),
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    print(f"  MLflow UI started at http://localhost:{port}")
-    return proc
-
-
 def join_training_processes(
     trainer: ChildProcessHandle,
     collectors: Sequence[ChildProcessHandle],
-    stop_event: StopEvent,
+    stop_event: ProcessEvent,
+    training_done_event: ProcessEvent,
+    collectors_stopped_event: ProcessEvent,
     collector_timeout: float = 5.0,
+    trainer_timeout: float = 5.0,
+    poll_interval: float = 0.05,
 ) -> None:
-    """Join the trainer, stop collectors, and propagate every child failure.
+    """Coordinate normal shutdown without outliving trainer-owned model data.
 
     The parent command is the public reliability boundary. A child process that
     crashes or ignores shutdown must therefore make the command exit nonzero.
     """
-    trainer.join()
     failures: list[str] = []
-    if trainer.exitcode != 0:
-        failures.append(f"trainer exited with code {trainer.exitcode}")
+    premature_collectors: set[int] = set()
+    training_completed = False
+
+    while True:
+        if training_done_event.wait(timeout=poll_interval):
+            training_completed = True
+            break
+
+        if trainer.exitcode is not None:
+            if trainer.exitcode == 0:
+                failures.append("trainer exited before signaling training completion")
+            else:
+                failures.append(f"trainer exited with code {trainer.exitcode}")
+            break
+
+        for index, collector in enumerate(collectors):
+            if collector.exitcode is not None:
+                premature_collectors.add(index)
+                failures.append(
+                    f"collector[{index}] exited with code {collector.exitcode} "
+                    "before training completed"
+                )
+                break
+        if failures:
+            break
 
     stop_event.set()
     for index, collector in enumerate(collectors):
@@ -138,10 +137,26 @@ def join_training_processes(
             failures.append(
                 f"collector[{index}] did not stop within {collector_timeout:.1f}s"
             )
-        elif collector.exitcode != 0:
+        elif collector.exitcode != 0 and index not in premature_collectors:
             failures.append(
                 f"collector[{index}] exited with code {collector.exitcode}"
             )
+
+    # The trainer may still own shared-memory tensor handles referenced by a
+    # collector queue. Release it only after no collector can read them.
+    collectors_stopped_event.set()
+
+    if not training_completed and trainer.is_alive():
+        trainer.terminate()
+    trainer.join(timeout=trainer_timeout)
+    if trainer.is_alive():
+        trainer.terminate()
+        trainer.join(timeout=trainer_timeout)
+        failures.append(
+            f"trainer did not stop within {trainer_timeout:.1f}s after collectors"
+        )
+    elif training_completed and trainer.exitcode != 0:
+        failures.append(f"trainer exited with code {trainer.exitcode}")
 
     if failures:
         raise ChildProcessError("; ".join(failures))
@@ -178,9 +193,17 @@ def dictconfig_to_config(cfg: DictConfig) -> Config:
     import inspect
 
     valid_keys = set(inspect.signature(Config).parameters.keys())
-    filtered_d = {k: v for k, v in d.items() if k in valid_keys}
+    unexpected = sorted(set(d) - valid_keys)
+    if unexpected:
+        raise ValueError(f"Unknown runtime configuration keys: {unexpected}")
+    missing = sorted(valid_keys - set(d))
+    if missing:
+        raise ValueError(
+            "Hydra config is missing runtime fields; YAML must be canonical: "
+            f"{missing}"
+        )
 
-    return Config(**filtered_d)
+    return Config(**d)
 
 
 def run_training(
@@ -189,6 +212,7 @@ def run_training(
     checkpoint_path: str | None = None,
 ):
     """Run training with the given configuration."""
+    validate_config(flat_cfg)
     device = resolve_device(flat_cfg.device)
 
     if flat_cfg.dry_run:
@@ -258,8 +282,6 @@ def run_training(
         print(f"  MLflow run ID: {mlflow_run_id}")
         print(f"  MLflow tracking: {mlruns_dir}")
 
-        start_mlflow_ui(str(mlruns_dir), port=5000)
-
         if checkpoint_mlflow_run_id:
             mlflow.set_tag("resumed_from_checkpoint", checkpoint_path)
         else:
@@ -291,13 +313,16 @@ def run_training(
         mp_ctx = mp.get_context("spawn")
         # Queue stores full episodes, so tying maxsize to batch_size can over-buffer
         # large pixel episodes and trigger host OOM. Keep this bounded by collectors.
-        queue_max_episodes = min(16, max(4, int(flat_cfg.num_collectors) * 4))
+        queue_max_episodes = min(16, max(4, flat_cfg.num_collectors * 4))
         data_queue = mp_ctx.Queue(maxsize=queue_max_episodes)
-        model_queue = mp_ctx.Queue(maxsize=1)
+        collector_count = flat_cfg.num_collectors
+        model_queues = [mp_ctx.Queue(maxsize=1) for _ in range(collector_count)]
         stop_event = mp_ctx.Event()
+        training_done_event = mp_ctx.Event()
+        collectors_stopped_event = mp_ctx.Event()
 
         experience_loops = []
-        for collector_id in range(max(1, flat_cfg.num_collectors)):
+        for collector_id, model_queue in enumerate(model_queues):
             p = mp_ctx.Process(
                 target=collect_experiences,
                 args=(
@@ -316,7 +341,9 @@ def run_training(
             args=(
                 flat_cfg,
                 data_queue,
-                model_queue,
+                model_queues,
+                training_done_event,
+                collectors_stopped_event,
                 str(log_dir),
                 checkpoint_path,
                 mlflow_run_id,
@@ -329,7 +356,13 @@ def run_training(
             p.start()
         trainer_loop.start()
 
-        join_training_processes(trainer_loop, experience_loops, stop_event)
+        join_training_processes(
+            trainer_loop,
+            experience_loops,
+            stop_event,
+            training_done_event,
+            collectors_stopped_event,
+        )
         finish_run_manifest(log_dir, status="completed")
         print("Training complete.")
     except BaseException as exc:

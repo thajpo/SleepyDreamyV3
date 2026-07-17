@@ -1,13 +1,17 @@
+import logging
 import numpy as np
 import os
 import random
 import time
 import torch
 import torch.nn.functional as F
-from queue import Empty
+from queue import Empty, Full
 
 from ..models import initialize_actor, initialize_world_model, symlog, unimix_logits
 from .env import create_env
+
+
+logger = logging.getLogger(__name__)
 
 
 def collect_experiences(
@@ -24,8 +28,12 @@ def collect_experiences(
 
     Starts with random actions (fast, no model inference).
     Switches to learned policy when trainer sends first model update.
-    Stops when stop_event is set by the trainer.
+    Stops when stop_event is set by the parent process supervisor.
     """
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(processName)s %(levelname)s %(name)s %(message)s",
+    )
     use_pixels = config.use_pixels
     env = create_env(config.environment_name, use_pixels=use_pixels, config=config)
     device = "cpu"
@@ -65,39 +73,41 @@ def collect_experiences(
         actor.eval()
         encoder.eval()
         world_model.eval()
-        print("Collector: Warm-started learned policy from checkpoint.")
+        logger.info(
+            "model_weights_loaded collector_id=%d source=checkpoint", collector_id
+        )
 
-    def pull_latest_models() -> int:
-        """Drain model queue and apply only the newest update."""
+    def pull_latest_models() -> None:
+        """Apply the pending update from this collector's one-item mailbox."""
         nonlocal actor, encoder, world_model, use_random_actions
-        latest_model_states = None
-        updates = 0
-        while True:
-            try:
-                latest_model_states = model_queue.get_nowait()
-                updates += 1
-            except Empty:
-                break
-
-        if latest_model_states is None:
-            return 0
+        try:
+            latest_model_update = model_queue.get_nowait()
+        except Empty:
+            return
 
         initialize_models()
 
-        actor.load_state_dict(latest_model_states["actor"])
-        encoder.load_state_dict(latest_model_states["encoder"])
+        actor.load_state_dict(latest_model_update["actor"])
+        encoder.load_state_dict(latest_model_update["encoder"])
         # strict=False: ignore h_prev/z_prev buffer shape mismatch (batch size differs)
-        world_model.load_state_dict(latest_model_states["world_model"], strict=False)
+        world_model.load_state_dict(latest_model_update["world_model"], strict=False)
         actor.eval()
         encoder.eval()
         world_model.eval()
 
         if use_random_actions:
-            print("Collector: Received models, switching to learned policy.")
+            logger.info(
+                "model_weights_loaded collector_id=%d version=%s policy_mode=learned",
+                collector_id,
+                latest_model_update["version"],
+            )
             use_random_actions = False
         else:
-            print("Collector: Updated models from trainer.")
-        return updates
+            logger.info(
+                "model_weights_loaded collector_id=%d version=%s",
+                collector_id,
+                latest_model_update["version"],
+            )
 
     episode_count = 0
 
@@ -130,9 +140,17 @@ def collect_experiences(
                 1, world_model.n_latents, world_model.n_classes, device=device
             )
             z_prev_embed = world_model.z_embedding(z_prev.view(1, -1))
-            print(f"Collecting episode {episode_count} (learned policy)...")
+            logger.debug(
+                "episode_started collector_id=%d episode=%d policy_mode=learned",
+                collector_id,
+                episode_count,
+            )
         else:
-            print(f"Collecting episode {episode_count} (random)...")
+            logger.debug(
+                "episode_started collector_id=%d episode=%d policy_mode=random",
+                collector_id,
+                episode_count,
+            )
 
         env_steps_in_episode = 0
 
@@ -234,8 +252,9 @@ def collect_experiences(
             if terminated or truncated:
                 break
 
-        # Only send complete episodes (not interrupted mid-episode by stop signal)
-        if not stop_event.is_set() or (terminated or truncated):
+        # Once training is complete, replay is no longer being consumed. Drop an
+        # interrupted/final episode rather than blocking shutdown on a full queue.
+        if not stop_event.is_set():
             # Package and send episode
             if use_pixels:
                 pixels_np = np.array(episode_pixels, dtype=np.uint8)
@@ -248,17 +267,21 @@ def collect_experiences(
             is_terminal_np = np.array(episode_is_terminal, dtype=bool)
 
             episode_length = env_steps_in_episode
-            data_queue.put(
-                (
-                    pixels_np,
-                    vec_obs_np,
-                    actions_np,
-                    rewards_np,
-                    is_last_np,
-                    is_terminal_np,
-                    episode_length,
-                )
+            episode = (
+                pixels_np,
+                vec_obs_np,
+                actions_np,
+                rewards_np,
+                is_last_np,
+                is_terminal_np,
+                episode_length,
             )
+            while not stop_event.is_set():
+                try:
+                    data_queue.put(episode, timeout=0.1)
+                    break
+                except Full:
+                    continue
 
             # On-demand collection: wait if queue is sufficiently full
             # This prevents wasteful over-collection in fast envs (e.g., state-only CartPole)
@@ -274,4 +297,4 @@ def collect_experiences(
 
     # Cleanup
     env.close()
-    print("Experience collector: Stopped gracefully.")
+    logger.info("collector_stopped collector_id=%d", collector_id)

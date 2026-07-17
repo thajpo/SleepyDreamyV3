@@ -1,6 +1,7 @@
 import math
 import copy
 import json
+import logging
 import random
 from dataclasses import asdict, dataclass
 from typing import NamedTuple, Optional
@@ -30,6 +31,9 @@ from ..models import (
 from .mlflow_logger import MLflowLogger
 from ..runtime.env import create_env
 from ..run_manifest import file_sha256, read_run_manifest, update_run_manifest
+
+
+logger = logging.getLogger(__name__)
 
 
 def seed_everything(seed: int) -> None:
@@ -77,7 +81,7 @@ class WorldModelTrainer:
         self,
         config,
         data_queue,
-        model_queue,
+        model_queues,
         log_dir,
         checkpoint_path=None,
         mlflow_run_id=None,
@@ -85,6 +89,8 @@ class WorldModelTrainer:
         device="cpu",
     ):
         # Passed in args
+        if data_queue is None:
+            raise ValueError("WorldModelTrainer requires a collector data queue")
         self.config = config  # Store config for use in methods
         self.dry_run = dry_run
         self.device = torch.device(device)
@@ -170,7 +176,7 @@ class WorldModelTrainer:
 
         self.train_step = 0
         self.data_queue = data_queue
-        self.model_queue = model_queue
+        self.model_queues = list(model_queues)
 
         # Replay buffer: background thread drains queue, sample() returns instantly
         self.replay_buffer = EpisodeReplayBuffer(
@@ -349,8 +355,11 @@ class WorldModelTrainer:
         # Keep fresh runs in random-action collection during WM warmup. Once
         # warmup is over, send policy weights so the collector switches to the
         # learned actor. Resumed checkpoints beyond warmup still sync at startup.
-        if self.train_step >= self.config.actor_warmup_steps:
-            self.send_models_to_collector(self.train_step)
+        if (
+            self.train_step < self.config.max_train_steps
+            and self.train_step >= self.config.actor_warmup_steps
+        ):
+            self.send_models_to_collectors(self.train_step)
 
         stop_reason = "max_train_steps"
         while self.train_step < self.config.max_train_steps:
@@ -542,10 +551,11 @@ class WorldModelTrainer:
 
             # Send models to collector periodically
             if (
-                self.train_step >= self.config.actor_warmup_steps
+                self.train_step < self.config.max_train_steps
+                and self.train_step >= self.config.actor_warmup_steps
                 and self.train_step % self.config.steps_per_weight_sync == 0
             ):
-                self.send_models_to_collector(self.train_step)
+                self.send_models_to_collectors(self.train_step)
 
             # Periodic progress logging
             self.steps_since_log += 1
@@ -899,44 +909,59 @@ class WorldModelTrainer:
         """Get underlying model (handles both compiled and non-compiled)."""
         return getattr(model, "_orig_mod", model)
 
-    def send_models_to_collector(self, step: int):
-        """Push current model weights to the data collection process."""
-        if self.model_queue is None:
-            return
-
+    def send_models_to_collectors(self, step: int) -> None:
+        """Publish one coherent weight snapshot to every collector mailbox."""
         # Exclude h_prev/z_prev buffers as they have batch-size-dependent shapes
         wm = self._get_model(self.world_model)
         actor = self._get_model(self.actor)
         encoder = self._get_model(self.encoder)
 
+        # state_dict tensors alias live parameters on CPU. Clone them so every
+        # collector receives one coherent training-step snapshot.
         wm_state = {
-            k: v.cpu()
+            k: v.detach().to(device="cpu", copy=True)
             for k, v in wm.state_dict().items()
             if k not in ("h_prev", "z_prev")
         }
         models_to_send = {
-            "actor": {k: v.cpu() for k, v in actor.state_dict().items()},
-            "encoder": {k: v.cpu() for k, v in encoder.state_dict().items()},
+            "version": step,
+            "actor": {
+                k: v.detach().to(device="cpu", copy=True)
+                for k, v in actor.state_dict().items()
+            },
+            "encoder": {
+                k: v.detach().to(device="cpu", copy=True)
+                for k, v in encoder.state_dict().items()
+            },
             "world_model": wm_state,
         }
-        try:
-            # Clear queue to ensure collector gets the latest version
-            cleared = 0
-            while not self.model_queue.empty():
-                self.model_queue.get_nowait()
-                cleared += 1
-            self.model_queue.put_nowait(models_to_send)
-            print(f"Trainer: Sent models at step {step} (cleared {cleared} old)")
-        except Full:
-            print("Trainer: Model queue was full. Skipping update.")
-        except Exception as e:
-            print(f"Trainer: Failed to send models: {type(e).__name__}: {e}")
+
+        sent = []
+        pending = []
+        for collector_id, model_queue in enumerate(self.model_queues):
+            try:
+                model_queue.put_nowait(models_to_send)
+                sent.append(collector_id)
+            except Full:
+                # A full one-item mailbox means this collector already has an
+                # unseen update. Do not block training behind a slow environment.
+                pending.append(collector_id)
+
+        log = logger.warning if pending else logger.info
+        log(
+            "model_weights_published version=%d delivered=%s pending=%s",
+            step,
+            sent,
+            pending,
+        )
 
 
 def train_world_model(
     config,
     data_queue,
-    model_queue,
+    model_queues,
+    training_done_event,
+    collectors_stopped_event,
     log_dir,
     checkpoint_path=None,
     mlflow_run_id=None,
@@ -944,6 +969,10 @@ def train_world_model(
     device="cpu",
 ):
     """Entry point: construct a WorldModelTrainer and run the training loop."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(processName)s %(levelname)s %(name)s %(message)s",
+    )
     # Set MLflow tracking URI and join existing run in this child process (skip in dry_run)
     if mlflow_run_id and not dry_run:
         mlruns_dir = os.path.abspath(os.path.join("runs", "mlruns"))
@@ -954,7 +983,7 @@ def train_world_model(
     trainer = WorldModelTrainer(
         config,
         data_queue,
-        model_queue,
+        model_queues,
         log_dir,
         checkpoint_path,
         mlflow_run_id,
@@ -962,3 +991,8 @@ def train_world_model(
         device,
     )
     trainer.train_models()
+    training_done_event.set()
+    if not collectors_stopped_event.wait(timeout=15.0):
+        raise TimeoutError(
+            "trainer timed out waiting for collectors to finish shutdown"
+        )

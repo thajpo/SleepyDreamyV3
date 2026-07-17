@@ -2,9 +2,9 @@
 
 import os
 
+import imageio.v3 as iio
 import mlflow
 import torch
-import torchvision
 
 
 class MLflowLogger:
@@ -79,12 +79,19 @@ class MLflowLogger:
         filename = f"{safe_key}_step{step}.png"
         filepath = os.path.join(self.images_dir, filename)
 
-        # Save image
-        if tensor.dim() == 3:
-            torchvision.utils.save_image(tensor, filepath)
-        else:
-            # Handle batch dimension
-            torchvision.utils.save_image(tensor[0], filepath)
+        # Save the first image as HWC uint8. Keeping this conversion local
+        # avoids a compiled TorchVision dependency for one utility function.
+        image = tensor if tensor.dim() == 3 else tensor[0]
+        image_np = (
+            (image.detach().permute(1, 2, 0) * 255)
+            .clamp(0, 255)
+            .byte()
+            .cpu()
+            .numpy()
+        )
+        if image_np.shape[-1] == 1:
+            image_np = image_np[..., 0]
+        iio.imwrite(filepath, image_np)
 
         # Log as artifact
         mlflow.log_artifact(filepath, artifact_path="images")

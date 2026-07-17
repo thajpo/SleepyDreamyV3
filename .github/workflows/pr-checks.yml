@@ -28,21 +28,23 @@ jobs:
           python-version: "3.13"
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v8
+        uses: astral-sh/setup-uv@v8.3.2
         with:
           version: "0.11.16"
 
-      - name: Install dependencies
-        run: uv sync --frozen
+      - name: Install CPU development environment
+        run: uv sync --frozen --extra cpu
 
       - name: Compile Python sources
-        run: python -m compileall -q src tests
+        run: python -m compileall -q src tests scripts
 
       - name: Type-check reliability boundaries
         run: >-
           uvx --from pyright==1.1.407 pyright
+          src/dreamer/config.py
           src/dreamer/main.py
           src/dreamer/run_manifest.py
+          src/dreamer/run_registry.py
           src/dreamer/trainer/checkpoints.py
           src/dreamer/runtime/replay_buffer.py
 
@@ -59,12 +61,12 @@ jobs:
           python-version: "3.13"
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v8
+        uses: astral-sh/setup-uv@v8.3.2
         with:
           version: "0.11.16"
 
-      - name: Install dependencies
-        run: uv sync --frozen
+      - name: Install CPU development environment
+        run: uv sync --frozen --extra cpu
 
       - name: Run tests
-        run: uv run pytest -q
+        run: uv run --extra cpu pytest -q
