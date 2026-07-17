@@ -50,6 +50,10 @@ uv run --extra cpu dreamer-train \
 
 - Reproduce runtime bugs through a supported CLI or a focused integration test.
 - A trainer or collector subprocess failure must make the parent command fail.
+- Treat episode delivery as fan-in, but model updates as fan-out: every collector
+  must have an independent bounded weight mailbox.
+- On normal completion, keep the trainer process alive until the parent has
+  stopped and joined every collector.
 - Preserve periodic, final, and best-checkpoint semantics as separate concepts.
 - Every non-dry run must retain `run_manifest.json`; checkpoint artifacts must
   carry its run ID and preserve the configured evaluation metric on resume.

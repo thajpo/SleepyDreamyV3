@@ -6,7 +6,11 @@ import subprocess
 import torch
 
 
-def _run_training(output_dir: Path, checkpoint: Path | None = None):
+def _run_training(
+    output_dir: Path,
+    checkpoint: Path | None = None,
+    extra_overrides: list[str] | None = None,
+):
     executable = shutil.which("dreamer-train")
     assert executable is not None, "dreamer-train must be installed for integration tests"
     max_steps = 2 if checkpoint else 1
@@ -24,6 +28,8 @@ def _run_training(output_dir: Path, checkpoint: Path | None = None):
     ]
     if checkpoint:
         command.append(f"checkpoint_path={checkpoint}")
+    if extra_overrides:
+        command.extend(extra_overrides)
     return subprocess.run(
         command,
         cwd=output_dir.parent,
@@ -60,3 +66,20 @@ def test_installed_cli_checkpoint_resume_contract(tmp_path):
     assert resumed_manifest["tracking"]["resumed_from"] == str(first_checkpoint)
     assert resumed_checkpoint["step"] == 2
     assert resumed_checkpoint["run_id"] == resumed_manifest["run_id"]
+
+
+def test_each_collector_receives_the_initial_model_update(tmp_path):
+    result = _run_training(
+        tmp_path / "multi_collector",
+        extra_overrides=[
+            "general.dry_run=true",
+            "train.num_collectors=2",
+            "train.replay_ratio=1000",
+        ],
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    output = result.stdout + result.stderr
+    assert "model_weights_loaded collector_id=0 version=0" in output
+    assert "model_weights_loaded collector_id=1 version=0" in output
+    assert "model_weights_published version=1" not in output

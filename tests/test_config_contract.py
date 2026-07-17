@@ -57,6 +57,6 @@ def test_trainer_requires_collector_queue_before_model_initialization(tmp_path):
         WorldModelTrainer(
             Config(),
             data_queue=None,
-            model_queue=None,
+            model_queues=None,
             log_dir=tmp_path,
         )

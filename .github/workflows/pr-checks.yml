@@ -47,7 +47,6 @@ jobs:
           src/dreamer/run_registry.py
           src/dreamer/trainer/checkpoints.py
           src/dreamer/runtime/replay_buffer.py
-          src/dreamer/runtime/model_transport.py
 
   test:
     name: test
