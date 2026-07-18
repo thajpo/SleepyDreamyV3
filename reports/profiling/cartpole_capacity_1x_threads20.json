@@ -1,0 +1,1598 @@
+{
+  "schema_version": 1,
+  "recorded_at_unix": 1784390494.6462774,
+  "command": {
+    "concurrency": 1,
+    "steps": 120,
+    "torch_threads": 20,
+    "sample_interval": 1.0,
+    "training_argv": [
+      "/home/j/Projects/SleepyDreamyV3/.venv-rocm/bin/python",
+      "-m",
+      "dreamer.main",
+      "env=cartpole_state_only",
+      "general.dry_run=true",
+      "general.device=cuda",
+      "general.seed=0",
+      "models.d_hidden=128",
+      "train.max_train_steps=120",
+      "train.batch_size=8",
+      "train.sequence_length=16",
+      "train.replay_burn_in=8",
+      "train.replay_buffer_size=1000",
+      "train.min_buffer_episodes=16",
+      "train.num_collectors=1",
+      "train.actor_warmup_steps=0",
+      "train.replay_ratio=1.0",
+      "train.eval_every=0"
+    ]
+  },
+  "host": {
+    "physical_cpu_count": 20,
+    "logical_cpu_count": 20,
+    "total_ram_bytes": 33344544768,
+    "python": "3.13.7 (main, Sep 18 2025, 19:47:49) [Clang 20.1.4 ]"
+  },
+  "baseline": {
+    "host_available_ram_bytes": 24507539456,
+    "gpu": {
+      "utilization_percent": 8,
+      "vram_total_bytes": 25753026560,
+      "vram_used_bytes": 4119293952
+    }
+  },
+  "runs": [
+    {
+      "index": 0,
+      "seed": 0,
+      "exit_code": 0,
+      "wall_seconds": 91.45242667198181,
+      "throughput": [
+        {
+          "step": 100,
+          "steps_per_second": 1.68
+        }
+      ],
+      "log_tail": [
+        "2026-07-18 12:02:38,196 SpawnProcess-2 INFO dreamer.trainer.core model_weights_published version=80 delivered=[0] pending=[]",
+        "2026-07-18 12:02:38,310 SpawnProcess-1 INFO dreamer.runtime.collector model_weights_loaded collector_id=0 version=80",
+        "2026-07-18 12:02:40,662 SpawnProcess-2 INFO dreamer.trainer.core model_weights_published version=85 delivered=[0] pending=[]",
+        "2026-07-18 12:02:40,742 SpawnProcess-1 INFO dreamer.runtime.collector model_weights_loaded collector_id=0 version=85",
+        "2026-07-18 12:02:44,024 SpawnProcess-2 INFO dreamer.trainer.core model_weights_published version=90 delivered=[0] pending=[]",
+        "2026-07-18 12:02:44,191 SpawnProcess-1 INFO dreamer.runtime.collector model_weights_loaded collector_id=0 version=90",
+        "2026-07-18 12:02:46,723 SpawnProcess-2 INFO dreamer.trainer.core model_weights_published version=95 delivered=[0] pending=[]",
+        "2026-07-18 12:02:46,817 SpawnProcess-1 INFO dreamer.runtime.collector model_weights_loaded collector_id=0 version=95",
+        "2026-07-18 12:02:49,394 SpawnProcess-2 INFO dreamer.trainer.core model_weights_published version=100 delivered=[0] pending=[]",
+        "Step 100/120 | 1.68 steps/s | ETA: 0.0h | WM: 4.5318 | Actor: -0.1300 | Critic: 7.2866",
+        "2026-07-18 12:02:49,428 SpawnProcess-1 INFO dreamer.runtime.collector model_weights_loaded collector_id=0 version=100",
+        "2026-07-18 12:02:52,327 SpawnProcess-2 INFO dreamer.trainer.core model_weights_published version=105 delivered=[0] pending=[]",
+        "2026-07-18 12:02:52,429 SpawnProcess-1 INFO dreamer.runtime.collector model_weights_loaded collector_id=0 version=105",
+        "2026-07-18 12:02:55,439 SpawnProcess-2 INFO dreamer.trainer.core model_weights_published version=110 delivered=[0] pending=[]",
+        "2026-07-18 12:02:55,474 SpawnProcess-1 INFO dreamer.runtime.collector model_weights_loaded collector_id=0 version=110",
+        "2026-07-18 12:02:58,517 SpawnProcess-2 INFO dreamer.trainer.core model_weights_published version=115 delivered=[0] pending=[]",
+        "2026-07-18 12:02:58,575 SpawnProcess-1 INFO dreamer.runtime.collector model_weights_loaded collector_id=0 version=115",
+        "DRY RUN complete - no checkpoint saved.",
+        "2026-07-18 12:03:01,202 SpawnProcess-1 INFO dreamer.runtime.collector collector_stopped collector_id=0",
+        "Training complete."
+      ]
+    }
+  ],
+  "summary": {
+    "sample_count": 83,
+    "wall_seconds_max": 91.45242667198181,
+    "host_cpu_percent_mean": 67.13855421686748,
+    "host_cpu_percent_peak": 88.6,
+    "host_ram_delta_peak_bytes": 3279441920,
+    "run_tree_rss_peak_bytes": [
+      8024666112
+    ],
+    "run_tree_uss_peak_bytes": [
+      3769303040
+    ],
+    "run_process_count_peak": [
+      4
+    ],
+    "run_thread_count_peak": [
+      133
+    ],
+    "gpu_utilization_percent_mean": 28.0,
+    "gpu_utilization_percent_peak": 72,
+    "gpu_vram_delta_peak_bytes": 671096832
+  },
+  "samples": [
+    {
+      "elapsed_seconds": 0.0012042522430419922,
+      "host_cpu_percent": 0.0,
+      "host_available_ram_bytes": 24498589696,
+      "gpu": {
+        "utilization_percent": 5,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4119293952
+      },
+      "runs": [
+        {
+          "processes": 1,
+          "threads": 1,
+          "rss_bytes": 26271744,
+          "uss_bytes": 16162816
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 1.0642452239990234,
+      "host_cpu_percent": 12.9,
+      "host_available_ram_bytes": 24173785088,
+      "gpu": {
+        "utilization_percent": 7,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4119343104
+      },
+      "runs": [
+        {
+          "processes": 1,
+          "threads": 22,
+          "rss_bytes": 763506688,
+          "uss_bytes": 749703168
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 2.127676010131836,
+      "host_cpu_percent": 7.0,
+      "host_available_ram_bytes": 23839744000,
+      "gpu": {
+        "utilization_percent": 7,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4119343104
+      },
+      "runs": [
+        {
+          "processes": 1,
+          "threads": 22,
+          "rss_bytes": 1276002304,
+          "uss_bytes": 1272774656
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 3.2103044986724854,
+      "host_cpu_percent": 7.1,
+      "host_available_ram_bytes": 23679590400,
+      "gpu": {
+        "utilization_percent": 7,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4119343104
+      },
+      "runs": [
+        {
+          "processes": 1,
+          "threads": 22,
+          "rss_bytes": 1912537088,
+          "uss_bytes": 1898827776
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 4.2920918464660645,
+      "host_cpu_percent": 7.9,
+      "host_available_ram_bytes": 23470653440,
+      "gpu": {
+        "utilization_percent": 8,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4129861632
+      },
+      "runs": [
+        {
+          "processes": 1,
+          "threads": 22,
+          "rss_bytes": 2144862208,
+          "uss_bytes": 2130370560
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 5.379786729812622,
+      "host_cpu_percent": 7.7,
+      "host_available_ram_bytes": 23446573056,
+      "gpu": {
+        "utilization_percent": 8,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4129861632
+      },
+      "runs": [
+        {
+          "processes": 1,
+          "threads": 22,
+          "rss_bytes": 2597363712,
+          "uss_bytes": 2584113152
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 6.460620641708374,
+      "host_cpu_percent": 7.7,
+      "host_available_ram_bytes": 23330275328,
+      "gpu": {
+        "utilization_percent": 9,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4129861632
+      },
+      "runs": [
+        {
+          "processes": 1,
+          "threads": 22,
+          "rss_bytes": 3030970368,
+          "uss_bytes": 3018506240
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 7.544717073440552,
+      "host_cpu_percent": 8.1,
+      "host_available_ram_bytes": 23084711936,
+      "gpu": {
+        "utilization_percent": 8,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4129861632
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 25,
+          "rss_bytes": 3398279168,
+          "uss_bytes": 3332505600
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 8.624436378479004,
+      "host_cpu_percent": 19.9,
+      "host_available_ram_bytes": 22428262400,
+      "gpu": {
+        "utilization_percent": 9,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4119388160
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 67,
+          "rss_bytes": 4983881728,
+          "uss_bytes": 3703238656
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 9.712369918823242,
+      "host_cpu_percent": 7.6,
+      "host_available_ram_bytes": 22241251328,
+      "gpu": {
+        "utilization_percent": 9,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4102414336
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 67,
+          "rss_bytes": 5471227904,
+          "uss_bytes": 3418509312
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 10.812315702438354,
+      "host_cpu_percent": 7.7,
+      "host_available_ram_bytes": 21769093120,
+      "gpu": {
+        "utilization_percent": 8,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4102414336
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 67,
+          "rss_bytes": 6671331328,
+          "uss_bytes": 3769303040
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 11.90957260131836,
+      "host_cpu_percent": 7.4,
+      "host_available_ram_bytes": 22007898112,
+      "gpu": {
+        "utilization_percent": 7,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4102414336
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 67,
+          "rss_bytes": 6410981376,
+          "uss_bytes": 2992967680
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 13.006480932235718,
+      "host_cpu_percent": 7.2,
+      "host_available_ram_bytes": 21837389824,
+      "gpu": {
+        "utilization_percent": 7,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4102414336
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 67,
+          "rss_bytes": 6790103040,
+          "uss_bytes": 2674917376
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 14.12480354309082,
+      "host_cpu_percent": 7.3,
+      "host_available_ram_bytes": 21718261760,
+      "gpu": {
+        "utilization_percent": 7,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4102414336
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 67,
+          "rss_bytes": 7179550720,
+          "uss_bytes": 2632372224
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 15.227408409118652,
+      "host_cpu_percent": 8.6,
+      "host_available_ram_bytes": 21573275648,
+      "gpu": {
+        "utilization_percent": 9,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4362313728
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 128,
+          "rss_bytes": 7565164544,
+          "uss_bytes": 2894290944
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 16.33095955848694,
+      "host_cpu_percent": 75.5,
+      "host_available_ram_bytes": 21622337536,
+      "gpu": {
+        "utilization_percent": 7,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4362313728
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 128,
+          "rss_bytes": 7573417984,
+          "uss_bytes": 2899214336
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 17.42510485649109,
+      "host_cpu_percent": 82.3,
+      "host_available_ram_bytes": 21365301248,
+      "gpu": {
+        "utilization_percent": 18,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4648587264
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 128,
+          "rss_bytes": 7899279360,
+          "uss_bytes": 3219742720
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 18.52318811416626,
+      "host_cpu_percent": 88.4,
+      "host_available_ram_bytes": 21228097536,
+      "gpu": {
+        "utilization_percent": 72,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4755046400
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8024125440,
+          "uss_bytes": 3341668352
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 19.660735368728638,
+      "host_cpu_percent": 84.8,
+      "host_available_ram_bytes": 21233324032,
+      "gpu": {
+        "utilization_percent": 41,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4755046400
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 120,
+          "rss_bytes": 8022761472,
+          "uss_bytes": 3340320768
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 20.76341152191162,
+      "host_cpu_percent": 82.4,
+      "host_available_ram_bytes": 21274681344,
+      "gpu": {
+        "utilization_percent": 35,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4755046400
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8022781952,
+          "uss_bytes": 3340341248
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 21.875118255615234,
+      "host_cpu_percent": 82.8,
+      "host_available_ram_bytes": 21287321600,
+      "gpu": {
+        "utilization_percent": 36,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4755046400
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8022831104,
+          "uss_bytes": 3340390400
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 22.981117725372314,
+      "host_cpu_percent": 83.0,
+      "host_available_ram_bytes": 21285429248,
+      "gpu": {
+        "utilization_percent": 36,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4755046400
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8022851584,
+          "uss_bytes": 3340410880
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 24.081116199493408,
+      "host_cpu_percent": 83.1,
+      "host_available_ram_bytes": 21295624192,
+      "gpu": {
+        "utilization_percent": 35,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4755046400
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8022921216,
+          "uss_bytes": 3340480512
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 25.17019009590149,
+      "host_cpu_percent": 83.6,
+      "host_available_ram_bytes": 21315502080,
+      "gpu": {
+        "utilization_percent": 21,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4756742144
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8022925312,
+          "uss_bytes": 3340484608
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 26.285120964050293,
+      "host_cpu_percent": 84.0,
+      "host_available_ram_bytes": 21312712704,
+      "gpu": {
+        "utilization_percent": 48,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4756742144
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8022900736,
+          "uss_bytes": 3340460032
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 27.384113311767578,
+      "host_cpu_percent": 83.9,
+      "host_available_ram_bytes": 21310717952,
+      "gpu": {
+        "utilization_percent": 28,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4756742144
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8022925312,
+          "uss_bytes": 3340484608
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 28.508112907409668,
+      "host_cpu_percent": 83.8,
+      "host_available_ram_bytes": 21308747776,
+      "gpu": {
+        "utilization_percent": 34,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4754644992
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8022986752,
+          "uss_bytes": 3340546048
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 29.597580432891846,
+      "host_cpu_percent": 82.6,
+      "host_available_ram_bytes": 21318701056,
+      "gpu": {
+        "utilization_percent": 31,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4729741312
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8022949888,
+          "uss_bytes": 3340509184
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 30.69711971282959,
+      "host_cpu_percent": 85.3,
+      "host_available_ram_bytes": 21349896192,
+      "gpu": {
+        "utilization_percent": 31,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4729741312
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8022966272,
+          "uss_bytes": 3340525568
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 31.816114902496338,
+      "host_cpu_percent": 87.8,
+      "host_available_ram_bytes": 21290811392,
+      "gpu": {
+        "utilization_percent": 18,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4729741312
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8022958080,
+          "uss_bytes": 3340517376
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 32.92713022232056,
+      "host_cpu_percent": 84.2,
+      "host_available_ram_bytes": 21298601984,
+      "gpu": {
+        "utilization_percent": 42,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4729741312
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8024666112,
+          "uss_bytes": 3342487552
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 34.024089097976685,
+      "host_cpu_percent": 84.0,
+      "host_available_ram_bytes": 21423161344,
+      "gpu": {
+        "utilization_percent": 31,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4740259840
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8022994944,
+          "uss_bytes": 3340554240
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 35.12149953842163,
+      "host_cpu_percent": 82.7,
+      "host_available_ram_bytes": 21500911616,
+      "gpu": {
+        "utilization_percent": 38,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4740259840
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023056384,
+          "uss_bytes": 3340615680
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 36.2140634059906,
+      "host_cpu_percent": 85.3,
+      "host_available_ram_bytes": 21482618880,
+      "gpu": {
+        "utilization_percent": 35,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4740259840
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023015424,
+          "uss_bytes": 3340574720
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 37.322022438049316,
+      "host_cpu_percent": 84.7,
+      "host_available_ram_bytes": 21465948160,
+      "gpu": {
+        "utilization_percent": 41,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4731838464
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023052288,
+          "uss_bytes": 3340611584
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 38.44288516044617,
+      "host_cpu_percent": 84.1,
+      "host_available_ram_bytes": 21414305792,
+      "gpu": {
+        "utilization_percent": 30,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4731838464
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023048192,
+          "uss_bytes": 3340607488
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 39.546048641204834,
+      "host_cpu_percent": 85.9,
+      "host_available_ram_bytes": 21441130496,
+      "gpu": {
+        "utilization_percent": 36,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4754644992
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023060480,
+          "uss_bytes": 3340619776
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 40.64913845062256,
+      "host_cpu_percent": 83.9,
+      "host_available_ram_bytes": 21438742528,
+      "gpu": {
+        "utilization_percent": 22,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4754644992
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023097344,
+          "uss_bytes": 3340656640
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 41.754117250442505,
+      "host_cpu_percent": 85.2,
+      "host_available_ram_bytes": 21395103744,
+      "gpu": {
+        "utilization_percent": 36,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4754644992
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023097344,
+          "uss_bytes": 3340656640
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 42.86711621284485,
+      "host_cpu_percent": 83.8,
+      "host_available_ram_bytes": 21394075648,
+      "gpu": {
+        "utilization_percent": 32,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4754644992
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023101440,
+          "uss_bytes": 3340660736
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 43.96715593338013,
+      "host_cpu_percent": 83.8,
+      "host_available_ram_bytes": 21399801856,
+      "gpu": {
+        "utilization_percent": 27,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4754644992
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 133,
+          "rss_bytes": 8023216128,
+          "uss_bytes": 3340775424
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 45.069111347198486,
+      "host_cpu_percent": 85.3,
+      "host_available_ram_bytes": 21446066176,
+      "gpu": {
+        "utilization_percent": 22,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4754644992
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023113728,
+          "uss_bytes": 3340673024
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 46.1690719127655,
+      "host_cpu_percent": 86.7,
+      "host_available_ram_bytes": 21398048768,
+      "gpu": {
+        "utilization_percent": 36,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4756742144
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023126016,
+          "uss_bytes": 3340685312
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 47.26011323928833,
+      "host_cpu_percent": 85.3,
+      "host_available_ram_bytes": 21457211392,
+      "gpu": {
+        "utilization_percent": 37,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4756742144
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023187456,
+          "uss_bytes": 3340746752
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 48.354499101638794,
+      "host_cpu_percent": 83.2,
+      "host_available_ram_bytes": 21433257984,
+      "gpu": {
+        "utilization_percent": 37,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4756742144
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023977984,
+          "uss_bytes": 3341602816
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 49.46311402320862,
+      "host_cpu_percent": 88.6,
+      "host_available_ram_bytes": 21380349952,
+      "gpu": {
+        "utilization_percent": 8,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4754644992
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023203840,
+          "uss_bytes": 3340763136
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 50.554314851760864,
+      "host_cpu_percent": 84.2,
+      "host_available_ram_bytes": 21426511872,
+      "gpu": {
+        "utilization_percent": 38,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4754644992
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023158784,
+          "uss_bytes": 3340718080
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 51.65811324119568,
+      "host_cpu_percent": 84.0,
+      "host_available_ram_bytes": 21464326144,
+      "gpu": {
+        "utilization_percent": 49,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4754644992
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023232512,
+          "uss_bytes": 3340791808
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 52.781110525131226,
+      "host_cpu_percent": 86.3,
+      "host_available_ram_bytes": 21489070080,
+      "gpu": {
+        "utilization_percent": 41,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4754644992
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023236608,
+          "uss_bytes": 3340795904
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 53.89311218261719,
+      "host_cpu_percent": 83.3,
+      "host_available_ram_bytes": 21510160384,
+      "gpu": {
+        "utilization_percent": 37,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4754644992
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023277568,
+          "uss_bytes": 3340836864
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 54.99605059623718,
+      "host_cpu_percent": 83.1,
+      "host_available_ram_bytes": 21491666944,
+      "gpu": {
+        "utilization_percent": 34,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4754640896
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023289856,
+          "uss_bytes": 3340849152
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 56.09710383415222,
+      "host_cpu_percent": 84.0,
+      "host_available_ram_bytes": 21511897088,
+      "gpu": {
+        "utilization_percent": 30,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4756738048
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023257088,
+          "uss_bytes": 3340816384
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 57.193007469177246,
+      "host_cpu_percent": 85.1,
+      "host_available_ram_bytes": 21515304960,
+      "gpu": {
+        "utilization_percent": 31,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4756738048
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023265280,
+          "uss_bytes": 3340824576
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 58.28686785697937,
+      "host_cpu_percent": 85.1,
+      "host_available_ram_bytes": 21510639616,
+      "gpu": {
+        "utilization_percent": 37,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4790390784
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023314432,
+          "uss_bytes": 3340873728
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 59.396960496902466,
+      "host_cpu_percent": 84.7,
+      "host_available_ram_bytes": 21515558912,
+      "gpu": {
+        "utilization_percent": 32,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4784099328
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023314432,
+          "uss_bytes": 3340873728
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 60.4940881729126,
+      "host_cpu_percent": 80.4,
+      "host_available_ram_bytes": 21511376896,
+      "gpu": {
+        "utilization_percent": 28,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4784099328
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023318528,
+          "uss_bytes": 3340877824
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 61.591880559921265,
+      "host_cpu_percent": 84.4,
+      "host_available_ram_bytes": 21490532352,
+      "gpu": {
+        "utilization_percent": 42,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4784099328
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023343104,
+          "uss_bytes": 3340902400
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 62.70906162261963,
+      "host_cpu_percent": 81.8,
+      "host_available_ram_bytes": 21506486272,
+      "gpu": {
+        "utilization_percent": 37,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4784099328
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023334912,
+          "uss_bytes": 3340894208
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 63.826380491256714,
+      "host_cpu_percent": 84.3,
+      "host_available_ram_bytes": 21439971328,
+      "gpu": {
+        "utilization_percent": 41,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4758867968
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 116,
+          "rss_bytes": 8023285760,
+          "uss_bytes": 3340832768
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 64.93965768814087,
+      "host_cpu_percent": 86.4,
+      "host_available_ram_bytes": 21484642304,
+      "gpu": {
+        "utilization_percent": 39,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4758867968
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023441408,
+          "uss_bytes": 3341000704
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 66.04510593414307,
+      "host_cpu_percent": 83.6,
+      "host_available_ram_bytes": 21481050112,
+      "gpu": {
+        "utilization_percent": 36,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4758867968
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023425024,
+          "uss_bytes": 3340984320
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 67.14511370658875,
+      "host_cpu_percent": 85.1,
+      "host_available_ram_bytes": 21474676736,
+      "gpu": {
+        "utilization_percent": 24,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4758867968
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023457792,
+          "uss_bytes": 3341017088
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 68.23811388015747,
+      "host_cpu_percent": 84.0,
+      "host_available_ram_bytes": 21495865344,
+      "gpu": {
+        "utilization_percent": 38,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4750446592
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023465984,
+          "uss_bytes": 3341025280
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 69.35009765625,
+      "host_cpu_percent": 83.8,
+      "host_available_ram_bytes": 21545836544,
+      "gpu": {
+        "utilization_percent": 38,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4748349440
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 121,
+          "rss_bytes": 8023523328,
+          "uss_bytes": 3341082624
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 70.45824098587036,
+      "host_cpu_percent": 84.1,
+      "host_available_ram_bytes": 21530095616,
+      "gpu": {
+        "utilization_percent": 35,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4748349440
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023547904,
+          "uss_bytes": 3341107200
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 71.56611275672913,
+      "host_cpu_percent": 82.5,
+      "host_available_ram_bytes": 21537472512,
+      "gpu": {
+        "utilization_percent": 35,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4748349440
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023580672,
+          "uss_bytes": 3341139968
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 72.67629837989807,
+      "host_cpu_percent": 85.2,
+      "host_available_ram_bytes": 21541224448,
+      "gpu": {
+        "utilization_percent": 36,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4783206400
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023605248,
+          "uss_bytes": 3341164544
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 73.77570867538452,
+      "host_cpu_percent": 84.0,
+      "host_available_ram_bytes": 21523894272,
+      "gpu": {
+        "utilization_percent": 34,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4778995712
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023568384,
+          "uss_bytes": 3341127680
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 74.87706804275513,
+      "host_cpu_percent": 81.2,
+      "host_available_ram_bytes": 21534355456,
+      "gpu": {
+        "utilization_percent": 35,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4778995712
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023576576,
+          "uss_bytes": 3341135872
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 75.97793984413147,
+      "host_cpu_percent": 84.3,
+      "host_available_ram_bytes": 21517373440,
+      "gpu": {
+        "utilization_percent": 36,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4781092864
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023588864,
+          "uss_bytes": 3341148160
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 77.09908771514893,
+      "host_cpu_percent": 83.2,
+      "host_available_ram_bytes": 21534298112,
+      "gpu": {
+        "utilization_percent": 35,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4781092864
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023597056,
+          "uss_bytes": 3341156352
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 78.19596314430237,
+      "host_cpu_percent": 83.6,
+      "host_available_ram_bytes": 21550956544,
+      "gpu": {
+        "utilization_percent": 29,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4781092864
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 121,
+          "rss_bytes": 8023605248,
+          "uss_bytes": 3341164544
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 79.33309125900269,
+      "host_cpu_percent": 86.0,
+      "host_available_ram_bytes": 21535404032,
+      "gpu": {
+        "utilization_percent": 41,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4781092864
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023650304,
+          "uss_bytes": 3341209600
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 80.44314289093018,
+      "host_cpu_percent": 81.5,
+      "host_available_ram_bytes": 21518053376,
+      "gpu": {
+        "utilization_percent": 21,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4778995712
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023646208,
+          "uss_bytes": 3341205504
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 81.53721714019775,
+      "host_cpu_percent": 85.6,
+      "host_available_ram_bytes": 21504811008,
+      "gpu": {
+        "utilization_percent": 37,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4778995712
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 118,
+          "rss_bytes": 8023539712,
+          "uss_bytes": 3341086720
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 82.64163160324097,
+      "host_cpu_percent": 83.2,
+      "host_available_ram_bytes": 21517946880,
+      "gpu": {
+        "utilization_percent": 32,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4778995712
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023703552,
+          "uss_bytes": 3341271040
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 83.77110362052917,
+      "host_cpu_percent": 83.4,
+      "host_available_ram_bytes": 21498646528,
+      "gpu": {
+        "utilization_percent": 33,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4778995712
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023715840,
+          "uss_bytes": 3341275136
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 84.88711428642273,
+      "host_cpu_percent": 83.2,
+      "host_available_ram_bytes": 21511139328,
+      "gpu": {
+        "utilization_percent": 36,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4762030080
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023748608,
+          "uss_bytes": 3341307904
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 85.9891140460968,
+      "host_cpu_percent": 83.2,
+      "host_available_ram_bytes": 21521440768,
+      "gpu": {
+        "utilization_percent": 38,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4764127232
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 129,
+          "rss_bytes": 8023789568,
+          "uss_bytes": 3341348864
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 87.08197569847107,
+      "host_cpu_percent": 47.0,
+      "host_available_ram_bytes": 21518381056,
+      "gpu": {
+        "utilization_percent": 22,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4764127232
+      },
+      "runs": [
+        {
+          "processes": 4,
+          "threads": 117,
+          "rss_bytes": 8022315008,
+          "uss_bytes": 3338932224
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 88.18639540672302,
+      "host_cpu_percent": 7.2,
+      "host_available_ram_bytes": 21959929856,
+      "gpu": {
+        "utilization_percent": 8,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4590919680
+      },
+      "runs": [
+        {
+          "processes": 3,
+          "threads": 66,
+          "rss_bytes": 7080669184,
+          "uss_bytes": 2826293248
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 89.2958083152771,
+      "host_cpu_percent": 7.7,
+      "host_available_ram_bytes": 23448379392,
+      "gpu": {
+        "utilization_percent": 7,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4098211840
+      },
+      "runs": [
+        {
+          "processes": 1,
+          "threads": 22,
+          "rss_bytes": 3264323584,
+          "uss_bytes": 3250991104
+        }
+      ]
+    },
+    {
+      "elapsed_seconds": 90.3877944946289,
+      "host_cpu_percent": 8.7,
+      "host_available_ram_bytes": 23618969600,
+      "gpu": {
+        "utilization_percent": 6,
+        "vram_total_bytes": 25753026560,
+        "vram_used_bytes": 4085547008
+      },
+      "runs": [
+        {
+          "processes": 1,
+          "threads": 1,
+          "rss_bytes": 0,
+          "uss_bytes": 0
+        }
+      ]
+    }
+  ]
+}
