@@ -103,8 +103,7 @@ def dreamer_step(
     B: int,
     T: int,
     train_start_t: int,
-    skip_actor: bool,
-    skip_critic: bool,
+    skip_ac: bool,
     bins: torch.Tensor,
     return_scale: float,
     config,
@@ -130,8 +129,7 @@ def dreamer_step(
         B: Batch size.
         T: Sequence length.
         train_start_t: First timestep for loss accumulation (after burn-in).
-        skip_actor: Whether to skip actor updates this batch.
-        skip_critic: Whether to skip critic updates this batch.
+        skip_ac: Whether to skip actor-critic updates this batch.
         bins: Symexp bin edges for distributional value/reward.
         config: Training config.
         device: Torch device.
@@ -256,7 +254,7 @@ def dreamer_step(
 
         # --- Dream sequence for actor-critic ---
         valid_ac_step = sample_mask.sum() > 0
-        if (not skip_actor or not skip_critic) and valid_ac_step:
+        if not skip_ac and valid_ac_step:
             h_prev_backup = world_model.h_prev.clone()
             (
                 dreamed_recurrent_states,
@@ -451,14 +449,10 @@ def dreamer_step(
                     entropy = q_entropy
                 metrics.actor_q_margin.append(q_margin.detach().cpu())
             metrics.actor_entropy.append(entropy.detach().cpu())
-            if skip_actor:
-                actor_loss = torch.tensor(0.0, device=device)
-            if skip_critic:
-                critic_loss = torch.tensor(0.0, device=device)
         else:
             actor_loss = torch.tensor(0.0, device=device)
             critic_loss = torch.tensor(0.0, device=device)
-            if critic_replay_scale > 0.0 and not skip_critic:
+            if critic_replay_scale > 0.0 and not skip_ac:
                 metrics.replay_value_annotations.append(
                     torch.zeros_like(sample_mask, device=device)
                 )
@@ -492,7 +486,7 @@ def dreamer_step(
     # --- Replay critic grounding ---
     if (
         critic_replay_scale > 0.0
-        and not skip_critic
+        and not skip_ac
         and effective_train_steps > 1
         and len(metrics.replay_value_annotations) == effective_train_steps
         and len(metrics.replay_posterior_states) == effective_train_steps
@@ -553,7 +547,7 @@ def dreamer_step(
     # --- Direct replay Monte Carlo / n-step critic grounding ---
     if (
         critic_real_return_scale > 0.0
-        and not skip_critic
+        and not skip_ac
         and effective_train_steps > 1
         and len(metrics.replay_posterior_states) == effective_train_steps
     ):
