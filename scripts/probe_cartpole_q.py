@@ -243,7 +243,7 @@ def summarize(rows: list[dict], checkpoint_path: Path, critic_key: str) -> dict:
     def frac(count: int, denom: int) -> float | None:
         return None if denom == 0 else float(count / denom)
 
-    return {
+    summary = {
         "checkpoint": str(checkpoint_path),
         "critic_used": critic_key,
         "direct_q_critic_used": rows[0].get("direct_q_critic_used"),
@@ -355,6 +355,35 @@ def summarize(rows: list[dict], checkpoint_path: Path, critic_key: str) -> dict:
         "mean_actor_entropy": float(np.mean([r["actor_entropy"] for r in rows])),
         "mean_actor_prob_action1": float(np.mean([r["actor_prob_1"] for r in rows])),
     }
+    decomposition_prefixes = sorted(
+        key.removesuffix("_delta")
+        for key in rows[0]
+        if key.startswith("decomp_") and key.endswith("_delta")
+    )
+    for prefix in decomposition_prefixes:
+        margined = [r for r in actionable if abs(r[f"{prefix}_delta"]) > 1e-6]
+        correct = [r for r in actionable if r[f"{prefix}_pref"] == r["true_pref"]]
+        prefix_delta = [r[f"{prefix}_delta"] for r in actionable]
+        summary.update(
+            {
+                f"{prefix}_margined_actionable_states": len(margined),
+                f"{prefix}_vs_rollout_accuracy": frac(len(correct), len(actionable)),
+                f"{prefix}_vs_rollout_accuracy_margined": frac(
+                    sum(r[f"{prefix}_pref"] == r["true_pref"] for r in margined),
+                    len(margined),
+                ),
+                f"{prefix}_delta_true_delta_pearson": pearson(
+                    prefix_delta, true_delta
+                ),
+                f"{prefix}_pref_hist": dict(
+                    Counter(str(r[f"{prefix}_pref"]) for r in rows)
+                ),
+                f"mean_abs_{prefix}_delta": float(
+                    np.mean([abs(r[f"{prefix}_delta"]) for r in rows])
+                ),
+            }
+        )
+    return summary
 
 
 def run_probe(
@@ -366,6 +395,7 @@ def run_probe(
     rollout_horizon: int,
     model_horizon: int,
     terminal_reward_penalty: float,
+    decomposition_horizons: list[int] | None = None,
 ) -> dict:
     cfg, actor, critic, q_critic, encoder, world_model, checkpoint, critic_key, q_critic_key = (
         load_checkpoint_models(checkpoint_path, device)
@@ -391,6 +421,9 @@ def run_probe(
             device=device,
             dtype=torch.float32,
         )
+    )
+    decomposition_horizons = sorted(
+        {max(1, int(horizon)) for horizon in (decomposition_horizons or [])}
     )
 
     rows: list[dict] = []
@@ -441,6 +474,29 @@ def run_probe(
                     model_horizon,
                     terminal_reward_penalty=terminal_reward_penalty,
                 )
+                decomposition_values = {}
+                for horizon in decomposition_horizons:
+                    for label, objective, bootstrap_value in (
+                        ("value_bootstrap", "value", True),
+                        ("value_no_bootstrap", "value", False),
+                        ("survival", "survival", False),
+                    ):
+                        key = f"decomp_{label}_h{horizon}"
+                        decomposition_values[key] = enumerate_first_action_values(
+                            h_z,
+                            z_embed,
+                            actor,
+                            critic,
+                            world_model,
+                            cfg.n_actions,
+                            cfg.d_hidden,
+                            bins,
+                            cfg.gamma,
+                            horizon,
+                            terminal_reward_penalty=terminal_reward_penalty,
+                            objective=objective,
+                            bootstrap_value=bootstrap_value,
+                        )
             finally:
                 world_model.h_prev = h_prev_backup
 
@@ -483,6 +539,10 @@ def run_probe(
         hybrid_continue_pref = action_preference(hybrid_continue_scores)
 
         q_np = q_values.squeeze(0).detach().cpu().numpy()
+        decomposition_np = {
+            key: values.squeeze(0).detach().cpu().numpy()
+            for key, values in decomposition_values.items()
+        }
         probs_np = actor_probs.squeeze(0).detach().cpu().numpy()
         row = {
                 "episode": episode,
@@ -522,11 +582,26 @@ def run_probe(
                 "real_done_1": int(real_done[1]),
                 "pred_continue_0": float(pred_continue[0]),
                 "pred_continue_1": float(pred_continue[1]),
+                "decomp_continue_0": float(pred_continue[0]),
+                "decomp_continue_1": float(pred_continue[1]),
+                "decomp_continue_delta": float(
+                    pred_continue[1] - pred_continue[0]
+                ),
+                "decomp_continue_pref": int(action_preference(pred_continue)),
                 "pred_delta_x_dot": float(pred_next[1][1] - pred_next[0][1]),
                 "true_delta_x_dot": float(real_next[1][1] - real_next[0][1]),
                 "pred_delta_theta_dot": float(pred_next[1][3] - pred_next[0][3]),
                 "true_delta_theta_dot": float(real_next[1][3] - real_next[0][3]),
             }
+        for key, values in decomposition_np.items():
+            row.update(
+                {
+                    f"{key}_0": float(values[0]),
+                    f"{key}_1": float(values[1]),
+                    f"{key}_delta": float(values[1] - values[0]),
+                    f"{key}_pref": int(action_preference(values.tolist())),
+                }
+            )
         if direct_q_np is not None:
             row.update(
                 {
@@ -574,6 +649,7 @@ def run_probe(
             "seed": seed,
             "rollout_horizon": rollout_horizon,
             "model_horizon": model_horizon,
+            "decomposition_horizons": decomposition_horizons,
             "terminal_reward_penalty": terminal_reward_penalty,
         }
     )
@@ -590,6 +666,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--rollout-horizon", type=int, default=30)
     parser.add_argument("--model-horizon", type=int, default=3)
+    parser.add_argument("--decompose-horizons", nargs="*", type=int, default=[])
     parser.add_argument("--terminal-reward-penalty", type=float, default=0.0)
     args = parser.parse_args()
 
@@ -607,6 +684,7 @@ def main() -> None:
             rollout_horizon=args.rollout_horizon,
             model_horizon=args.model_horizon,
             terminal_reward_penalty=args.terminal_reward_penalty,
+            decomposition_horizons=args.decompose_horizons,
         )
         summaries.append(summary)
         print(json.dumps(summary, indent=2))

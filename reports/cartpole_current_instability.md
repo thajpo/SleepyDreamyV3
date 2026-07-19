@@ -14,10 +14,12 @@ had produced repeated deterministic evaluations near the minimum episode
 length. This is an intentionally truncated screen, not a completed 10,000-step
 benchmark.
 
-The first clearly broken boundary is policy improvement: the learned latent
-contains useful control information, but the critic does not provide reliable
-action preferences and the trained actor either becomes constant or remains
-random-like.
+The first clearly broken boundary is imagined action-value construction. The
+learned latent and decoded one-step transition contain useful control
+information, but the continuation rollout creates a biased action preference
+and the critic bootstrap usually amplifies it in the wrong direction. The
+trained actor then turns that unreliable target into a constant or random-like
+policy.
 
 ## Three-seed result
 
@@ -194,6 +196,51 @@ non-positive (`-0.353` to `-0.009`). Useful local counterfactual information is
 therefore present but weak, then degraded by learned continuation, longer
 latent rollout, and/or terminal critic value. The next investigation should
 audit that post-transition value path before changing the actor again.
+
+## Imagined value-path decomposition
+
+The same frozen checkpoints were probed at horizons 1, 2, and 3 with the
+terminal critic bootstrap enabled and disabled. A survival-only objective
+isolated the continuation head. The table reports Pearson correlation between
+each learned action difference and the trusted 30-step simulator difference;
+the magnitude column is the mean absolute learned action difference over all
+512 states.
+
+| Checkpoint | Reward only h1 corr / magnitude | Continue h1 corr / magnitude | Survival h3 corr / magnitude | Critic h1 corr / magnitude | Full Q h3 corr / magnitude |
+|---|---:|---:|---:|---:|---:|
+| Old seed 1, step 3,000 | 0.315 / 0.000006 | -0.113 / 0.000535 | -0.289 / 0.002111 | -0.113 / 0.012540 | -0.353 / 0.022466 |
+| Old seed 1, step 5,000 | 0.262 / 0.000004 | 0.112 / 0.000309 | 0.176 / 0.001158 | -0.294 / 0.027216 | -0.009 / 0.022478 |
+| Critic warmup, step 3,000 | 0.100 / 0.000001 | -0.137 / 0.000711 | -0.047 / 0.004252 | -0.185 / 0.058060 | -0.201 / 0.026104 |
+| Critic warmup, step 3,200 | 0.035 / 0.000001 | -0.115 / 0.000473 | -0.200 / 0.002006 | -0.262 / 0.071846 | -0.332 / 0.018846 |
+
+The immediate reward head is directionally positive in these checkpoints but
+effectively action-neutral: its differences are only `1e-6` to `6e-6`. That is
+not inherently surprising for CartPole, whose non-terminal reward is almost
+always one; useful control ranking must instead come from predicting how the
+first action changes future survival.
+
+That survival signal is already unreliable at the first learned transition.
+Three of four continuation correlations are negative, and its preferences are
+strongly action-biased. Recursive rollout grows the magnitude but does not make
+the ranking reliable. Finally, the horizon-1 critic bootstrap is 24 to 152
+times larger than the continuation difference and is negatively correlated at
+every checkpoint. It can therefore dominate the weak local signal before a
+long rollout even begins.
+
+The failure is compound rather than one isolated actor bug:
+
+1. The decoded next state contains useful action effects, but the continuation
+   head does not turn them into a calibrated survival difference.
+2. The state critic assigns much larger values without reliable local ordering,
+   overwhelming what little counterfactual signal exists.
+3. The actor then faithfully optimizes this malformed imagined target and can
+   collapse to one action.
+
+The next bounded investigation should audit continuation-target construction
+and state-value calibration against exact CartPole remaining lifetime. It
+should use frozen replay/checkpoints first, so any subsequent training change
+is selected by evidence rather than combining another set of speculative actor
+or entropy changes.
 
 ## Reliability follow-up
 

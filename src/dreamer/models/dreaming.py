@@ -115,6 +115,7 @@ def enumerate_first_action_values(
     horizon,
     terminal_reward_penalty=0.0,
     objective="value",
+    bootstrap_value=True,
 ):
     """Estimate Q(s, a) by enumerating discrete first actions in the world model.
 
@@ -122,7 +123,9 @@ def enumerate_first_action_values(
     instead of sampling one action and assigning it a REINFORCE target, it asks
     the learned model what would happen after each possible first action from
     the same latent state. Future actions are enumerated as a tiny deterministic
-    tree and the best branch for each first action is used as its value.
+    tree and the best branch for each first action is used as its value. Set
+    ``bootstrap_value`` to false to isolate learned reward and continuation
+    rollout values from the critic's terminal-state estimate.
     """
     horizon = max(1, int(horizon))
     batch_size = initial_h_z.shape[0]
@@ -222,7 +225,7 @@ def enumerate_first_action_values(
             batch_size * branch_count, world_model.n_latents, world_model.n_classes
         ),
     )
-    if objective == "survival":
+    if objective == "survival" or not bootstrap_value:
         values = torch.zeros(batch_size, branch_count, device=device, dtype=dtype)
     else:
         value_logits = critic(final_h_z)

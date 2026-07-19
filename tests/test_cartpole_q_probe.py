@@ -1,7 +1,9 @@
 import gymnasium as gym
 import numpy as np
 import pytest
+import torch
 
+from dreamer.models.dreaming import enumerate_first_action_values
 from scripts.probe_cartpole_q import (
     action_preference,
     hybrid_state_score,
@@ -45,3 +47,56 @@ def test_perfect_one_step_predictions_preserve_action_preference():
         env.close()
 
     assert action_preference(hybrid_scores) == action_preference(real_scores)
+
+
+class _BootstrapProbeWorldModel:
+    n_blocks = 1
+    n_latents = 1
+    n_classes = 2
+
+    def step_dynamics(self, z_embed, action_onehot, h_state):
+        del z_embed
+        h_next = h_state + action_onehot[:, 1:2]
+        prior_logits = torch.zeros(action_onehot.shape[0], 1, 2)
+        return h_next, prior_logits
+
+    def join_h_and_z(self, h_state, z_state):
+        return torch.cat([h_state, z_state.reshape(z_state.shape[0], -1)], dim=-1)
+
+    def z_embedding(self, z_state):
+        return z_state
+
+    def continue_predictor(self, h_z):
+        return torch.full((h_z.shape[0], 1), 20.0)
+
+    def reward_predictor(self, h_z):
+        return torch.zeros(h_z.shape[0], 3)
+
+
+class _BootstrapProbeCritic(torch.nn.Module):
+    def forward(self, h_z):
+        signal = 10.0 * h_z[:, :1]
+        return torch.cat([-signal, torch.zeros_like(signal), signal], dim=-1)
+
+
+def test_first_action_enumeration_can_disable_terminal_critic_bootstrap():
+    world_model = _BootstrapProbeWorldModel()
+    critic = _BootstrapProbeCritic()
+    kwargs = {
+        "initial_h_z": torch.zeros(1, 3),
+        "initial_z_embed": torch.zeros(1, 2),
+        "actor": None,
+        "critic": critic,
+        "world_model": world_model,
+        "n_actions": 2,
+        "d_hidden": 1,
+        "bins": torch.tensor([-1.0, 0.0, 1.0]),
+        "gamma": 1.0,
+        "horizon": 1,
+    }
+
+    with_bootstrap = enumerate_first_action_values(**kwargs, bootstrap_value=True)
+    without_bootstrap = enumerate_first_action_values(**kwargs, bootstrap_value=False)
+
+    assert with_bootstrap[0, 1] > with_bootstrap[0, 0]
+    assert torch.allclose(without_bootstrap, torch.zeros_like(without_bootstrap))
