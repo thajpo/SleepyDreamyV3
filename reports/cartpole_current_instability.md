@@ -309,6 +309,36 @@ API boundary. This is the next isolated canary; replay alignment remains in
 place because the reference replay equation independently confirms its
 successor-reward indexing.
 
+### Single-discount canary
+
+The corrected equation in `32f27af` was tested with the same seed-1 contract
+and stopped at the step-4,000 gate:
+
+| Checkpoint | Deterministic return | Q/real correlation | Q preference | Actor preference |
+|---|---:|---:|---|---|
+| Step 3,000, before actor/critic updates | 28.35 | -0.392 | action 1: 352/512 | mixed, near-uniform probabilities |
+| Step 4,000 | 9.15 | 0.176 | action 0: 479/512 | action 1: 512/512 |
+
+The full Q correlation became positive within the run, unlike the previous
+canary, but its action accuracy was still only `0.500` and its preference was
+strongly biased. More importantly, the actor moved in the opposite direction
+from the checkpoint's enumerated Q ranking and collapsed to the minimum-return
+policy. The return-equation correction is retained for conformance, but the
+isolated learning hypothesis again fails and no additional seeds are justified.
+
+This run's pre-actor deterministic return was 28.35, versus 11.25 in the prior
+same-seed canary, even though the discount change cannot affect world-model-only
+training. Asynchronous collection/replay and GPU sampling therefore prevent a
+same-seed run from being treated as a perfectly paired replicate. Within-run
+checkpoint changes remain the stronger evidence.
+
+The next bounded experiment should revisit critic-only warmup now that both
+replay indexing and continuation discounting are correct. It must gate Q
+ranking at step 3,000 before the first actor update. If the critic is not
+positive, state-dependent, and materially above chance at that boundary, stop
+without training the actor; otherwise allow only a short actor canary and test
+whether actor/Q agreement improves rather than merely checking return.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
