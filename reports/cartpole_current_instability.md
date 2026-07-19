@@ -466,6 +466,35 @@ The next bounded gate is a short actor continuation from the passing checkpoint;
 it must improve actor/Q agreement and deterministic behavior before any
 multi-seed extension.
 
+### Short actor continuation
+
+The passing checkpoint was resumed from update 3,000 to 3,500 in
+`experiments/2026-07-19_155543_CartPole-v1/`. The collector loaded checkpoint
+weights before filling replay, and deterministic evaluation used 20 episodes
+every 100 updates.
+
+| Update | Mean deterministic return |
+|---:|---:|
+| 3,100 | 9.20 |
+| 3,200 | 21.90 |
+| 3,300 | 21.85 |
+| 3,400 | 26.15 |
+| 3,500 | **28.30** |
+
+At update 3,500, the fixed counterfactual probe retained `0.846` Q accuracy
+and positive `0.349` Q/real correlation. Actor-vs-real accuracy reached `0.875`,
+with state-dependent preferences (action 0 on 142 states and action 1 on 370)
+rather than the previous single-action collapse. Mean probe-state actor entropy
+was `0.366`; training entropy was still `0.594` at the last logged pre-final
+point.
+
+This clears the policy-transfer gate for one seed: a trustworthy pre-actor Q
+signal remained useful under policy-driven replay and produced improving real
+behavior. It does not establish that CartPole is solved or stable. Multi-seed
+and longer-horizon testing should wait until the separately identified RSSM
+sequence-gradient and posterior-unimix correctness defects are fixed and the
+same frozen contract is rerun.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
