@@ -634,6 +634,61 @@ was produced under different update semantics. The isolated validation is a
 fresh uninterrupted seed set with the same 3,500-update budget and metrics; no
 learning-rate, entropy, replay, or architecture changes are allowed.
 
+#### Corrected-LaProp result at the frozen learning rate
+
+The fresh uninterrupted seed-0 and seed-1 runs rejected the stability
+hypothesis at `actor_lr=3e-5`:
+
+| Seed | Step 3,100 | Step 3,200 | Step 3,300 | Step 3,400 | Step 3,500 | Best |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 167.65 | 316.00 | 321.50 | 256.70 | 165.55 | 321.50 |
+| 1 | 113.50 | 178.65 | 158.65 | 132.85 | 126.75 | 178.65 |
+
+Bias correction is retained as a source-conformance fix, but it removes update
+amplification that the current CartPole configuration had implicitly relied on.
+Both final critics remained trustworthy (`0.865`/`0.894` Q accuracy and
+`0.667`/`0.799` Q correlation), and both actors reached `0.875` real-action
+agreement without becoming constant. Their probe-state entropies remained
+`0.225` and `0.275`, roughly twice the pre-fix values after the same 500 actor
+updates. This is a policy optimization rate problem, not recurrence of the old
+representation or critic failure.
+
+The next isolated configuration gate doubles only `actor_lr` to `6e-5`. This is
+inside the old optimizer's effective late-window range while avoiding its
+`3.16`-times first-step spike. Accept it only if fresh uninterrupted seeds learn
+faster and reduce best-to-final collapse; otherwise reject the rate hypothesis
+instead of stacking entropy or objective changes.
+
+#### Actor-rate gate
+
+Doubling only `actor_lr` restored fast initial learning but failed the stability
+gate:
+
+| Seed | Step 3,100 | Step 3,200 | Step 3,300 | Step 3,400 | Step 3,500 | Best |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 402.20 | 138.35 | 120.50 | 127.80 | 70.25 | 402.20 |
+| 1 | 224.20 | 340.10 | 256.80 | 297.25 | 174.35 | 340.10 |
+
+Final Q accuracy remained `0.865`/`0.875` and actor/real agreement remained
+`0.875`/`0.865`; the faster actor did not fail because its critic lost action
+ranking. Seed 1's fixed random-state decoder MSE reached `6.45`, but action-
+effect signs and survival ranking remained useful, so that number primarily
+shows severe off-policy support drift. The scalar-rate hypothesis is rejected.
+
+The next audit found a more direct policy-loss mismatch. Reference DreamerV3
+divides advantages by a running return-percentile scale and configures its
+separate advantage normalizer as `none`. The local loss already divides by its
+return scale, then—when `normalize_advantages=true`—also centers and unit-scales
+every imagined batch. This local z-score was added after the historical failure
+runs. It guarantees a full-strength policy gradient even when current imagined
+advantages are tiny or unstable, which can make a still-correct actor boundary
+oscillate as on-policy replay changes.
+
+The next isolated gate returns to corrected `actor_lr=3e-5` and changes only
+`normalize_advantages=false`. Keep the same uninterrupted 3,500-update contract.
+If it fails, do not add entropy tuning; inspect running return normalization and
+actor-gradient magnitudes before selecting another objective change.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
