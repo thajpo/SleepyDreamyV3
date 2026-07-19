@@ -69,25 +69,6 @@ def calculate_replay_lambda_targets(
     )
 
 
-def calculate_replay_mc_targets(
-    rewards: torch.Tensor,
-    continues: torch.Tensor,
-    gamma: float,
-) -> torch.Tensor:
-    """Return finite replay returns aligned with post-transition states."""
-    next_rewards = rewards[1:]
-    next_continues = continues[1:]
-    if next_rewards.shape[0] == 0:
-        return rewards[:0]
-
-    next_return = torch.zeros_like(next_rewards[0])
-    returns_reversed = []
-    for t in reversed(range(next_rewards.shape[0])):
-        next_return = next_rewards[t] + gamma * next_continues[t] * next_return
-        returns_reversed.append(next_return)
-    return torch.stack(list(reversed(returns_reversed)), dim=0)
-
-
 def dreamer_step(
     *,
     encoder,
@@ -103,7 +84,8 @@ def dreamer_step(
     B: int,
     T: int,
     train_start_t: int,
-    skip_ac: bool,
+    skip_actor: bool,
+    skip_critic: bool,
     bins: torch.Tensor,
     return_scale: float,
     config,
@@ -129,7 +111,8 @@ def dreamer_step(
         B: Batch size.
         T: Sequence length.
         train_start_t: First timestep for loss accumulation (after burn-in).
-        skip_ac: Whether to skip actor-critic updates this batch.
+        skip_actor: Whether to skip actor updates this batch.
+        skip_critic: Whether to skip critic updates this batch.
         bins: Symexp bin edges for distributional value/reward.
         config: Training config.
         device: Torch device.
@@ -254,7 +237,7 @@ def dreamer_step(
 
         # --- Dream sequence for actor-critic ---
         valid_ac_step = sample_mask.sum() > 0
-        if not skip_ac and valid_ac_step:
+        if (not skip_actor or not skip_critic) and valid_ac_step:
             h_prev_backup = world_model.h_prev.clone()
             (
                 dreamed_recurrent_states,
@@ -449,10 +432,14 @@ def dreamer_step(
                     entropy = q_entropy
                 metrics.actor_q_margin.append(q_margin.detach().cpu())
             metrics.actor_entropy.append(entropy.detach().cpu())
+            if skip_actor:
+                actor_loss = torch.tensor(0.0, device=device)
+            if skip_critic:
+                critic_loss = torch.tensor(0.0, device=device)
         else:
             actor_loss = torch.tensor(0.0, device=device)
             critic_loss = torch.tensor(0.0, device=device)
-            if critic_replay_scale > 0.0 and not skip_ac:
+            if critic_replay_scale > 0.0 and not skip_critic:
                 metrics.replay_value_annotations.append(
                     torch.zeros_like(sample_mask, device=device)
                 )
@@ -486,7 +473,7 @@ def dreamer_step(
     # --- Replay critic grounding ---
     if (
         critic_replay_scale > 0.0
-        and not skip_ac
+        and not skip_critic
         and effective_train_steps > 1
         and len(metrics.replay_value_annotations) == effective_train_steps
         and len(metrics.replay_posterior_states) == effective_train_steps
@@ -544,35 +531,19 @@ def dreamer_step(
         )
         total_critic_loss = total_critic_loss + critic_replay_scale * replay_loss_total
 
-    # --- Direct replay Monte Carlo / n-step critic grounding ---
+    # --- Full-episode replay return critic grounding ---
     if (
         critic_real_return_scale > 0.0
-        and not skip_ac
-        and effective_train_steps > 1
+        and not skip_critic
         and len(metrics.replay_posterior_states) == effective_train_steps
     ):
         replay_posterior = torch.stack(metrics.replay_posterior_states, dim=1)
-        replay_rewards = batch.rewards[:, train_start_t:].transpose(0, 1)
-        replay_is_last = batch.is_last[:, train_start_t:].transpose(0, 1)
-        replay_continues = (1.0 - batch.is_terminal.float()).transpose(0, 1)[
-            train_start_t:
-        ]
-        replay_continues = replay_continues * (1.0 - replay_is_last.float())
-        replay_mask = batch.mask[:, train_start_t:].transpose(0, 1)
-
-        replay_mc_returns = calculate_replay_mc_targets(
-            replay_rewards, replay_continues, gamma
-        )
-
-        replay_logits = critic(replay_posterior[:, :-1].detach())
+        replay_logits = critic(replay_posterior.detach())
         logits_flat = replay_logits.reshape(-1, replay_logits.size(-1))
-        targets_flat = replay_mc_returns.transpose(0, 1).detach().reshape(-1)
-        replay_pair_mask = (
-            replay_mask[:-1]
-            * replay_mask[1:]
-            * (1.0 - replay_is_last[:-1].float())
+        targets_flat = (
+            batch.future_returns[:, train_start_t:].detach().reshape(-1)
         )
-        mask_flat = replay_pair_mask.transpose(0, 1).reshape(-1).float()
+        mask_flat = batch.mask[:, train_start_t:].reshape(-1).float()
         targets_twohot = twohot_encode(targets_flat, bins)
         per_step_ce = -torch.sum(
             targets_twohot * F.log_softmax(logits_flat, dim=-1), dim=-1

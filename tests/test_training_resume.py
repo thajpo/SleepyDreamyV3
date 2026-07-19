@@ -83,3 +83,43 @@ def test_each_collector_receives_the_initial_model_update(tmp_path):
     assert "model_weights_loaded collector_id=0 version=0" in output
     assert "model_weights_loaded collector_id=1 version=0" in output
     assert "model_weights_published version=1" not in output
+
+
+def test_actor_warmup_trains_critic_without_updating_actor(tmp_path):
+    output_dir = tmp_path / "critic_warmup"
+    result = _run_training(
+        output_dir,
+        extra_overrides=[
+            "train.actor_warmup_steps=2",
+            "train.critic_real_return_scale=1.0",
+        ],
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    checkpoint = torch.load(
+        output_dir / "checkpoints" / "checkpoint_final.pt",
+        map_location="cpu",
+        weights_only=False,
+    )
+
+    assert checkpoint["actor_optimizer"]["state"] == {}
+    assert checkpoint["critic_optimizer"]["state"] != {}
+
+
+def test_wm_ac_ratio_still_skips_actor_and_critic_together(tmp_path):
+    output_dir = tmp_path / "wm_only_ratio_step"
+    result = _run_training(
+        output_dir,
+        extra_overrides=["train.wm_ac_ratio=2"],
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    checkpoint = torch.load(
+        output_dir / "checkpoints" / "checkpoint_final.pt",
+        map_location="cpu",
+        weights_only=False,
+    )
+
+    assert checkpoint["actor_optimizer"]["state"] == {}
+    assert checkpoint["critic_optimizer"]["state"] == {}
+    assert checkpoint["wm_optimizer"]["state"] != {}

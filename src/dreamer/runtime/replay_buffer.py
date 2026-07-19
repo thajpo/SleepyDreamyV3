@@ -24,6 +24,7 @@ class EnvData(NamedTuple):
     rewards: torch.Tensor  # (B, T)
     is_last: torch.Tensor  # (B, T)
     is_terminal: torch.Tensor  # (B, T)
+    future_returns: torch.Tensor  # (B, T) — discounted rewards after each row
     mask: torch.Tensor  # (B, T) — 1=real, 0=padded
     pixels: Optional[torch.Tensor] = None  # (B, T, C, H, W)
     pixels_original: Optional[torch.Tensor] = None  # (B, T, C, H, W)
@@ -44,7 +45,12 @@ class EpisodeReplayBuffer:
     """
 
     def __init__(
-        self, data_queue=None, max_episodes=1000, min_episodes=64, sequence_length=25
+        self,
+        data_queue=None,
+        max_episodes=1000,
+        min_episodes=64,
+        sequence_length=25,
+        gamma=0.997,
     ):
         """
         Args:
@@ -52,11 +58,13 @@ class EpisodeReplayBuffer:
             max_episodes: Maximum episodes to store (older episodes evicted)
             min_episodes: Block sampling until buffer has this many episodes
             sequence_length: Fixed length of sampled subsequences
+            gamma: Discount used for full-episode future return targets
         """
         self.data_queue = data_queue
         self.max_episodes = max_episodes
         self.min_episodes = min_episodes
         self.sequence_length = sequence_length
+        self.gamma = float(gamma)
 
         self.buffer = deque(maxlen=max_episodes)
         self.lock = threading.Lock()
@@ -97,11 +105,27 @@ class EpisodeReplayBuffer:
 
     def add_episode(self, episode):
         """Insert one complete episode into the replay buffer."""
+        pixels, states, actions, rewards, is_last, is_terminal = episode[:6]
+        ep_len = episode[6] if len(episode) > 6 else len(states)
+        future_returns = np.zeros(len(rewards), dtype=np.float32)
+        for index in range(len(rewards) - 2, -1, -1):
+            next_index = index + 1
+            future_returns[index] = rewards[next_index] + self.gamma * (
+                1.0 - float(is_last[next_index])
+            ) * future_returns[next_index]
+        stored_episode = (
+            pixels,
+            states,
+            actions,
+            rewards,
+            is_last,
+            is_terminal,
+            ep_len,
+            future_returns,
+        )
         with self.lock:
-            self.buffer.append(episode)
+            self.buffer.append(stored_episode)
             self._episodes_added += 1
-            # Episode length is now passed as 7th element, fallback to states length
-            ep_len = episode[6] if len(episode) > 6 else len(episode[1])
             self._total_steps += ep_len
             self._recent_ep_lengths.append(ep_len)
             if len(self.buffer) >= self.min_episodes and not self.ready_event.is_set():
@@ -118,9 +142,9 @@ class EpisodeReplayBuffer:
         If episode is shorter than sequence_length, pads with zeros and
         marks as terminated. Returns mask indicating real (1) vs padded (0) steps.
         """
-        # Episode tuple: (pixels, states, actions, rewards, is_last, is_terminal, episode_length)
-        # episode_length is for tracking only, not needed for subsequence sampling
+        # Replay adds future returns to the seven-field collector episode tuple.
         pixels, states, actions, rewards, is_last, is_terminal = episode[:6]
+        future_returns = episode[7]
         # Use states for length - pixels may be None in state-only mode
         ep_len = len(states)
         seq_len = self.sequence_length
@@ -136,6 +160,7 @@ class EpisodeReplayBuffer:
                 rewards[start : start + seq_len],
                 is_last[start : start + seq_len],
                 is_terminal[start : start + seq_len],
+                future_returns[start : start + seq_len],
                 mask,
             )
         else:
@@ -158,6 +183,7 @@ class EpisodeReplayBuffer:
             is_terminal_pad = np.ones(
                 pad_len, dtype=is_terminal.dtype
             )  # Padded steps should not bootstrap
+            future_returns_pad = np.zeros(pad_len, dtype=future_returns.dtype)
 
             # Mask: 1 for real steps, 0 for padded
             mask = np.concatenate(
@@ -171,6 +197,7 @@ class EpisodeReplayBuffer:
                 np.concatenate([rewards, rewards_pad], axis=0),
                 np.concatenate([is_last, is_last_pad], axis=0),
                 np.concatenate([is_terminal, is_terminal_pad], axis=0),
+                np.concatenate([future_returns, future_returns_pad], axis=0),
                 mask,
             )
 
@@ -186,8 +213,8 @@ class EpisodeReplayBuffer:
             recent_fraction: Fraction of batch to sample from recent episodes (default 0.2)
 
         Returns:
-            List of (pixels, states, actions, rewards, is_last, is_terminal, mask) tuples,
-            each with shape (sequence_length, ...)
+            List of (pixels, states, actions, rewards, is_last, is_terminal,
+            future_returns, mask) tuples, each with shape (sequence_length, ...)
         """
         # Wait for buffer to have enough episodes (only blocks on startup)
         self.ready_event.wait()
@@ -230,9 +257,19 @@ class EpisodeReplayBuffer:
 
         batch_pixels, batch_pixels_original = [], []
         batch_states, batch_actions, batch_rewards = [], [], []
-        batch_is_last, batch_is_terminal, batch_mask = [], [], []
+        batch_is_last, batch_is_terminal = [], []
+        batch_future_returns, batch_mask = [], []
 
-        for pixels, states, actions, rewards, is_last, is_terminal, mask in raw_batch:
+        for (
+            pixels,
+            states,
+            actions,
+            rewards,
+            is_last,
+            is_terminal,
+            future_returns,
+            mask,
+        ) in raw_batch:
             if use_pixels and pixels is not None:
                 pixels_tensor = torch.from_numpy(pixels).permute(0, 3, 1, 2)
                 batch_pixels_original.append(pixels_tensor)
@@ -245,6 +282,7 @@ class EpisodeReplayBuffer:
             batch_rewards.append(torch.from_numpy(rewards))
             batch_is_last.append(torch.from_numpy(is_last))
             batch_is_terminal.append(torch.from_numpy(is_terminal))
+            batch_future_returns.append(torch.from_numpy(future_returns))
             batch_mask.append(torch.from_numpy(mask))
 
         if use_pixels and batch_pixels:
@@ -261,6 +299,7 @@ class EpisodeReplayBuffer:
             rewards=torch.stack(batch_rewards).to(device),
             is_last=torch.stack(batch_is_last).to(device),
             is_terminal=torch.stack(batch_is_terminal).to(device),
+            future_returns=torch.stack(batch_future_returns).to(device),
             mask=torch.stack(batch_mask).to(device),
             pixels=pixels_out,
             pixels_original=pixels_original_out,
