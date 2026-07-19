@@ -173,6 +173,34 @@ def test_actor_advantage_normalization_centers_constant_returns():
     assert raw_actor_loss.item() > 0.0
 
 
+def test_actor_advantage_uses_slow_critic_baseline():
+    bins = torch.linspace(-2.0, 2.0, 5)
+    value_logits = torch.zeros(1, 1, 5)
+    online_values = torch.full((1, 1), 100.0)
+    slow_values = torch.zeros(1, 1)
+    lambda_returns = torch.ones(1, 1)
+    continues = torch.zeros(1, 1)
+    action_logits = torch.zeros(1, 1, 2)
+    sampled_actions = torch.zeros(1, 1, dtype=torch.long)
+
+    actor_loss, _critic_loss, _entropy = compute_actor_critic_losses(
+        value_logits,
+        online_values,
+        lambda_returns,
+        continues,
+        action_logits,
+        sampled_actions,
+        bins,
+        S=1.0,
+        gamma=1.0,
+        actor_entropy_coef=0.0,
+        normalize_advantages=False,
+        actor_baseline_values=slow_values,
+    )
+
+    assert actor_loss.item() > 0.0
+
+
 def test_observation_decoder_skips_state_head_when_n_observations_zero():
     mlp_cfg = SimpleNamespace(hidden_dim_ratio=8)
     cnn_cfg = SimpleNamespace(

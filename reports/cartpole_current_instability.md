@@ -405,6 +405,29 @@ rows and train the critic against it at a controlled scale. It should not use
 the existing finite-window `critic_real_return_scale` target unchanged, because
 random subsequence boundaries truncate that target before the episode ends.
 
+## Slow critic target audit
+
+A subsequent comparison with the reference
+[DreamerV3 agent](https://github.com/danijar/dreamerv3/blob/main/dreamerv3/agent.py)
+found another concrete value-target discrepancy. The reference computes
+imagined lambda returns from its slow value model and uses that same slow value
+as the policy baseline. The local trainer maintained and checkpointed an EMA
+critic, but used it only as a distributional regularizer. Its lambda-return
+bootstrap and actor baseline both came from the online critic being optimized.
+
+That makes the main target network self-referential: an online value error
+immediately changes the target used to train that same value model, while the
+EMA copy can only pull the output distribution toward its older shape. This is
+consistent with the critic bootstrap overwhelming the smaller learned survival
+signal and becoming negatively ordered during critic-only warmup.
+
+The trainer now decodes the EMA critic for lambda-return construction and the
+actor baseline while retaining the online critic for the trainable value loss.
+The full-episode replay-return path remains disabled by default, so the next
+critic-only seed-1 gate isolates this slow-target correction against the prior
+failed gate. Exact real-return grounding remains the next bounded intervention
+if the slow-target gate fails.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation

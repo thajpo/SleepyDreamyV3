@@ -198,6 +198,7 @@ def compute_actor_critic_losses(
     dreamed_values_logits_ema=None,
     critic_ema_coef=1.0,
     sample_mask=None,
+    actor_baseline_values=None,
 ):
     """
     Compute actor and critic losses for policy gradient training.
@@ -216,6 +217,7 @@ def compute_actor_critic_losses(
         normalize_advantages: Center and scale advantages within the imagined batch
         dreamed_values_logits_ema: Logits from EMA critic (for regularization)
         critic_ema_coef: Coefficient for EMA regularization
+        actor_baseline_values: Slow-critic values used as the actor baseline
 
     Returns:
         Tuple of (actor_loss, critic_loss, entropy)
@@ -280,8 +282,15 @@ def compute_actor_critic_losses(
     # Actor Loss: Policy gradient with lambda returns as advantage. DreamerV3
     # normalizes advantages; without centering, CartPole's mostly +1 imagined
     # rewards can reinforce arbitrary early samples and collapse entropy.
-    dreamed_values_train = dreamed_values[:H_train]
-    advantage = ((lambda_returns_train - dreamed_values_train) / max(1, S)).detach()
+    baseline_values = (
+        dreamed_values
+        if actor_baseline_values is None
+        else actor_baseline_values
+    )
+    baseline_values_train = baseline_values[:H_train]
+    advantage = (
+        (lambda_returns_train - baseline_values_train) / max(1, S)
+    ).detach()
     if normalize_advantages:
         if sample_mask is not None:
             valid = sample_mask.bool().view(1, Bsz).expand_as(advantage)

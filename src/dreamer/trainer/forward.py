@@ -280,13 +280,19 @@ def dreamer_step(
             dreamed_values_logits = critic(dreamed_recurrent_states)
             with torch.no_grad():
                 dreamed_values_logits_ema = critic_ema(dreamed_recurrent_states)
+                dreamed_values_probs_ema = F.softmax(
+                    dreamed_values_logits_ema, dim=-1
+                )
+                dreamed_values_ema = torch.sum(
+                    dreamed_values_probs_ema * bins, dim=-1
+                )
             dreamed_values_probs = F.softmax(dreamed_values_logits, dim=-1)
             dreamed_values = torch.sum(dreamed_values_probs * bins, dim=-1)
             metrics.dreamed_values.append(dreamed_values.detach().cpu())
 
             lambda_returns = calculate_lambda_returns(
                 dreamed_rewards,
-                dreamed_values,
+                dreamed_values_ema,
                 dreamed_continues,
                 imagination_discount,
                 lam,
@@ -316,6 +322,7 @@ def dreamer_step(
                 dreamed_values_logits_ema=dreamed_values_logits_ema,
                 critic_ema_coef=critic_ema_coef,
                 sample_mask=sample_mask,
+                actor_baseline_values=dreamed_values_ema,
             )
             if (
                 not skip_actor
