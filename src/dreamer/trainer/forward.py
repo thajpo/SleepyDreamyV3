@@ -38,6 +38,55 @@ class ForwardResult:
     last_lambda_returns: Optional[torch.Tensor] = None
 
 
+def calculate_replay_lambda_targets(
+    rewards: torch.Tensor,
+    continues: torch.Tensor,
+    value_annotations: torch.Tensor,
+    gamma: float,
+    lam: float,
+) -> torch.Tensor:
+    """Return value targets aligned with post-transition replay states.
+
+    Replay row ``t`` stores the observation produced by the action and reward
+    in row ``t``. Its posterior therefore represents the state *after* that
+    reward, so its value target must start with the next row's reward. The last
+    posterior has no following replay transition and intentionally has no
+    target here; its imagined value annotation bootstraps the preceding state.
+    """
+    num_targets = max(0, rewards.shape[0] - 1)
+    if num_targets == 0:
+        return rewards[:0]
+    return calculate_lambda_returns(
+        rewards[1:],
+        rewards[1:],
+        continues[1:],
+        gamma,
+        lam,
+        num_targets,
+        value_annotations=value_annotations,
+        continues_are_logits=False,
+    )
+
+
+def calculate_replay_mc_targets(
+    rewards: torch.Tensor,
+    continues: torch.Tensor,
+    gamma: float,
+) -> torch.Tensor:
+    """Return finite replay returns aligned with post-transition states."""
+    next_rewards = rewards[1:]
+    next_continues = continues[1:]
+    if next_rewards.shape[0] == 0:
+        return rewards[:0]
+
+    next_return = torch.zeros_like(next_rewards[0])
+    returns_reversed = []
+    for t in reversed(range(next_rewards.shape[0])):
+        next_return = next_rewards[t] + gamma * next_continues[t] * next_return
+        returns_reversed.append(next_return)
+    return torch.stack(list(reversed(returns_reversed)), dim=0)
+
+
 def dreamer_step(
     *,
     encoder,
@@ -434,6 +483,7 @@ def dreamer_step(
     if (
         critic_replay_scale > 0.0
         and not skip_ac
+        and effective_train_steps > 1
         and len(metrics.replay_value_annotations) == effective_train_steps
         and len(metrics.replay_posterior_states) == effective_train_steps
     ):
@@ -451,41 +501,41 @@ def dreamer_step(
         )
         replay_mask = batch.mask[:, train_start_t:].transpose(0, 1)
 
-        replay_lambda_returns = calculate_lambda_returns(
-            replay_rewards,
+        replay_lambda_returns = calculate_replay_lambda_targets(
             replay_rewards,
             replay_continues,
+            replay_annotations,
             gamma,
             lam,
-            effective_train_steps,
-            value_annotations=replay_annotations,
-            continues_are_logits=False,
         ).transpose(0, 1)
 
-        replay_logits = critic(replay_posterior.detach())
+        replay_logits = critic(replay_posterior[:, :-1].detach())
         logits_flat = replay_logits.reshape(-1, replay_logits.size(-1))
         targets_flat = replay_lambda_returns.detach().reshape(-1)
-        mask_flat = replay_mask.reshape(-1).float()
+        replay_pair_mask = (
+            replay_mask[:-1]
+            * replay_mask[1:]
+            * (1.0 - replay_is_last[:-1].float())
+        )
+        mask_flat = replay_pair_mask.transpose(0, 1).reshape(-1).float()
 
         targets_twohot = twohot_encode(targets_flat, bins)
         per_step_ce = -torch.sum(
             targets_twohot * F.log_softmax(logits_flat, dim=-1), dim=-1
         )
-        replay_not_last = (1.0 - replay_is_last.float()).reshape(-1)
-        replay_weight = mask_flat * replay_not_last
-        metrics.replay_loss = (per_step_ce * replay_weight).sum() / (
-            replay_weight.sum() + 1e-8
+        metrics.replay_loss = (per_step_ce * mask_flat).sum() / (
+            mask_flat.sum() + 1e-8
         )
 
         with torch.no_grad():
-            replay_logits_ema = critic_ema(replay_posterior.detach())
+            replay_logits_ema = critic_ema(replay_posterior[:, :-1].detach())
         ema_logits_flat = replay_logits_ema.reshape(-1, replay_logits_ema.size(-1))
         ema_probs = F.softmax(ema_logits_flat, dim=-1)
         per_step_ema = -torch.sum(
             ema_probs * F.log_softmax(logits_flat, dim=-1), dim=-1
         )
-        metrics.replay_ema_reg = (per_step_ema * replay_weight).sum() / (
-            replay_weight.sum() + 1e-8
+        metrics.replay_ema_reg = (per_step_ema * mask_flat).sum() / (
+            mask_flat.sum() + 1e-8
         )
 
         replay_loss_total = (
@@ -497,6 +547,7 @@ def dreamer_step(
     if (
         critic_real_return_scale > 0.0
         and not skip_ac
+        and effective_train_steps > 1
         and len(metrics.replay_posterior_states) == effective_train_steps
     ):
         replay_posterior = torch.stack(metrics.replay_posterior_states, dim=1)
@@ -511,17 +562,19 @@ def dreamer_step(
         )
         replay_mask = batch.mask[:, train_start_t:].transpose(0, 1)
 
-        next_return = torch.zeros(B, device=device, dtype=replay_rewards.dtype)
-        returns_reversed = []
-        for t in reversed(range(effective_train_steps)):
-            next_return = replay_rewards[t] + gamma * replay_continues[t] * next_return
-            returns_reversed.append(next_return)
-        replay_mc_returns = torch.stack(list(reversed(returns_reversed)), dim=0)
+        replay_mc_returns = calculate_replay_mc_targets(
+            replay_rewards, replay_continues, gamma
+        )
 
-        replay_logits = critic(replay_posterior.detach())
+        replay_logits = critic(replay_posterior[:, :-1].detach())
         logits_flat = replay_logits.reshape(-1, replay_logits.size(-1))
         targets_flat = replay_mc_returns.transpose(0, 1).detach().reshape(-1)
-        mask_flat = replay_mask.transpose(0, 1).reshape(-1).float()
+        replay_pair_mask = (
+            replay_mask[:-1]
+            * replay_mask[1:]
+            * (1.0 - replay_is_last[:-1].float())
+        )
+        mask_flat = replay_pair_mask.transpose(0, 1).reshape(-1).float()
         targets_twohot = twohot_encode(targets_flat, bins)
         per_step_ce = -torch.sum(
             targets_twohot * F.log_softmax(logits_flat, dim=-1), dim=-1

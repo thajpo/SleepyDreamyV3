@@ -242,6 +242,33 @@ should use frozen replay/checkpoints first, so any subsequent training change
 is selected by evidence rather than combining another set of speculative actor
 or entropy changes.
 
+## Replay critic target audit
+
+The subsequent code audit found a concrete off-by-one error in replay critic
+grounding. A collected replay row contains the action and reward that produced
+the observation stored in that same row. Consequently, posterior row `t`
+represents the state *after* reward `t`, and its value target must begin with
+reward `t + 1`.
+
+The grounding path instead paired posterior row `t` with reward `t`. It also
+trained the last posterior in a sampled sequence even though no following
+replay transition was present, bootstrapping that state from its own imagined
+annotation. The optional direct replay-return path had the same shift.
+CartPole's nearly constant reward makes the error difficult to see in aggregate
+loss curves, but moving the terminal boundary by one state corrupts precisely
+the remaining-lifetime ordering needed for control.
+
+Both paths now form targets only from adjacent real replay rows: posterior
+states `[:-1]` are paired with rewards and continuation flags `[1:]`, and a
+pair mask requires both rows to be real and in the same episode. Focused tests
+use deliberately distinct rewards to enforce this temporal contract.
+
+This defect was introduced with replay critic grounding in `1372c6d` on
+2026-01-25. The documented CartPole runs that reached deterministic return 500
+were on 2026-01-19 and 2026-01-20, before that path existed. That history is
+supporting evidence, not proof of causality; the aligned implementation still
+requires a fixed-seed canary under the current training stack.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
