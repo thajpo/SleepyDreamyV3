@@ -8,11 +8,12 @@ Profiler: `scripts/profile_cartpole_capacity.py`
 
 ## Decision
 
-Run at most **three concurrent CartPole experiments**, with one collector and two
-PyTorch intra-op CPU threads per experiment. Three-way concurrency gave the best
-measured aggregate throughput while keeping progress reasonably fair across
-seeds. Use two-way concurrency when the workstation is also under a substantial
-interactive load.
+Run at most **two concurrent CartPole experiments** on the current sequence-
+gradient-correct implementation, with one collector and two PyTorch intra-op
+CPU threads per experiment. The original profile found three-way concurrency
+efficient before full RSSM backpropagation through time was restored. A
+post-correction check showed severe three-way scheduler imbalance, while two
+runs remained fast and fair.
 
 Do not use four-way concurrency for the frozen benchmark. It remained within
 RAM and VRAM limits, but two of four runs slowed to nearly half the rate of the
@@ -91,7 +92,7 @@ still has a parent, collector, trainer, and multiprocessing resource tracker.
 
 ## Launch policy
 
-1. Default to three concurrent runs for a three-seed CartPole comparison.
+1. Default to two concurrent runs. Run the third seed after one slot completes.
 2. Use exactly one collector per run. Increasing collectors changes both the
    resource profile and the data-generation experiment.
 3. Give every run a seed-specific Hydra output directory. Simultaneous runs must
@@ -103,8 +104,24 @@ still has a parent, collector, trainer, and multiprocessing resource tracker.
    8 GiB, swap usage grows by more than 2 GiB, or free VRAM falls below 8 GiB.
 6. Do not overlap Pong and a three-way CartPole batch. Pong has a materially
    different pixel replay and VRAM/RAM profile and needs its own capacity check.
-7. Treat four concurrent runs as unsupported until a longer probe explains and
-   removes the observed scheduling unfairness.
+7. Treat three or more concurrent runs as unsupported until the current BPTT
+   workload is reprofiled and the observed scheduling unfairness is removed.
+
+## Post-BPTT follow-up
+
+On source commit `2aeaf81`, three uninterrupted 3,500-update runs were launched
+under the same two-thread cap. Near update 300 their reported throughputs had
+split to `3.58`, `2.25`, and `0.79` updates/s. The slow run was intentionally
+interrupted rather than accepting unequal scheduling as a benchmark condition.
+The remaining two runs recovered to `4.32` and `4.38` updates/s, with roughly
+19 GiB host RAM available and flat swap usage.
+
+This follow-up is operational evidence, not a replacement for the original
+short capacity matrix. It changes the launch decision because retaining the
+observed-sequence gradient graph increased the live training workload after the
+original profile. Evidence directories are
+`experiments/2026-07-19_cartpole_rssm_continuous_seed{0,1,2}_3500/`; seed 2 is
+the deliberately interrupted scheduling canary.
 
 ## Limits of this profile
 

@@ -570,6 +570,70 @@ not positive and its accuracy is not materially above chance. No Pong run is
 justified until this contract establishes whether the correction is robust to
 training seed.
 
+### Three-seed boundary replication
+
+The missing seed-0 and seed-2 critic gates were run under the frozen contract.
+All three seeds passed before actor training:
+
+| Seed | Q accuracy | Q/real correlation | Q preference |
+|---:|---:|---:|---|
+| 0 | 0.856 | 0.396 | a0 252 / a1 260 |
+| 1 | 0.875 | 0.559 | a0 288 / a1 224 |
+| 2 | 0.875 | 0.557 | a0 253 / a1 259 |
+
+The staged 500-update actor continuations ended at deterministic returns 153.6,
+464.7, and 500.0 for seeds 0, 1, and 2. Every final actor agreed with trusted
+real-rollout preferences on `0.865` of actionable states, and every actor used
+both actions. This confirms that the original critic-to-actor boundary failure
+is repaired across seeds, but the seed-0 return remained too low to call the
+behavior stable.
+
+The staged continuations also exposed a research-protocol confound. Checkpoints
+restore model, optimizer, normalization, and step state, but not replay contents
+or random-number-generator state. Each continuation therefore started from a
+new 16-episode replay population. Fixed random-policy-state model MSE rose from
+`0.0078` to `0.173` in seed 0 and from `0.0091` to `0.278` in seed 2, while seed
+2 nevertheless solved the task. This MSE is best interpreted as loss of
+off-policy support, not a direct behavioral failure metric.
+
+Two uninterrupted pre-optimizer-fix baselines then kept the same replay buffer
+across the step-3,000 actor boundary:
+
+| Seed | Step 3,100 | Step 3,200 | Step 3,300 | Step 3,400 | Step 3,500 | Best |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 461.70 | 466.50 | 496.25 | 437.75 | 300.40 | 496.25 |
+| 1 | 465.85 | 289.25 | 500.00 | 500.00 | 500.00 | 500.00 |
+
+Replay continuity materially improved seed 0, so a resumed continuation is not
+an exact substitute for uninterrupted training. The result is still unstable:
+seed 0 lost 196 points between its best and final evaluation, and seed 1 had a
+211-point transient drop. Their final Q accuracies remained `0.827` and `0.875`
+and final actor/real accuracy was `0.875` for both, so this is no longer the old
+constant-policy or malformed-Q failure.
+
+### LaProp bias-correction audit
+
+The optimizer audit found a concrete mismatch in the next boundary. Local
+LaProp maintained exponential RMS and momentum accumulators but applied neither
+bias correction, despite a comment claiming this matched the source. The
+reference DreamerV3 optimizer bias-corrects both accumulators before applying
+the learning rate.
+
+For the default betas, the local cold optimizer's first parameter update was
+`3.16` times the configured learning rate. The RMS bias remains material during
+the short actor window: after 500 steps it still makes the normalized update
+about `1.6` times too large. This is selective evidence because the world-model
+and critic optimizers already have 3,000 updates at actor release, whereas the
+actor optimizer has zero state and receives the full cold-start error exactly
+where the return curves overshoot.
+
+The implementation now bias-corrects both stages and has a numerical two-step
+regression against the reference equations. Pre-fix optimizer checkpoints must
+not be resumed into the corrected experiment because their accumulator history
+was produced under different update semantics. The isolated validation is a
+fresh uninterrupted seed set with the same 3,500-update budget and metrics; no
+learning-rate, entropy, replay, or architecture changes are allowed.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
