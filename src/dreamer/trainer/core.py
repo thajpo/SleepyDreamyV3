@@ -427,13 +427,10 @@ class WorldModelTrainer:
             all_tokens = self.encoder(encoder_input)  # (B*T, token_dim)
             all_tokens = all_tokens.view(B, T, -1)
 
-            # Apply the WM:AC ratio to both heads, but freeze only the actor
-            # during actor warmup. This gives the critic time to learn from the
-            # random policy before its estimates can change that policy.
+            # Decide AC update once per batch. During warmup, train only the
+            # world model so actor/critic do not optimize against a cold RSSM.
             in_actor_warmup = self.train_step < self.config.actor_warmup_steps
-            skip_ac_batch = self.should_skip_ac_update()
-            skip_actor_batch = in_actor_warmup or skip_ac_batch
-            skip_critic_batch = skip_ac_batch
+            skip_ac_batch = in_actor_warmup or self.should_skip_ac_update()
 
             # Forward pass: RSSM rollout + dreaming + replay grounding
             result = dreamer_step(
@@ -450,8 +447,7 @@ class WorldModelTrainer:
                 B=B,
                 T=T,
                 train_start_t=train_start_t,
-                skip_actor=skip_actor_batch,
-                skip_critic=skip_critic_batch,
+                skip_ac=skip_ac_batch,
                 bins=self.B,
                 return_scale=self.S,
                 config=self.config,
@@ -479,43 +475,52 @@ class WorldModelTrainer:
                     f"Non-finite WM loss at step {self.train_step}: {total_wm_loss.item()}"
                 )
 
-            total_wm_loss.backward()
-            has_critic_grad = bool(total_critic_loss.requires_grad)
-            has_actor_grad = bool(total_actor_loss.requires_grad)
-            if has_critic_grad:
-                total_critic_loss.backward()
-            if has_actor_grad:
-                total_actor_loss.backward()
+            # Use the batch-level AC skip decision
+            if skip_ac_batch:
+                # WM-only update this step
+                total_wm_loss.backward()
+                adaptive_gradient_clipping(self.wm_params)
+                self.wm_optimizer.step()
+            else:
+                # Full training: WM + critic + actor
+                total_wm_loss.backward()
+                has_critic_grad = bool(total_critic_loss.requires_grad)
+                has_actor_grad = bool(total_actor_loss.requires_grad)
+                if has_critic_grad:
+                    total_critic_loss.backward()
+                if has_actor_grad:
+                    total_actor_loss.backward()
+                # AGC: clip gradients based on param/grad norm ratio (DreamerV3)
+                # Use more aggressive clipping for pixel observations (prevent NaN)
+                agc_clip = 0.15 if self.use_pixels else 0.3
+                adaptive_gradient_clipping(self.wm_params, clip_factor=agc_clip)
+                self.wm_optimizer.step()
+                if has_critic_grad:
+                    adaptive_gradient_clipping(
+                        self.critic_params, clip_factor=agc_clip
+                    )
+                    self.critic_optimizer.step()
+                if has_actor_grad:
+                    adaptive_gradient_clipping(
+                        self.actor.parameters(), clip_factor=agc_clip
+                    )
+                    self.actor_optimizer.step()
 
-            # AGC: clip gradients based on param/grad norm ratio (DreamerV3).
-            # Use more aggressive clipping for pixel observations (prevent NaN).
-            agc_clip = 0.15 if self.use_pixels else 0.3
-            adaptive_gradient_clipping(self.wm_params, clip_factor=agc_clip)
-            self.wm_optimizer.step()
-            if has_critic_grad:
-                adaptive_gradient_clipping(self.critic_params, clip_factor=agc_clip)
-                self.critic_optimizer.step()
-            if has_actor_grad:
-                adaptive_gradient_clipping(
-                    self.actor.parameters(), clip_factor=agc_clip
-                )
-                self.actor_optimizer.step()
-
-            # Polyak update for critic EMA whenever the critic trained.
-            if has_critic_grad:
-                with torch.no_grad():
-                    for param, param_ema in zip(
-                        self.critic.parameters(), self.critic_ema.parameters()
-                    ):
-                        param_ema.data.mul_(self.config.critic_ema_decay).add_(
-                            param.data, alpha=1 - self.config.critic_ema_decay
-                        )
-                    for param, param_ema in zip(
-                        self.q_critic.parameters(), self.q_critic_ema.parameters()
-                    ):
-                        param_ema.data.mul_(self.config.critic_ema_decay).add_(
-                            param.data, alpha=1 - self.config.critic_ema_decay
-                        )
+                # Polyak update for critic EMA
+                if has_critic_grad:
+                    with torch.no_grad():
+                        for param, param_ema in zip(
+                            self.critic.parameters(), self.critic_ema.parameters()
+                        ):
+                            param_ema.data.mul_(self.config.critic_ema_decay).add_(
+                                param.data, alpha=1 - self.config.critic_ema_decay
+                            )
+                        for param, param_ema in zip(
+                            self.q_critic.parameters(), self.q_critic_ema.parameters()
+                        ):
+                            param_ema.data.mul_(self.config.critic_ema_decay).add_(
+                                param.data, alpha=1 - self.config.critic_ema_decay
+                            )
 
             # End backward
 

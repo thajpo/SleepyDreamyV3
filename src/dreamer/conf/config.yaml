@@ -110,7 +110,7 @@ train:
 
   # Training phases
   wm_ac_ratio: 1  # WM updates per AC update (e.g., 4 = train WM 4x more than AC)
-  actor_warmup_steps: 0  # Freeze actor/collector policy; WM and critic still train
+  actor_warmup_steps: 0  # WM-only updates before actor/critic training starts
 
   # Cosine LR decay (applies to all optimizers after warmup)
   lr_cosine_decay: false
