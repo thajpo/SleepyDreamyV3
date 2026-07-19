@@ -495,6 +495,81 @@ and longer-horizon testing should wait until the separately identified RSSM
 sequence-gradient and posterior-unimix correctness defects are fixed and the
 same frozen contract is rerun.
 
+## RSSM correctness gate
+
+The follow-up audit found two independent RSSM implementation defects:
+
+1. The recurrent deterministic state and sampled stochastic state were
+   detached before being saved for the next observed timestep. This severed
+   backpropagation through time: a loss at timestep `t + 1` could not train how
+   timestep `t` produced its recurrent or stochastic state. Commit `25a94ef`
+   retains that graph during training; collection and evaluation already run
+   under `no_grad`.
+2. Posterior logits were mixed with 1% uniform probability before sampling and
+   the already-mixed logits were returned to the loss, which mixed them a
+   second time. The KL loss therefore saw approximately 1.99% posterior unimix
+   while the prior and deployed inference path saw 1%. Commit `a82cf7e` now
+   returns raw posterior logits to the loss and uses a separate once-mixed copy
+   only for sampling.
+
+Focused regressions prove that a timestep-2 loss now produces nonzero gradients
+through timestep-1 deterministic and stochastic states, and that the posterior
+head's raw logits reach the loss unchanged. The full fast suite passed with 69
+tests, along with compile, scoped type checking, and the multiprocess CPU smoke
+test.
+
+The combined seed-1 gate used the same critic-only 3,000-update contract as the
+hard-free-bits canary. Relative to the hard-free-bits-only checkpoint, one-step
+state MSE fell from `0.0939` to `0.00844`. The fixed 512-state counterfactual
+probe reported:
+
+| Measurement | Step 3,000 result |
+|---|---:|
+| Q vs real-rollout accuracy | 0.875 |
+| Q/real correlation | 0.559 |
+| Survival-only h3 correlation | 0.663 |
+| Q preference histogram | action 0: 288; action 1: 224 |
+| Actor optimizer states | 0 |
+
+The checkpoint is
+`experiments/2026-07-19_160309_CartPole-v1/checkpoints/checkpoint_final.pt`.
+Retaining sequence gradients increased peak CartPole VRAM only from roughly 18%
+to 19%; trainer RSS was approximately 3.9 GiB, with no observed growth trend.
+
+### Combined actor continuation
+
+The passing combined checkpoint was resumed for 500 actor updates in
+`experiments/2026-07-19_161541_CartPole-v1/`. Deterministic evaluation again
+used 20 episodes every 100 updates.
+
+| Update | Mean deterministic return |
+|---:|---:|
+| 3,000 | 44.05 |
+| 3,100 | 281.25 |
+| 3,200 | 394.70 |
+| 3,300 | 437.35 |
+| 3,400 | **481.00** |
+| 3,500 | 464.70 |
+
+At update 3,500, the fixed probe retained `0.865` Q accuracy and improved to
+`0.807` Q/real correlation. Actor-vs-real accuracy was also `0.865`. The actor
+remained state-dependent, preferring action 0 on 234 probe states and action 1
+on 278, with mean probe-state entropy `0.141`. Thus useful model knowledge now
+crosses the critic-to-actor boundary and produces near-solved real behavior in
+this seed.
+
+This is strong causal evidence for the combined corrected training stack, but
+it is still one seed and must not be reported as stable CartPole learning. The
+frozen replication contract is seeds 0, 1, and 2; 3,000 critic-only updates;
+the same fixed seed-17 Q probe at that boundary; and only for passing Q gates,
+500 actor updates with deterministic 20-episode evaluations every 100 updates.
+The primary behavioral metric is final deterministic episode return. The
+boundary metrics are Q/real correlation, Q accuracy, actor/real accuracy, and
+actor preference balance. A seed fails early if its step-3,000 Q correlation is
+not positive and its accuracy is not materially above chance. No Pong run is
+justified until this contract establishes whether the correction is robust to
+training seed.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
