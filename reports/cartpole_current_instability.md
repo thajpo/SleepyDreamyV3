@@ -428,6 +428,44 @@ critic-only seed-1 gate isolates this slow-target correction against the prior
 failed gate. Exact real-return grounding remains the next bounded intervention
 if the slow-target gate fails.
 
+## Critic target and free-bits gates
+
+Four seed-1 critic-only runs used the same 3,000-update configuration and the
+same 512-state, seed-17 simulator counterfactual probe. The actor optimizer had
+zero state in every checkpoint. Each row changed only the named intervention
+from the preceding corrected baseline.
+
+| Gate | Q accuracy | Q/real correlation | Q preference | Result |
+|---|---:|---:|---|---|
+| Corrected replay/discount baseline | 0.423 | -0.137 | a0 354 / a1 158 | fail |
+| Slow critic target | 0.510 | -0.192 | a0 116 / a1 396 | fail |
+| Preserve replay scale 0.3 | 0.510 | -0.303 | a1 512 | fail |
+| Exact full-episode return, scale 1.0 | 0.490 | -0.274 | a0 284 / a1 228 | fail |
+| Hard one-nat free bits | **0.865** | **0.540** | a0 189 / a1 323 | **pass** |
+
+The hard-free-bits checkpoint is
+`experiments/2026-07-19_154109_CartPole-v1/checkpoints/checkpoint_final.pt`.
+Its continuation-only action ranking also reached `0.875` accuracy and `0.664`
+correlation. This is the first intervention to make both the learned survival
+signal and the critic bootstrap positive, state-dependent, and materially above
+chance before policy learning.
+
+The causal defect was the interaction of two individually motivated changes.
+The implementation had moved from averaging categorical KL across latent
+variables to summing it, matching the reference scale, but retained a
+straight-through free-bits estimator introduced for the older averaged loss.
+Thus the summed KL continued pushing the posterior toward the prior even after
+falling below the one-nat budget. In the two preceding canaries, the logged KL
+hit the `1.0` floor by update 25 and remained there for 115/120 and 117/120
+measurements while gradients continued through the floor.
+
+Reference Dreamer uses the summed KL together with a hard one-nat clamp. The
+default now matches that pair. Straight-through behavior remains available as
+an explicit research override, but is no longer the authored configuration.
+The next bounded gate is a short actor continuation from the passing checkpoint;
+it must improve actor/Q agreement and deterministic behavior before any
+multi-seed extension.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation

@@ -141,7 +141,7 @@ def compute_wm_loss(
         (posterior_probs * (log_posterior - log_prior_sg)).sum(dim=-1).sum(dim=-1)
     )  # (B,)
 
-    if bool(getattr(config, "free_bits_straight_through", True)):
+    if bool(getattr(config, "free_bits_straight_through", False)):
         # Straight-through free bits:
         # - Forward value matches max(free_bits, raw_kl) for logging/loss scale.
         # - Backward pass still trains the prior/posterior when raw KL is below

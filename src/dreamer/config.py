@@ -109,7 +109,7 @@ class Config:
     beta_dyn: float = 1.0
     beta_rep: float = 0.1
     beta_pred: float = 1.0
-    free_bits_straight_through: bool = True
+    free_bits_straight_through: bool = False
     prior_state_pred_scale: float = 0.0
 
     # ===== Training: reward bins =====
