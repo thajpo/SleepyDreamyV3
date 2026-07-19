@@ -39,6 +39,24 @@ class ForwardResult:
     last_lambda_returns: Optional[torch.Tensor] = None
 
 
+def add_sequence_mean_auxiliary_loss(
+    accumulated_loss: torch.Tensor,
+    auxiliary_loss: torch.Tensor,
+    scale: float,
+    sequence_length: int,
+) -> torch.Tensor:
+    """Add one averaged auxiliary loss beside a summed sequence loss.
+
+    The caller later divides ``accumulated_loss`` by ``sequence_length``.
+    Multiplying the already-averaged auxiliary term here preserves its authored
+    scale after that normalization instead of diluting it by the sequence
+    length.
+    """
+    if sequence_length <= 0:
+        raise ValueError("sequence_length must be positive")
+    return accumulated_loss + sequence_length * scale * auxiliary_loss
+
+
 def calculate_replay_lambda_targets(
     rewards: torch.Tensor,
     continues: torch.Tensor,
@@ -550,7 +568,12 @@ def dreamer_step(
         replay_loss_total = (
             metrics.replay_loss + config.critic_ema_regularizer * metrics.replay_ema_reg
         )
-        total_critic_loss = total_critic_loss + critic_replay_scale * replay_loss_total
+        total_critic_loss = add_sequence_mean_auxiliary_loss(
+            total_critic_loss,
+            replay_loss_total,
+            critic_replay_scale,
+            effective_train_steps,
+        )
 
     # --- Full-episode replay return critic grounding ---
     if (
@@ -576,8 +599,11 @@ def dreamer_step(
         metrics.replay_mc_loss = (per_step_ce * mask_flat).sum() / (
             mask_flat.sum() + 1e-8
         )
-        total_critic_loss = total_critic_loss + (
-            critic_real_return_scale * metrics.replay_mc_loss
+        total_critic_loss = add_sequence_mean_auxiliary_loss(
+            total_critic_loss,
+            metrics.replay_mc_loss,
+            critic_real_return_scale,
+            effective_train_steps,
         )
 
     assert total_wm_loss is not None and total_actor_loss is not None and total_critic_loss is not None
