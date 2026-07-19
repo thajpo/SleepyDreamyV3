@@ -158,9 +158,10 @@ class RSSMWorldModel(nn.Module):
         h_new = z * n + (1 - z) * h_blocks
 
         h = h_new.view(B, -1)  # (B, n_blocks * d_hidden)
-        # Detach and clone before storing to avoid in-place modification of computation graph
-        # Gradients flow through h directly, not through stored h_prev
-        self.h_prev = h.detach().clone()
+        # Preserve the observed-sequence graph. The trainer resets this carry at
+        # each sampled sequence, so retaining it here gives losses at later rows
+        # gradient paths through the earlier recurrent states (BPTT).
+        self.h_prev = h
         prior_logits = self.dynamics_predictor(h)
         return h, prior_logits
 
@@ -227,8 +228,9 @@ class RSSMWorldModel(nn.Module):
         z_indices = posterior_dist.sample()  # (batch_size, latents)
         z_onehot = F.one_hot(z_indices, num_classes=self.n_classes).float()
         z_sample = z_onehot + (posterior_probs - posterior_probs.detach())
-        # Cache z_t for the next transition step.
-        self.z_prev = z_sample.detach().clone()
+        # Cache z_t without severing the observed-sequence graph. Collection and
+        # evaluation run under no_grad; training needs this path for BPTT.
+        self.z_prev = z_sample
 
         # 4. Generate predictions using the new state
         (obs_reconstruction, reward_logits, continue_logits, h_z_joined) = (
