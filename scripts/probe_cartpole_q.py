@@ -58,6 +58,69 @@ def rollout_score(
     return total
 
 
+def heuristic_rollout_score(
+    env: gym.Env,
+    start_state: np.ndarray,
+    horizon: int,
+) -> float:
+    """Return survival reward under heuristic control from an injected state."""
+    if horizon <= 0:
+        return 0.0
+
+    obs, _ = env.reset()
+    del obs
+    state = np.asarray(start_state, dtype=np.float64).copy()
+    env.unwrapped.state = state
+    env.unwrapped.steps_beyond_terminated = None
+
+    total = 0.0
+    for _step in range(int(horizon)):
+        action = heuristic_action(np.asarray(state, dtype=np.float32))
+        obs, reward, terminated, truncated, _ = env.step(action)
+        total += float(reward)
+        if terminated or truncated:
+            break
+        state = np.asarray(obs, dtype=np.float64)
+    return total
+
+
+def cartpole_state_is_terminal(env: gym.Env, state: np.ndarray) -> bool:
+    """Apply CartPole's physical termination limits without taking another step."""
+    x, _x_dot, theta, _theta_dot = [float(v) for v in state]
+    base_env = env.unwrapped
+    return bool(
+        abs(x) > float(base_env.x_threshold)
+        or abs(theta) > float(base_env.theta_threshold_radians)
+    )
+
+
+def hybrid_state_score(
+    env: gym.Env,
+    predicted_next_state: np.ndarray,
+    horizon: int,
+) -> float:
+    """Score one learned transition using real dynamics for all later steps.
+
+    CartPole awards one point for the modeled first transition. If the decoded
+    next state is still physically valid, the trusted heuristic and real
+    simulator score the remaining horizon. This isolates one-step transition
+    quality from the learned critic and longer learned rollouts.
+    """
+    horizon = max(1, int(horizon))
+    if cartpole_state_is_terminal(env, predicted_next_state):
+        return 1.0
+    return 1.0 + heuristic_rollout_score(
+        env, predicted_next_state, horizon=horizon - 1
+    )
+
+
+def action_preference(scores: list[float]) -> int:
+    """Return the preferred binary action, or -1 for an exact tie."""
+    if math.isclose(scores[1], scores[0], rel_tol=0.0, abs_tol=1e-9):
+        return -1
+    return int(scores[1] > scores[0])
+
+
 def one_step_outcome(
     env: gym.Env,
     start_state: np.ndarray,
@@ -152,6 +215,20 @@ def summarize(rows: list[dict], checkpoint_path: Path, critic_key: str) -> dict:
     direct_q_rows = [r for r in actionable if "direct_q_delta" in r]
     direct_q_delta = [r["direct_q_delta"] for r in direct_q_rows]
     direct_q_true_delta = [r["true_delta"] for r in direct_q_rows]
+    hybrid_state_correct = [
+        r for r in actionable if r["hybrid_state_pref"] == r["true_pref"]
+    ]
+    hybrid_continue_correct = [
+        r for r in actionable if r["hybrid_continue_pref"] == r["true_pref"]
+    ]
+    hybrid_state_margined = [
+        r for r in actionable if abs(r["hybrid_state_delta"]) > 1e-6
+    ]
+    hybrid_continue_margined = [
+        r for r in actionable if abs(r["hybrid_continue_delta"]) > 1e-6
+    ]
+    hybrid_state_delta = [r["hybrid_state_delta"] for r in actionable]
+    hybrid_continue_delta = [r["hybrid_continue_delta"] for r in actionable]
     pred_delta_x_dot = [r["pred_delta_x_dot"] for r in rows]
     true_delta_x_dot = [r["true_delta_x_dot"] for r in rows]
     pred_delta_theta_dot = [r["pred_delta_theta_dot"] for r in rows]
@@ -173,6 +250,10 @@ def summarize(rows: list[dict], checkpoint_path: Path, critic_key: str) -> dict:
         "states": len(rows),
         "actionable_states": len(actionable),
         "q_margined_actionable_states": len(q_margined),
+        "hybrid_state_margined_actionable_states": len(hybrid_state_margined),
+        "hybrid_continue_margined_actionable_states": len(
+            hybrid_continue_margined
+        ),
         "q_vs_rollout_accuracy": frac(len(q_correct), len(actionable)),
         "direct_q_vs_rollout_accuracy": frac(
             sum(r.get("direct_q_pref") == r["true_pref"] for r in direct_q_rows),
@@ -180,9 +261,35 @@ def summarize(rows: list[dict], checkpoint_path: Path, critic_key: str) -> dict:
         ),
         "actor_vs_rollout_accuracy": frac(len(actor_correct), len(actionable)),
         "heuristic_vs_rollout_accuracy": frac(len(heuristic_correct), len(actionable)),
+        "hybrid_state_vs_rollout_accuracy": frac(
+            len(hybrid_state_correct), len(actionable)
+        ),
+        "hybrid_continue_vs_rollout_accuracy": frac(
+            len(hybrid_continue_correct), len(actionable)
+        ),
+        "hybrid_state_vs_rollout_accuracy_margined": frac(
+            sum(
+                r["hybrid_state_pref"] == r["true_pref"]
+                for r in hybrid_state_margined
+            ),
+            len(hybrid_state_margined),
+        ),
+        "hybrid_continue_vs_rollout_accuracy_margined": frac(
+            sum(
+                r["hybrid_continue_pref"] == r["true_pref"]
+                for r in hybrid_continue_margined
+            ),
+            len(hybrid_continue_margined),
+        ),
         "q_delta_true_delta_pearson": pearson(q_delta, true_delta),
         "direct_q_delta_true_delta_pearson": pearson(
             direct_q_delta, direct_q_true_delta
+        ),
+        "hybrid_state_delta_true_delta_pearson": pearson(
+            hybrid_state_delta, true_delta
+        ),
+        "hybrid_continue_delta_true_delta_pearson": pearson(
+            hybrid_continue_delta, true_delta
         ),
         "pred_delta_x_dot_true_pearson": pearson(
             pred_delta_x_dot, true_delta_x_dot
@@ -230,8 +337,20 @@ def summarize(rows: list[dict], checkpoint_path: Path, critic_key: str) -> dict:
             Counter(str(r["direct_q_pref"]) for r in rows if "direct_q_pref" in r)
         ),
         "actor_pref_hist": dict(Counter(str(r["actor_pref"]) for r in rows)),
+        "hybrid_state_pref_hist": dict(
+            Counter(str(r["hybrid_state_pref"]) for r in rows)
+        ),
+        "hybrid_continue_pref_hist": dict(
+            Counter(str(r["hybrid_continue_pref"]) for r in rows)
+        ),
         "true_pref_hist": dict(Counter(str(r["true_pref"]) for r in actionable)),
         "mean_abs_q_delta": float(np.mean([abs(r["q_delta"]) for r in rows])),
+        "mean_abs_hybrid_state_delta": float(
+            np.mean([abs(r["hybrid_state_delta"]) for r in rows])
+        ),
+        "mean_abs_hybrid_continue_delta": float(
+            np.mean([abs(r["hybrid_continue_delta"]) for r in rows])
+        ),
         "mean_abs_true_delta": float(np.mean([abs(r["true_delta"]) for r in rows])),
         "mean_actor_entropy": float(np.mean([r["actor_entropy"] for r in rows])),
         "mean_actor_prob_action1": float(np.mean([r["actor_prob_1"] for r in rows])),
@@ -347,10 +466,21 @@ def run_probe(
         finally:
             world_model.h_prev = h_prev_backup
 
-        if math.isclose(true_scores[1], true_scores[0], rel_tol=0.0, abs_tol=1e-9):
-            true_pref = -1
-        else:
-            true_pref = int(true_scores[1] > true_scores[0])
+        hybrid_state_scores = [
+            hybrid_state_score(score_env, pred_next[action], rollout_horizon)
+            for action in range(cfg.n_actions)
+        ]
+        # Add the learned continuation head while retaining real downstream
+        # dynamics. Subtracting one removes the shared modeled first-step reward.
+        hybrid_continue_scores = [
+            1.0
+            + pred_continue[action] * (hybrid_state_scores[action] - 1.0)
+            for action in range(cfg.n_actions)
+        ]
+
+        true_pref = action_preference(true_scores)
+        hybrid_state_pref = action_preference(hybrid_state_scores)
+        hybrid_continue_pref = action_preference(hybrid_continue_scores)
 
         q_np = q_values.squeeze(0).detach().cpu().numpy()
         probs_np = actor_probs.squeeze(0).detach().cpu().numpy()
@@ -374,6 +504,18 @@ def run_probe(
                 "true_delta": float(true_scores[1] - true_scores[0]),
                 "true_pref": int(true_pref),
                 "heuristic_pref": int(heuristic_action(state)),
+                "hybrid_state_score_0": float(hybrid_state_scores[0]),
+                "hybrid_state_score_1": float(hybrid_state_scores[1]),
+                "hybrid_state_delta": float(
+                    hybrid_state_scores[1] - hybrid_state_scores[0]
+                ),
+                "hybrid_state_pref": int(hybrid_state_pref),
+                "hybrid_continue_score_0": float(hybrid_continue_scores[0]),
+                "hybrid_continue_score_1": float(hybrid_continue_scores[1]),
+                "hybrid_continue_delta": float(
+                    hybrid_continue_scores[1] - hybrid_continue_scores[0]
+                ),
+                "hybrid_continue_pref": int(hybrid_continue_pref),
                 "next_mse_0": float(np.mean((pred_next[0] - real_next[0]) ** 2)),
                 "next_mse_1": float(np.mean((pred_next[1] - real_next[1]) ** 2)),
                 "real_done_0": int(real_done[0]),

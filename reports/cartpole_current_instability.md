@@ -161,6 +161,40 @@ earlier than the original hypothesis: the main problem is not merely a cold
 critic at actor startup, but failure to learn a trustworthy state-dependent
 `Q(s, a)` or equivalent policy-improvement target.
 
+## One-step hybrid boundary probe
+
+The Q probe was extended to separate learned transition quality from learned
+multi-step value quality. For each real state and first action, it decodes the
+world model's predicted next physical state, injects that state into the real
+CartPole simulator, and uses the trusted heuristic for the remainder of the
+30-step horizon. A second hybrid also applies the learned continuation
+probability to the real downstream survival return.
+
+With a perfect one-step transition, this hybrid exactly reproduces the fully
+real rollout score and action preference; focused tests enforce that invariant.
+All checkpoint comparisons used the same 512 states and probe seed 17.
+
+| Checkpoint | State hybrid decisive states | State hybrid accuracy when decisive | State + continue accuracy | State + continue correlation | Full learned Q accuracy | Full learned Q correlation |
+|---|---:|---:|---:|---:|---:|---:|
+| Old seed 1, step 3,000 | 29/104 | 0.897 | 0.740 | 0.412 | 0.442 | -0.353 |
+| Old seed 1, step 5,000 | 61/104 | 0.705 | 0.606 | 0.347 | 0.442 | -0.009 |
+| Critic warmup, step 3,000 | 6/104 | 1.000 | 0.548 | 0.134 | 0.529 | -0.201 |
+| Critic warmup, step 3,200 | 37/104 | 0.865 | 0.500 | 0.304 | 0.385 | -0.332 |
+
+The decoded one-step state usually ranks actions correctly when it creates a
+non-tied downstream survival difference, consistent with the existing perfect
+one-step action-effect sign results. However, it often does not separate the
+actions at all. The continuation head supplies a preference on almost every
+actionable state, but that preference is not consistently trustworthy; in the
+critic-warmup step-3,000 checkpoint it preferred action 1 on 497/512 states.
+
+Most importantly, every hybrid has positive correlation with real action
+advantage (`0.134` to `0.412`), while every full model/critic Q estimate is
+non-positive (`-0.353` to `-0.009`). Useful local counterfactual information is
+therefore present but weak, then degraded by learned continuation, longer
+latent rollout, and/or terminal critic value. The next investigation should
+audit that post-transition value path before changing the actor again.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
