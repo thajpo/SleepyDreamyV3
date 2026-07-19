@@ -128,6 +128,39 @@ Do not add entropy changes, a new actor objective, or world-model auxiliaries
 to this experiment. Those would prevent attribution. Do not return to Pong
 until a state-dependent CartPole policy is stable across seeds.
 
+## Critic-warmup intervention result
+
+The isolated intervention was implemented in `99e543a` and tested with seed 1
+in `runs/cartpole_critic_warmup_canary_99e543a_seed1_3200/`. The run completed
+3,200 updates normally in 12 minutes 36 seconds. The actor remained frozen and
+the critic trained through step 3,000, followed by 200 actor updates.
+
+The mechanical hypothesis was correct: critic warmup removed the uniform cold
+critic. Imagined critic-value standard deviation was `0.915` at step 1,000 and
+`2.107` at step 3,000, rather than `0.00000165` when actor and critic previously
+started together.
+
+The learning hypothesis failed its predeclared gate:
+
+| Probe | Q vs real accuracy | Q/real correlation | Q preference | Actor preference |
+|---|---:|---:|---|---|
+| Old seed 1, step 3,000 | 0.442 | -0.353 | action 1: 442/512 | near-uniform probabilities |
+| Critic warmup, step 3,000 | 0.529 | -0.201 | action 1: 500/512 | near-uniform probabilities |
+| Critic warmup, step 3,200 | 0.385 | -0.332 | action 1: 420/512 | action 1: 512/512 |
+
+After only 200 actor updates, mean action-1 probability reached `0.641` and the
+actor preferred action 1 on every probe state. Critic pretraining therefore
+made scalar state values non-uniform without producing reliable
+counterfactual action ranking. The actor still amplified the bad ranking into
+a constant deterministic policy.
+
+The three-seed extension was not launched. The intervention was reverted in
+`987f747` because it failed the scientific gate and made the 3,000-step warmup
+substantially more expensive. This moves the first broken boundary one step
+earlier than the original hypothesis: the main problem is not merely a cold
+critic at actor startup, but failure to learn a trustworthy state-dependent
+`Q(s, a)` or equivalent policy-improvement target.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
