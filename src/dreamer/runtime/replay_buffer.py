@@ -24,7 +24,7 @@ class EnvData(NamedTuple):
     rewards: torch.Tensor  # (B, T)
     is_last: torch.Tensor  # (B, T)
     is_terminal: torch.Tensor  # (B, T)
-    future_returns: torch.Tensor  # (B, T) — discounted rewards after each row
+    future_returns: Optional[torch.Tensor]  # (B, T), when exact targets enabled
     mask: torch.Tensor  # (B, T) — 1=real, 0=padded
     pixels: Optional[torch.Tensor] = None  # (B, T, C, H, W)
     pixels_original: Optional[torch.Tensor] = None  # (B, T, C, H, W)
@@ -51,6 +51,7 @@ class EpisodeReplayBuffer:
         min_episodes=64,
         sequence_length=25,
         gamma=0.997,
+        compute_future_returns=False,
     ):
         """
         Args:
@@ -59,12 +60,14 @@ class EpisodeReplayBuffer:
             min_episodes: Block sampling until buffer has this many episodes
             sequence_length: Fixed length of sampled subsequences
             gamma: Discount used for full-episode future return targets
+            compute_future_returns: Whether to annotate stored episodes with returns
         """
         self.data_queue = data_queue
         self.max_episodes = max_episodes
         self.min_episodes = min_episodes
         self.sequence_length = sequence_length
         self.gamma = float(gamma)
+        self.compute_future_returns = bool(compute_future_returns)
 
         self.buffer = deque(maxlen=max_episodes)
         self.lock = threading.Lock()
@@ -107,12 +110,14 @@ class EpisodeReplayBuffer:
         """Insert one complete episode into the replay buffer."""
         pixels, states, actions, rewards, is_last, is_terminal = episode[:6]
         ep_len = episode[6] if len(episode) > 6 else len(states)
-        future_returns = np.zeros(len(rewards), dtype=np.float32)
-        for index in range(len(rewards) - 2, -1, -1):
-            next_index = index + 1
-            future_returns[index] = rewards[next_index] + self.gamma * (
-                1.0 - float(is_last[next_index])
-            ) * future_returns[next_index]
+        future_returns = None
+        if self.compute_future_returns:
+            future_returns = np.zeros(len(rewards), dtype=np.float32)
+            for index in range(len(rewards) - 2, -1, -1):
+                next_index = index + 1
+                future_returns[index] = rewards[next_index] + self.gamma * (
+                    1.0 - float(is_last[next_index])
+                ) * future_returns[next_index]
         stored_episode = (
             pixels,
             states,
@@ -160,7 +165,11 @@ class EpisodeReplayBuffer:
                 rewards[start : start + seq_len],
                 is_last[start : start + seq_len],
                 is_terminal[start : start + seq_len],
-                future_returns[start : start + seq_len],
+                (
+                    future_returns[start : start + seq_len]
+                    if future_returns is not None
+                    else None
+                ),
                 mask,
             )
         else:
@@ -183,7 +192,13 @@ class EpisodeReplayBuffer:
             is_terminal_pad = np.ones(
                 pad_len, dtype=is_terminal.dtype
             )  # Padded steps should not bootstrap
-            future_returns_pad = np.zeros(pad_len, dtype=future_returns.dtype)
+            if future_returns is not None:
+                future_returns_out = np.concatenate(
+                    [future_returns, np.zeros(pad_len, dtype=future_returns.dtype)],
+                    axis=0,
+                )
+            else:
+                future_returns_out = None
 
             # Mask: 1 for real steps, 0 for padded
             mask = np.concatenate(
@@ -197,7 +212,7 @@ class EpisodeReplayBuffer:
                 np.concatenate([rewards, rewards_pad], axis=0),
                 np.concatenate([is_last, is_last_pad], axis=0),
                 np.concatenate([is_terminal, is_terminal_pad], axis=0),
-                np.concatenate([future_returns, future_returns_pad], axis=0),
+                future_returns_out,
                 mask,
             )
 
@@ -282,7 +297,8 @@ class EpisodeReplayBuffer:
             batch_rewards.append(torch.from_numpy(rewards))
             batch_is_last.append(torch.from_numpy(is_last))
             batch_is_terminal.append(torch.from_numpy(is_terminal))
-            batch_future_returns.append(torch.from_numpy(future_returns))
+            if future_returns is not None:
+                batch_future_returns.append(torch.from_numpy(future_returns))
             batch_mask.append(torch.from_numpy(mask))
 
         if use_pixels and batch_pixels:
@@ -292,6 +308,11 @@ class EpisodeReplayBuffer:
             pixels_out, pixels_original_out = None, None
 
         states_out = torch.stack(batch_states).to(device)
+        future_returns_out = (
+            torch.stack(batch_future_returns).to(device)
+            if len(batch_future_returns) == len(raw_batch)
+            else None
+        )
 
         return EnvData(
             states=states_out,
@@ -299,7 +320,7 @@ class EpisodeReplayBuffer:
             rewards=torch.stack(batch_rewards).to(device),
             is_last=torch.stack(batch_is_last).to(device),
             is_terminal=torch.stack(batch_is_terminal).to(device),
-            future_returns=torch.stack(batch_future_returns).to(device),
+            future_returns=future_returns_out,
             mask=torch.stack(batch_mask).to(device),
             pixels=pixels_out,
             pixels_original=pixels_original_out,

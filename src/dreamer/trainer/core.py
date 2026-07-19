@@ -185,6 +185,7 @@ class WorldModelTrainer:
             min_episodes=config.min_buffer_episodes,
             sequence_length=config.sequence_length,
             gamma=config.gamma,
+            compute_future_returns=config.critic_real_return_scale > 0.0,
         )
 
         self.batch_size = config.batch_size  # needed by get_data_from_buffer
@@ -314,7 +315,8 @@ class WorldModelTrainer:
             batch_rewards.append(torch.from_numpy(rewards))
             batch_is_last.append(torch.from_numpy(is_last))
             batch_is_terminal.append(torch.from_numpy(is_terminal))
-            batch_future_returns.append(torch.from_numpy(future_returns))
+            if future_returns is not None:
+                batch_future_returns.append(torch.from_numpy(future_returns))
             batch_mask.append(torch.from_numpy(mask))
 
         if self.use_pixels and batch_pixels:
@@ -327,6 +329,11 @@ class WorldModelTrainer:
             pixels_original_out = None
 
         states_out = torch.stack(batch_states).to(self.device)
+        future_returns_out = (
+            torch.stack(batch_future_returns).to(self.device)
+            if len(batch_future_returns) == len(raw_batch)
+            else None
+        )
 
         return EnvData(
             states=states_out,
@@ -334,7 +341,7 @@ class WorldModelTrainer:
             rewards=torch.stack(batch_rewards).to(self.device),
             is_last=torch.stack(batch_is_last).to(self.device),
             is_terminal=torch.stack(batch_is_terminal).to(self.device),
-            future_returns=torch.stack(batch_future_returns).to(self.device),
+            future_returns=future_returns_out,
             mask=torch.stack(batch_mask).to(self.device),
             pixels=pixels_out,
             pixels_original=pixels_original_out,

@@ -18,7 +18,11 @@ def _episode(length: int, marker: float = 1.0):
 
 def test_short_episode_is_padded_and_masked():
     replay = EpisodeReplayBuffer(
-        data_queue=None, max_episodes=10, min_episodes=1, sequence_length=5
+        data_queue=None,
+        max_episodes=10,
+        min_episodes=1,
+        sequence_length=5,
+        compute_future_returns=True,
     )
     replay.add_episode(_episode(3))
 
@@ -38,6 +42,7 @@ def test_future_returns_start_after_each_post_transition_state():
         min_episodes=1,
         sequence_length=4,
         gamma=0.5,
+        compute_future_returns=True,
     )
     replay.add_episode(_episode(4))
 
@@ -56,6 +61,7 @@ def test_subsequence_return_includes_rewards_beyond_sample_window(monkeypatch):
         min_episodes=1,
         sequence_length=2,
         gamma=1.0,
+        compute_future_returns=True,
     )
     episode = list(_episode(5))
     episode[4][-1] = True
@@ -79,3 +85,15 @@ def test_recent_only_sampling_uses_newest_episode():
     samples = replay.sample(batch_size=3, recent_fraction=1.0)
 
     assert all(np.allclose(sample[1], 4.0) for sample in samples)
+
+
+def test_future_returns_are_not_stored_when_disabled():
+    replay = EpisodeReplayBuffer(
+        data_queue=None, max_episodes=10, min_episodes=1, sequence_length=2
+    )
+    replay.add_episode(_episode(2))
+
+    batch = replay.sample_tensors(1, "cpu", recent_fraction=0.0)
+
+    assert batch.future_returns is None
+    assert replay.buffer[0][7] is None

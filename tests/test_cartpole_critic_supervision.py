@@ -1,4 +1,5 @@
 import gymnasium as gym
+import pytest
 import torch
 
 from scripts.probe_cartpole_critic_supervision import (
@@ -17,6 +18,12 @@ def test_episode_split_keeps_episodes_disjoint():
     assert train_episodes
     assert test_episodes
     assert train_episodes.isdisjoint(test_episodes)
+
+
+@pytest.mark.parametrize("test_fraction", [0.0, 1.0, -0.1, 1.1])
+def test_episode_split_rejects_invalid_fraction(test_fraction):
+    with pytest.raises(ValueError, match="between 0 and 1"):
+        episode_split(torch.tensor([0, 0, 1, 1]), test_fraction, seed=3)
 
 
 def test_trusted_remaining_return_is_finite_and_positive():

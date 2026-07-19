@@ -317,7 +317,10 @@ def dreamer_step(
                 critic_ema_coef=critic_ema_coef,
                 sample_mask=sample_mask,
             )
-            if getattr(config, "actor_loss_mode", "reinforce") == "enumerate":
+            if (
+                not skip_actor
+                and getattr(config, "actor_loss_mode", "reinforce") == "enumerate"
+            ):
                 (
                     actor_loss,
                     entropy,
@@ -344,7 +347,10 @@ def dreamer_step(
                     getattr(config, "actor_enum_loss_scale", 1.0)
                 )
                 metrics.actor_enum_margin.append(enum_margin.detach().cpu())
-            if getattr(config, "actor_loss_mode", "reinforce") == "mpc_teacher":
+            if (
+                not skip_actor
+                and getattr(config, "actor_loss_mode", "reinforce") == "mpc_teacher"
+            ):
                 (
                     actor_loss,
                     entropy,
@@ -382,8 +388,12 @@ def dreamer_step(
                 q_critic is not None
                 and q_critic_ema is not None
                 and (
-                    q_critic_scale > 0.0
-                    or getattr(config, "actor_loss_mode", "reinforce") == "qcritic"
+                    (not skip_critic and q_critic_scale > 0.0)
+                    or (
+                        not skip_actor
+                        and getattr(config, "actor_loss_mode", "reinforce")
+                        == "qcritic"
+                    )
                 )
             ):
                 num_bins = bins.numel()
@@ -426,8 +436,12 @@ def dreamer_step(
                     temperature=getattr(config, "q_actor_temperature", 0.25),
                     sample_mask=sample_mask,
                 )
-                critic_loss = critic_loss + q_critic_scale * q_loss
-                if getattr(config, "actor_loss_mode", "reinforce") == "qcritic":
+                if not skip_critic:
+                    critic_loss = critic_loss + q_critic_scale * q_loss
+                if (
+                    not skip_actor
+                    and getattr(config, "actor_loss_mode", "reinforce") == "qcritic"
+                ):
                     actor_loss = q_actor_loss
                     entropy = q_entropy
                 metrics.actor_q_margin.append(q_margin.detach().cpu())
@@ -537,6 +551,10 @@ def dreamer_step(
         and not skip_critic
         and len(metrics.replay_posterior_states) == effective_train_steps
     ):
+        if batch.future_returns is None:
+            raise RuntimeError(
+                "critic_real_return_scale requires replay future-return annotations"
+            )
         replay_posterior = torch.stack(metrics.replay_posterior_states, dim=1)
         replay_logits = critic(replay_posterior.detach())
         logits_flat = replay_logits.reshape(-1, replay_logits.size(-1))

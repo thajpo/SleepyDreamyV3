@@ -36,7 +36,7 @@ def load_world_model(checkpoint_path: Path, device: str):
     if cfg.environment_name != "CartPole-v1" or cfg.use_pixels:
         raise ValueError(f"{checkpoint_path} is not a state-only CartPole checkpoint")
     encoder, world_model = initialize_world_model(device, cfg, batch_size=1)
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
     encoder.load_state_dict(checkpoint["encoder"])
     world_model.load_state_dict(checkpoint["world_model"], strict=False)
     encoder.eval()
@@ -100,12 +100,17 @@ def trusted_remaining_return(
 
 def episode_split(episode_ids: torch.Tensor, test_fraction: float, seed: int):
     """Split whole episodes so temporally adjacent states cannot cross splits."""
+    if not 0.0 < test_fraction < 1.0:
+        raise ValueError("test_fraction must be between 0 and 1")
     unique = torch.unique(episode_ids).cpu().numpy()
     if len(unique) < 2:
         raise ValueError("critic supervision needs states from at least two episodes")
     rng = np.random.default_rng(seed)
     rng.shuffle(unique)
-    test_episodes = max(1, int(round(len(unique) * test_fraction)))
+    test_episodes = min(
+        len(unique) - 1,
+        max(1, int(round(len(unique) * test_fraction))),
+    )
     test_ids = torch.tensor(unique[:test_episodes], device=episode_ids.device)
     test_mask = torch.isin(episode_ids, test_ids)
     return (~test_mask).nonzero(as_tuple=False).squeeze(-1), test_mask.nonzero(

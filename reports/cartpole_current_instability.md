@@ -14,7 +14,9 @@ had produced repeated deterministic evaluations near the minimum episode
 length. This is an intentionally truncated screen, not a completed 10,000-step
 benchmark.
 
-The first clearly broken boundary is imagined action-value construction. The
+This initial diagnosis was superseded by the later critic-warmup and supervised
+critic probes below. At this stage, the first apparently broken boundary was
+imagined action-value construction. The
 learned latent and decoded one-step transition contain useful control
 information, but the continuation rollout creates a biased action preference
 and the critic bootstrap usually amplifies it in the wrong direction. The
