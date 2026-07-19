@@ -142,7 +142,7 @@ train:
   replay_burn_in: 8
 
   # Replay ratio gating (DreamerV3 paper)
-  replay_ratio: 1.0  # target train steps per env step
+  replay_ratio: 1.0  # replayed non-burn-in transitions per raw env frame
   action_repeat: 1   # env frames per action
   recent_fraction: 0.2  # fraction of batch from newest episodes
 

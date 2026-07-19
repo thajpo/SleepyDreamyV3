@@ -1,4 +1,8 @@
+from queue import Queue
+import time
+
 import numpy as np
+import pytest
 import torch
 
 from dreamer.runtime.replay_buffer import EpisodeReplayBuffer
@@ -97,3 +101,39 @@ def test_future_returns_are_not_stored_when_disabled():
 
     assert batch.future_returns is None
     assert replay.buffer[0][7] is None
+
+
+def test_background_collection_waits_for_trainer_step_budget():
+    queue = Queue()
+    replay = EpisodeReplayBuffer(
+        data_queue=queue,
+        max_episodes=10,
+        min_episodes=1,
+        sequence_length=2,
+        throttle_collection=True,
+    )
+    queue.put(_episode(3))
+    queue.put(_episode(4))
+    replay.start()
+    try:
+        assert replay.ready_event.wait(timeout=1.0)
+        assert replay.total_env_steps == 3
+
+        replay.allow_env_steps(3)
+        assert replay.total_env_steps == 3
+
+        replay.allow_env_steps(1)
+        for _ in range(100):
+            if replay.total_env_steps == 7:
+                break
+            time.sleep(0.01)
+        assert replay.total_env_steps == 7
+    finally:
+        replay.stop()
+
+
+def test_collection_budget_rejects_negative_increment():
+    replay = EpisodeReplayBuffer(throttle_collection=True)
+
+    with pytest.raises(ValueError, match="non-negative"):
+        replay.allow_env_steps(-1)

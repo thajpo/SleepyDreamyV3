@@ -52,6 +52,7 @@ class EpisodeReplayBuffer:
         sequence_length=25,
         gamma=0.997,
         compute_future_returns=False,
+        throttle_collection=False,
     ):
         """
         Args:
@@ -61,6 +62,8 @@ class EpisodeReplayBuffer:
             sequence_length: Fixed length of sampled subsequences
             gamma: Discount used for full-episode future return targets
             compute_future_returns: Whether to annotate stored episodes with returns
+            throttle_collection: Apply trainer-issued environment-step budgets after
+                the startup population is ready
         """
         self.data_queue = data_queue
         self.max_episodes = max_episodes
@@ -68,9 +71,11 @@ class EpisodeReplayBuffer:
         self.sequence_length = sequence_length
         self.gamma = float(gamma)
         self.compute_future_returns = bool(compute_future_returns)
+        self.throttle_collection = bool(throttle_collection)
 
         self.buffer = deque(maxlen=max_episodes)
         self.lock = threading.Lock()
+        self._budget_changed = threading.Condition(self.lock)
         self.ready_event = threading.Event()  # Signals when min_episodes reached
 
         self._stop = False
@@ -79,6 +84,7 @@ class EpisodeReplayBuffer:
         self._total_steps = 0  # For tracking average episode length
         self._recent_ep_lengths = deque(maxlen=100)  # Track recent episode lengths
         self._max_sequence_length = 256  # Cap for adaptive growth
+        self._env_step_budget: float | None = None
 
     def start(self):
         """Start background queue draining thread."""
@@ -89,7 +95,9 @@ class EpisodeReplayBuffer:
 
     def stop(self):
         """Stop background thread gracefully."""
-        self._stop = True
+        with self._budget_changed:
+            self._stop = True
+            self._budget_changed.notify_all()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
 
@@ -102,9 +110,38 @@ class EpisodeReplayBuffer:
             try:
                 # Short timeout so we can check stop flag regularly
                 episode = data_queue.get(timeout=0.1)
+                if not self._wait_for_collection_budget(episode):
+                    break
                 self.add_episode(episode)
             except Empty:
                 continue
+
+    def _wait_for_collection_budget(self, episode) -> bool:
+        """Wait until training has budgeted enough steps for one whole episode."""
+        if not self.throttle_collection:
+            return True
+
+        episode_steps = float(episode[6] if len(episode) > 6 else len(episode[1]))
+        with self._budget_changed:
+            while (
+                not self._stop
+                and self._env_step_budget is not None
+                and self._total_steps + episode_steps > self._env_step_budget
+            ):
+                self._budget_changed.wait(timeout=0.1)
+            return not self._stop
+
+    def allow_env_steps(self, steps: float) -> None:
+        """Increase the post-startup collection budget after a trainer update."""
+        if not self.throttle_collection:
+            return
+        if steps < 0:
+            raise ValueError("collection budget increment must be non-negative")
+        with self._budget_changed:
+            if self._env_step_budget is None:
+                return
+            self._env_step_budget += float(steps)
+            self._budget_changed.notify_all()
 
     def add_episode(self, episode):
         """Insert one complete episode into the replay buffer."""
@@ -134,6 +171,11 @@ class EpisodeReplayBuffer:
             self._total_steps += ep_len
             self._recent_ep_lengths.append(ep_len)
             if len(self.buffer) >= self.min_episodes and not self.ready_event.is_set():
+                if self.throttle_collection:
+                    # Startup is intentionally unrestricted. Once the minimum
+                    # population exists, every later episode must be paid for by
+                    # completed trainer updates.
+                    self._env_step_budget = float(self._total_steps)
                 self.ready_event.set()
                 print(
                     f"Replay buffer ready: {len(self.buffer)} episodes collected",

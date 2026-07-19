@@ -186,6 +186,7 @@ class WorldModelTrainer:
             sequence_length=config.sequence_length,
             gamma=config.gamma,
             compute_future_returns=config.critic_real_return_scale > 0.0,
+            throttle_collection=True,
         )
 
         self.batch_size = config.batch_size  # needed by get_data_from_buffer
@@ -277,6 +278,16 @@ class WorldModelTrainer:
                 * config.action_repeat
                 / denom
             )
+
+        # If no random-policy warmup remains, make learned weights available as
+        # soon as trainer initialization finishes. Waiting for the replay buffer
+        # to become ready lets fast collectors generate an avoidable random-data
+        # burst and lets very short runs finish before collectors see the model.
+        if (
+            self.train_step < self.config.max_train_steps
+            and self.train_step >= self.config.actor_warmup_steps
+        ):
+            self.send_models_to_collectors(self.train_step)
 
     def get_data_from_buffer(self) -> EnvData | None:
         """Sample batch from replay buffer. Returns EnvData or None if empty."""
@@ -372,15 +383,6 @@ class WorldModelTrainer:
 
     def train_models(self):
         """Main training loop: sample → forward → backward → log → eval → checkpoint."""
-        # Keep fresh runs in random-action collection during WM warmup. Once
-        # warmup is over, send policy weights so the collector switches to the
-        # learned actor. Resumed checkpoints beyond warmup still sync at startup.
-        if (
-            self.train_step < self.config.max_train_steps
-            and self.train_step >= self.config.actor_warmup_steps
-        ):
-            self.send_models_to_collectors(self.train_step)
-
         stop_reason = "max_train_steps"
         while self.train_step < self.config.max_train_steps:
             if self.prevent_stale_training():
@@ -399,6 +401,7 @@ class WorldModelTrainer:
                 self.device,
                 use_pixels=self.use_pixels,
                 target_size=self.config.encoder_cnn_target_size,
+                recent_fraction=self.config.recent_fraction,
             )
             B, T = batch.states.shape[:2]
 
@@ -541,6 +544,12 @@ class WorldModelTrainer:
 
             log_step = self.train_step
             self.train_step += 1
+            self.replay_buffer.allow_env_steps(
+                self.batch_size
+                * effective_train_steps
+                * self.config.action_repeat
+                / self.config.replay_ratio
+            )
 
             # Log metrics to MLflow
             log_step_metrics(
@@ -568,7 +577,10 @@ class WorldModelTrainer:
             if (
                 self.train_step < self.config.max_train_steps
                 and self.train_step >= self.config.actor_warmup_steps
-                and self.train_step % self.config.steps_per_weight_sync == 0
+                and (
+                    self.train_step == self.config.actor_warmup_steps
+                    or self.train_step % self.config.steps_per_weight_sync == 0
+                )
             ):
                 self.send_models_to_collectors(self.train_step)
 

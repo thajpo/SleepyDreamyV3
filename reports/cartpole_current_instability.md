@@ -689,6 +689,82 @@ The next isolated gate returns to corrected `actor_lr=3e-5` and changes only
 If it fails, do not add entropy tuning; inspect running return normalization and
 actor-gradient magnitudes before selecting another objective change.
 
+#### Advantage-normalization gate
+
+Disabling per-batch advantage z-scoring delayed policy confidence but did not
+stabilize behavior:
+
+| Seed | Step 3,100 | Step 3,200 | Step 3,300 | Step 3,400 | Step 3,500 | Best |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 331.95 | 366.25 | 353.55 | 192.50 | 144.75 | 366.25 |
+| 1 | 172.55 | 294.50 | 331.60 | 211.65 | 195.85 | 331.60 |
+
+The reference-conforming setting is still preferable, but the isolated causal
+hypothesis is rejected. Final random-policy-state probes still looked healthy:
+Q accuracy was `0.856`/`0.827`, Q correlation was `0.529`/`0.420`, and actor
+accuracy was `0.865`/`0.875`. Those aggregate metrics therefore did not explain
+the best-to-final collapse.
+
+### On-policy boundary probe
+
+A new deterministic probe follows each checkpoint's actor in the real
+simulator and evaluates both actions at every visited state using the same
+30-step real-dynamics counterfactual as the fixed random-state probe. It also
+computes the learned three-step model/critic Q values from the matching latent
+history. Best and final checkpoints were compared on the same 20 initial-state
+seeds:
+
+| Seed/checkpoint | Return | Actor vs real | Q vs real | Q/real corr | Actor vs Q |
+|---|---:|---:|---:|---:|---:|
+| 0 best, step 3,200 | 374.05 | 0.487 | 0.465 | 0.001 | 0.827 |
+| 0 final, step 3,500 | 147.90 | 0.468 | 0.437 | 0.046 | 0.969 |
+| 1 best, step 3,300 | 371.90 | 0.475 | 0.485 | 0.012 | 0.884 |
+| 1 final, step 3,500 | 204.05 | 0.484 | 0.378 | 0.107 | 0.878 |
+
+The old random-state result and the new on-policy result are not contradictory.
+They measure different state distributions. On states induced by the actor,
+learned Q is at or below chance and essentially uncorrelated with real action
+advantage. The actor nevertheless follows that Q preference `83%` to `97%` of
+the time. The first broken boundary is therefore no longer actor optimization:
+the model/value objective fails on the policy-induced distribution, and the
+actor increasingly follows it with high confidence.
+
+### Collection-to-learning ratio failure
+
+Runtime metrics explain how those on-policy states escape learning. The trainer
+enforced `replay_ratio` only when learning was ahead of collection. Nothing
+stopped a fast CartPole collector from running far ahead of the learner. The
+background replay thread continuously drained the bounded process queue into a
+512-episode circular buffer, so the queue's intended backpressure never reached
+the collector.
+
+For the two no-z-score runs, update 3,000 had already received 755k/784k raw
+environment steps. From update 3,000 to 3,100 alone, each collector added about
+60k steps and 2,600 episodes: more than five complete replay-buffer turnovers
+for only 100 learner updates. Across the full run, the configured ratio was 16
+replayed transitions per raw environment frame, while the measured ratio was
+only about `0.38`, roughly 42 times below target. Policy data was generated and
+evicted much faster than it could be learned, often under stale weight
+snapshots.
+
+The runtime now applies symmetric backpressure. Startup collection remains
+unrestricted until the minimum replay population exists. Afterwards, each
+completed learner update releases exactly
+`batch_size * non_burn_in_sequence_length * action_repeat / replay_ratio` raw
+environment frames of collection budget. The replay drain waits at whole-
+episode boundaries when that budget is exhausted, allowing the bounded queue to
+fill and block collectors. The authored `recent_fraction` is also now passed to
+sampling instead of silently using the helper's default.
+
+A 20-update multiprocess CPU smoke test completed with 187 admitted environment
+steps: exactly its 67-step startup population plus the 120-step learner-issued
+budget. The prior implementation could admit thousands during the same small
+run. The causal training gate is a fresh, uninterrupted two-seed replication of
+the no-z-score configuration. It changes only collection pacing. At 3,500
+updates it should admit roughly 26k post-startup frames instead of 1.1 million;
+success requires improved on-policy Q ranking and reduced best-to-final return
+collapse, not merely a strong random-state probe.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
