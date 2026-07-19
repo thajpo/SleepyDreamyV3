@@ -103,7 +103,7 @@ def test_future_returns_are_not_stored_when_disabled():
     assert replay.buffer[0][7] is None
 
 
-def test_background_collection_waits_for_trainer_step_budget():
+def test_background_collection_allows_one_episode_of_budget_debt():
     queue = Queue()
     replay = EpisodeReplayBuffer(
         data_queue=queue,
@@ -114,20 +114,32 @@ def test_background_collection_waits_for_trainer_step_budget():
     )
     queue.put(_episode(3))
     queue.put(_episode(4))
+    queue.put(_episode(2))
     replay.start()
     try:
         assert replay.ready_event.wait(timeout=1.0)
         assert replay.total_env_steps == 3
 
         replay.allow_env_steps(3)
-        assert replay.total_env_steps == 3
-
-        replay.allow_env_steps(1)
         for _ in range(100):
             if replay.total_env_steps == 7:
                 break
             time.sleep(0.01)
         assert replay.total_env_steps == 7
+
+        # The four-step episode exceeded the three-step allowance by one step.
+        # Collection remains stopped until learning first repays that debt and
+        # then supplies any positive budget for another complete episode.
+        replay.allow_env_steps(1)
+        time.sleep(0.05)
+        assert replay.total_env_steps == 7
+
+        replay.allow_env_steps(0.1)
+        for _ in range(100):
+            if replay.total_env_steps == 9:
+                break
+            time.sleep(0.01)
+        assert replay.total_env_steps == 9
     finally:
         replay.stop()
 

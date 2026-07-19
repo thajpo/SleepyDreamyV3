@@ -742,10 +742,11 @@ For the two no-z-score runs, update 3,000 had already received 755k/784k raw
 environment steps. From update 3,000 to 3,100 alone, each collector added about
 60k steps and 2,600 episodes: more than five complete replay-buffer turnovers
 for only 100 learner updates. Across the full run, the configured ratio was 16
-replayed transitions per raw environment frame, while the measured ratio was
-only about `0.38`, roughly 42 times below target. Policy data was generated and
-evicted much faster than it could be learned, often under stale weight
-snapshots.
+replayed non-burn-in transitions per raw environment frame, while the measured
+full-run ratio was only about `0.31`, roughly 52 times below target. During the
+critical updates 3,000 to 3,100 it was about `0.16`, 100 times below target.
+Policy data was generated and evicted much faster than it could be learned,
+often under stale weight snapshots.
 
 The runtime now applies symmetric backpressure. Startup collection remains
 unrestricted until the minimum replay population exists. Afterwards, each
@@ -758,12 +759,27 @@ sampling instead of silently using the helper's default.
 
 A 20-update multiprocess CPU smoke test completed with 187 admitted environment
 steps: exactly its 67-step startup population plus the 120-step learner-issued
-budget. The prior implementation could admit thousands during the same small
-run. The causal training gate is a fresh, uninterrupted two-seed replication of
-the no-z-score configuration. It changes only collection pacing. At 3,500
-updates it should admit roughly 26k post-startup frames instead of 1.1 million;
-success requires improved on-policy Q ranking and reduced best-to-final return
-collapse, not merely a strong random-state probe.
+budget in that run. In general, admitted collection can temporarily exceed the
+budget by at most one complete episode. The prior implementation could admit
+thousands during the same small run.
+
+The first two-seed training attempt exposed why that episode tolerance is
+necessary. Seed 1 completed with best return `451.70` at update 3,300 and final
+return `252.10`; seed 0 reached `457.75` at update 3,200 and then stopped making
+progress. Both maintained approximately `16` replayed non-burn-in transitions
+per admitted environment step. The stop was a pacing deadlock, not a model
+failure: the exact limiter required the next roughly 500-step episode to fit
+inside a smaller remaining allowance, while the learner could not perform
+enough additional updates on already admitted data to earn that allowance.
+
+The limiter therefore admits a whole episode whenever any positive collection
+budget exists, then records the overshoot as debt. Further episodes remain
+blocked until learner updates repay the debt. This preserves bounded
+backpressure without requiring indivisible episodes to exactly fit a fractional
+step allowance. Because the pacing implementation changed during the attempt,
+neither run is the final causal benchmark; both seeds must be restarted from
+the corrected commit. Success still requires improved on-policy Q ranking and
+reduced best-to-final return collapse, not merely a strong random-state probe.
 
 ## Reliability follow-up
 

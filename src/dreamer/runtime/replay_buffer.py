@@ -110,23 +110,22 @@ class EpisodeReplayBuffer:
             try:
                 # Short timeout so we can check stop flag regularly
                 episode = data_queue.get(timeout=0.1)
-                if not self._wait_for_collection_budget(episode):
+                if not self._wait_for_collection_budget():
                     break
                 self.add_episode(episode)
             except Empty:
                 continue
 
-    def _wait_for_collection_budget(self, episode) -> bool:
-        """Wait until training has budgeted enough steps for one whole episode."""
+    def _wait_for_collection_budget(self) -> bool:
+        """Wait until training has budgeted collection, allowing one-episode debt."""
         if not self.throttle_collection:
             return True
 
-        episode_steps = float(episode[6] if len(episode) > 6 else len(episode[1]))
         with self._budget_changed:
             while (
                 not self._stop
                 and self._env_step_budget is not None
-                and self._total_steps + episode_steps > self._env_step_budget
+                and self._total_steps >= self._env_step_budget
             ):
                 self._budget_changed.wait(timeout=0.1)
             return not self._stop
