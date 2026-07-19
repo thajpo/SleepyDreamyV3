@@ -34,3 +34,29 @@ def test_observe_state_keeps_gradients_across_timesteps():
     assert first_h.grad.norm().item() > 0.0
     assert first_z.grad is not None
     assert first_z.grad.norm().item() > 0.0
+
+
+def test_observe_returns_raw_posterior_logits_for_single_unimix_in_loss():
+    cfg = Config(
+        d_hidden=16,
+        num_latents=4,
+        rnn_n_blocks=1,
+        n_observations=4,
+        n_actions=2,
+        use_pixels=False,
+    )
+    encoder, world_model = initialize_world_model("cpu", cfg, batch_size=1)
+    captured = {}
+
+    def capture_posterior_head(_module, _inputs, output):
+        captured["raw"] = output.view(1, world_model.n_latents, world_model.n_classes)
+
+    handle = world_model.posterior_head.register_forward_hook(capture_posterior_head)
+    try:
+        tokens = encoder(torch.randn(1, cfg.n_observations))
+        output = world_model(tokens, torch.tensor([[1.0, 0.0]]))
+    finally:
+        handle.remove()
+
+    returned_posterior_logits = output[6]
+    assert torch.equal(returned_posterior_logits, captured["raw"])

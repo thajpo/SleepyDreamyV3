@@ -220,8 +220,10 @@ class RSSMWorldModel(nn.Module):
         posterior_logits = self.compute_posterior(h, tokens)
 
         # 3. Sample z_t from posterior using straight-through estimator
-        posterior_logits = unimix_logits(posterior_logits, unimix_ratio=0.01)
-        posterior_probs = F.softmax(posterior_logits, dim=-1)
+        posterior_logits_mixed = unimix_logits(
+            posterior_logits, unimix_ratio=0.01
+        )
+        posterior_probs = F.softmax(posterior_logits_mixed, dim=-1)
         posterior_dist = torch.distributions.Categorical(
             probs=posterior_probs, validate_args=False
         )
