@@ -339,6 +339,38 @@ positive, state-dependent, and materially above chance at that boundary, stop
 without training the actor; otherwise allow only a short actor canary and test
 whether actor/Q agreement improves rather than merely checking return.
 
+### Corrected critic-warmup gate
+
+Commit `c76d60d` decoupled critic training from actor warmup and was run to
+exactly 3,000 updates in
+`experiments/2026-07-18_213401_CartPole-v1/`. Checkpoint optimizer state
+confirmed zero actor updates and active critic updates. The collector remained
+on random actions for the entire run.
+
+The predeclared Q gate failed:
+
+| Measurement | Step 3,000 result |
+|---|---:|
+| Q vs real-rollout accuracy | 0.423 |
+| Q/real correlation | -0.137 |
+| Q preference histogram | action 0: 354; action 1: 158 |
+| Survival-only h3 correlation | 0.067 |
+| Critic-bootstrap h1 correlation | -0.157 |
+| Actor optimizer states | 0 |
+| Critic optimizer states | 6 |
+
+The corrected survival rollout was weakly positive, but the trained critic
+again flipped the local action ranking negative. Because the gate failed before
+policy learning, no actor continuation or additional seeds were run. The
+critic-warmup intervention was reverted in `c59899a`; the replay-indexing and
+single-discount correctness fixes remain.
+
+This isolates the next question: can the existing posterior latent and critic
+architecture fit a trusted real remaining-lifetime target at all? A frozen,
+supervised critic probe can answer that without another online training run. If
+it succeeds, the missing boundary is target grounding; if it fails, critic
+observability/capacity is the earlier problem.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
