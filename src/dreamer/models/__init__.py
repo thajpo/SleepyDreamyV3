@@ -17,6 +17,7 @@ from .dreaming import (
     calculate_lambda_returns,
     compute_enumerated_actor_loss,
     compute_mpc_teacher_actor_loss,
+    learned_continue_discount,
 )
 from .math_utils import symlog, symexp, resize_pixels_to_target, unimix_logits, twohot_encode
 from .optimizers import LaProp, adaptive_gradient_clipping

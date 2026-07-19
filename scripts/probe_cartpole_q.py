@@ -21,6 +21,7 @@ from dreamer.models import (
     initialize_critic,
     initialize_q_critic,
     initialize_world_model,
+    learned_continue_discount,
     symlog,
     symexp,
     unimix_logits,
@@ -425,6 +426,9 @@ def run_probe(
     decomposition_horizons = sorted(
         {max(1, int(horizon)) for horizon in (decomposition_horizons or [])}
     )
+    imagination_discount = learned_continue_discount(
+        cfg.gamma, bool(getattr(cfg, "contdisc", True))
+    )
 
     rows: list[dict] = []
     episode = 0
@@ -470,7 +474,7 @@ def run_probe(
                     cfg.n_actions,
                     cfg.d_hidden,
                     bins,
-                    cfg.gamma,
+                    imagination_discount,
                     model_horizon,
                     terminal_reward_penalty=terminal_reward_penalty,
                 )
@@ -491,7 +495,7 @@ def run_probe(
                             cfg.n_actions,
                             cfg.d_hidden,
                             bins,
-                            cfg.gamma,
+                            imagination_discount,
                             horizon,
                             terminal_reward_penalty=terminal_reward_penalty,
                             objective=objective,

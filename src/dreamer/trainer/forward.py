@@ -18,6 +18,7 @@ from ..models import (
     compute_mpc_teacher_actor_loss,
     dream_sequence,
     calculate_lambda_returns,
+    learned_continue_discount,
     symlog,
     twohot_encode,
     unimix_logits,
@@ -143,6 +144,9 @@ def dreamer_step(
     n_dream_steps = config.num_dream_steps
     d_hidden = config.d_hidden
     gamma = config.gamma
+    imagination_discount = learned_continue_discount(
+        gamma, bool(getattr(config, "contdisc", True))
+    )
     lam = config.lam
     actor_entropy_coef = config.actor_entropy_coef
     critic_ema_coef = config.critic_ema_regularizer
@@ -301,7 +305,7 @@ def dreamer_step(
                 dreamed_rewards,
                 dreamed_values,
                 dreamed_continues,
-                gamma,
+                imagination_discount,
                 lam,
                 n_dream_steps,
             )
@@ -323,7 +327,7 @@ def dreamer_step(
                 dreamed_actions_sampled,
                 bins,
                 return_scale,
-                gamma,
+                imagination_discount,
                 actor_entropy_coef=actor_entropy_coef,
                 normalize_advantages=config.normalize_advantages,
                 dreamed_values_logits_ema=dreamed_values_logits_ema,
@@ -345,7 +349,7 @@ def dreamer_step(
                     n_actions,
                     d_hidden,
                     bins,
-                    gamma,
+                    imagination_discount,
                     getattr(config, "actor_enum_horizon", 3),
                     actor_entropy_coef,
                     getattr(config, "actor_enum_temperature", 0.25),
@@ -373,7 +377,7 @@ def dreamer_step(
                     n_actions,
                     d_hidden,
                     bins,
-                    gamma,
+                    imagination_discount,
                     getattr(config, "mpc_teacher_horizon", 6),
                     actor_entropy_coef,
                     getattr(config, "mpc_teacher_temperature", 0.1),
@@ -416,7 +420,7 @@ def dreamer_step(
                         dreamed_rewards,
                         q_state_values,
                         dreamed_continues,
-                        gamma,
+                        imagination_discount,
                         lam,
                         n_dream_steps,
                     )
@@ -434,7 +438,7 @@ def dreamer_step(
                     dreamed_actions_logits,
                     dreamed_actions_sampled,
                     bins,
-                    gamma,
+                    imagination_discount,
                     actor_entropy_coef=actor_entropy_coef,
                     temperature=getattr(config, "q_actor_temperature", 0.25),
                     sample_mask=sample_mask,
@@ -496,9 +500,6 @@ def dreamer_step(
             train_start_t:
         ]
         replay_continues = replay_continues * (1.0 - replay_is_last.float())
-        replay_continues = replay_continues * (
-            1.0 - 1.0 / float(max(1, getattr(config, "horizon", 333)))
-        )
         replay_mask = batch.mask[:, train_start_t:].transpose(0, 1)
 
         replay_lambda_returns = calculate_replay_lambda_targets(
@@ -557,9 +558,6 @@ def dreamer_step(
             train_start_t:
         ]
         replay_continues = replay_continues * (1.0 - replay_is_last.float())
-        replay_continues = replay_continues * (
-            1.0 - 1.0 / float(max(1, getattr(config, "horizon", 333)))
-        )
         replay_mask = batch.mask[:, train_start_t:].transpose(0, 1)
 
         replay_mc_returns = calculate_replay_mc_targets(

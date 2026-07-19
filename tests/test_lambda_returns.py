@@ -1,6 +1,14 @@
 import torch
 
-from dreamer.models.dreaming import calculate_lambda_returns
+from dreamer.models.dreaming import (
+    calculate_lambda_returns,
+    learned_continue_discount,
+)
+
+
+def test_discount_is_not_applied_twice_to_discounted_continuation():
+    assert learned_continue_discount(gamma=0.997, contdisc=True) == 1.0
+    assert learned_continue_discount(gamma=0.997, contdisc=False) == 0.997
 
 
 def test_lambda_one_matches_discounted_monte_carlo_returns():

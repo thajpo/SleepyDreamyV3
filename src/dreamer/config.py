@@ -7,6 +7,7 @@ Design:
 - JSON snapshots are written to each run directory for reproducibility.
 """
 
+import math
 from dataclasses import dataclass, asdict
 from typing import Optional
 
@@ -216,6 +217,7 @@ def validate_config(cfg: Config) -> None:
         "rnn_n_blocks": cfg.rnn_n_blocks,
         "n_actions": cfg.n_actions,
         "num_dream_steps": cfg.num_dream_steps,
+        "horizon": cfg.horizon,
         "checkpoint_interval": cfg.checkpoint_interval,
         "num_collectors": cfg.num_collectors,
         "replay_buffer_size": cfg.replay_buffer_size,
@@ -239,6 +241,13 @@ def validate_config(cfg: Config) -> None:
         errors.append("recent_fraction must be between 0 and 1")
     if not 0.0 < cfg.gamma <= 1.0:
         errors.append("gamma must be in (0, 1]")
+    if cfg.contdisc and cfg.horizon > 0:
+        continuation_discount = 1.0 - 1.0 / float(cfg.horizon)
+        if not math.isclose(cfg.gamma, continuation_discount, abs_tol=1e-5):
+            errors.append(
+                "contdisc requires gamma to match 1 - 1 / horizon "
+                f"(got gamma={cfg.gamma!r}, horizon={cfg.horizon!r})"
+            )
     if not 0.0 <= cfg.lam <= 1.0:
         errors.append("lam must be between 0 and 1")
     if cfg.b_end <= cfg.b_start:

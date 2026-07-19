@@ -7,6 +7,16 @@ import torch.distributions as dist
 from .math_utils import unimix_logits
 
 
+def learned_continue_discount(gamma: float, contdisc: bool) -> float:
+    """Return the extra discount applied to learned continuation probabilities.
+
+    With ``contdisc``, the continuation head's training target already contains
+    the task discount, so multiplying by ``gamma`` again would discount every
+    imagined transition twice.
+    """
+    return 1.0 if contdisc else float(gamma)
+
+
 def dream_sequence(
     initial_h_z,
     initial_z_embed,

@@ -28,6 +28,10 @@ def test_hydra_yaml_defines_every_runtime_field():
         (replace(Config(), d_hidden=63), "divisible by 16"),
         (replace(Config(), actor_loss_mode="mystery"), "actor_loss_mode"),
         (
+            replace(Config(), gamma=0.95, horizon=333, contdisc=True),
+            "contdisc requires gamma",
+        ),
+        (
             replace(Config(), min_buffer_episodes=501),
             "min_buffer_episodes cannot exceed replay_buffer_size",
         ),

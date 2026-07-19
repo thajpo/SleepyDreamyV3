@@ -269,6 +269,46 @@ were on 2026-01-19 and 2026-01-20, before that path existed. That history is
 supporting evidence, not proof of causality; the aligned implementation still
 requires a fixed-seed canary under the current training stack.
 
+### Alignment-fix canary
+
+The aligned implementation in `baf5846` was run with seed 1 under the frozen
+current configuration. The run was stopped after the step-4,000 gate rather
+than spending its full 5,000-update budget:
+
+| Checkpoint | Deterministic return | Q/real correlation | Actor preference |
+|---|---:|---:|---|
+| Step 3,000, before actor/critic updates | 11.25 | -0.298 | near-uniform |
+| Step 4,000 | 9.15 | -0.010 | action 1: 512/512 |
+
+Replay alignment moved Q correlation toward zero, but did not create a useful
+positive ranking or prevent policy collapse. The change remains a correctness
+fix, while its isolated learning hypothesis is rejected. No additional seeds
+were launched.
+
+## Duplicate continuation discount audit
+
+The same audit found a second mismatch against the [reference DreamerV3
+implementation](https://github.com/danijar/dreamerv3/blob/main/dreamerv3/agent.py).
+With `contdisc: true`, this repository trains the continuation head
+on `(1 - terminal) * (1 - 1 / horizon)`. Its output therefore already contains
+the task discount. The imagination path nevertheless multiplied that learned
+probability by `gamma` again in lambda returns, actor/critic trajectory weights,
+enumerated action values, and Q-critic targets. Replay targets similarly
+multiplied real continuation flags by both the horizon discount and `gamma`.
+
+At the current values, every non-terminal transition was discounted by
+`0.997 * 0.997` rather than `0.997`. The reference implementation explicitly
+uses an additional multiplier of one when `contdisc` is enabled, and applies
+the horizon discount separately only when the continuation target does not
+contain it.
+
+The local implementation now follows that contract: learned discounted
+continuation is consumed with multiplier one, while undiscounted real replay
+continuation is consumed with `gamma`. A focused test fixes both modes at the
+API boundary. This is the next isolated canary; replay alignment remains in
+place because the reference replay equation independently confirms its
+successor-reward indexing.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
