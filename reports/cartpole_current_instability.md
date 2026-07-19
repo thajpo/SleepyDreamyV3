@@ -371,6 +371,38 @@ supervised critic probe can answer that without another online training run. If
 it succeeds, the missing boundary is target grounding; if it fails, critic
 observability/capacity is the earlier problem.
 
+### Supervised critic representability probe
+
+A frozen probe collected 4,096 states across 184 random-policy episodes from
+the corrected critic-warmup checkpoint. For every physical state it computed
+the exact discounted remaining lifetime under a deterministic constant-action
+policy. Whole episodes, not individual rows, were assigned to the train/test
+split; the held-out set contained 897 states. Fresh distributional critics with
+the repository's normal architecture were trained either on posterior latents
+or directly on symlogged physical state.
+
+| Target policy | Input | Held-out correlation | Held-out MAE |
+|---|---|---:|---:|
+| Always action 0 | Posterior latent | 0.645 | 2.45 |
+| Always action 0 | True state | 0.942 | 0.67 |
+| Always action 1 | Posterior latent | 0.387 | 3.00 |
+| Always action 1 | True state | 0.948 | 0.62 |
+
+The critic architecture easily fits the trusted target from true state, so
+output capacity and the distributional loss are not the primary limitation.
+The frozen posterior latent also supports meaningful held-out value prediction
+in both directions, although with a clear information gap and action asymmetry.
+That makes representation quality a secondary constraint rather than an excuse
+for the online critic's negative correlation.
+
+The first failed boundary is therefore target grounding: the online critic is
+trained mostly from imagined reward/continuation and its own bootstrapped
+annotations, even though a real return target is learnable from the same latent.
+The next intervention should deliver exact episode return-to-go with replay
+rows and train the critic against it at a controlled scale. It should not use
+the existing finite-window `critic_real_return_scale` target unchanged, because
+random subsequence boundaries truncate that target before the episode ends.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
