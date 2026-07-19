@@ -1,5 +1,8 @@
 """Custom optimizers for DreamerV3 training."""
 
+from collections.abc import Callable
+from typing import overload
+
 import torch
 from torch.optim import Optimizer
 
@@ -41,12 +44,19 @@ class LaProp(Optimizer):
         defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
         super().__init__(params, defaults)
 
+    @overload
+    def step(self, closure: None = None) -> None: ...
+
+    @overload
+    def step(self, closure: Callable[[], float]) -> float: ...
+
     @torch.no_grad()
-    def step(self, closure=None) -> None:
+    def step(self, closure: Callable[[], float] | None = None) -> float | None:
         """Perform a single optimization step."""
+        loss = None
         if closure is not None:
             with torch.enable_grad():
-                closure()
+                loss = closure()
 
         for group in self.param_groups:
             lr = group["lr"]
@@ -81,17 +91,23 @@ class LaProp(Optimizer):
                 # v_t = β₂ * v_{t-1} + (1-β₂) * g_t²
                 exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
 
-                # Compute normalized gradient (RMSProp-style)
-                # No bias correction on second moment — matches source's scale_by_rms
-                denom = exp_avg_sq.sqrt().add_(eps)
+                # Match DreamerV3's scale_by_rms: normalize by the bias-corrected
+                # second moment. Without this correction, the first normalized
+                # gradient is amplified by 1 / sqrt(1 - beta2).
+                bias_correction2 = 1 - beta2 ** state["step"]
+                denom = (exp_avg_sq / bias_correction2).sqrt().add_(eps)
                 normalized_grad = grad / denom
 
                 # Momentum on the normalized gradient (not the raw gradient)
                 # m_t = β₁ * m_{t-1} + (1-β₁) * g_norm
                 exp_avg.mul_(beta1).add_(normalized_grad, alpha=1 - beta1)
 
-                # Update parameters
-                p.add_(exp_avg, alpha=-lr)
+                # Match DreamerV3's scale_by_momentum: bias-correct the momentum
+                # accumulator before applying the learning rate.
+                bias_correction1 = 1 - beta1 ** state["step"]
+                p.add_(exp_avg, alpha=-(lr / bias_correction1))
+
+        return loss
 
 
 def adaptive_gradient_clipping(parameters, clip_factor: float = 0.3, eps: float = 1e-3):
