@@ -496,11 +496,15 @@ class WorldModelTrainer:
                     f"Non-finite WM loss at step {self.train_step}: {total_wm_loss.item()}"
                 )
 
-            total_wm_loss.backward()
             has_critic_grad = bool(total_critic_loss.requires_grad)
             has_actor_grad = bool(total_actor_loss.requires_grad)
+            # Replay value grounding intentionally shares the observed
+            # encoder/RSSM graph with the world-model loss. Traverse that graph
+            # once while accumulating gradients for both optimizers.
             if has_critic_grad:
-                total_critic_loss.backward()
+                (total_wm_loss + total_critic_loss).backward()
+            else:
+                total_wm_loss.backward()
             if has_actor_grad:
                 total_actor_loss.backward()
 

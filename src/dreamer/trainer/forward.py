@@ -40,6 +40,15 @@ class ForwardResult:
     last_lambda_returns: Optional[torch.Tensor] = None
 
 
+@dataclass
+class ReplayValueLoss:
+    """Replay value objective and its separately logged components."""
+
+    total: torch.Tensor
+    target: torch.Tensor
+    slow_regularizer: torch.Tensor
+
+
 def add_sequence_mean_auxiliary_loss(
     accumulated_loss: torch.Tensor,
     auxiliary_loss: torch.Tensor,
@@ -85,6 +94,68 @@ def calculate_replay_lambda_targets(
         num_targets,
         value_annotations=value_annotations,
         continues_are_logits=False,
+    )
+
+
+def compute_replay_value_loss(
+    replay_posterior: torch.Tensor,
+    replay_rewards: torch.Tensor,
+    replay_is_last: torch.Tensor,
+    replay_continues: torch.Tensor,
+    replay_mask: torch.Tensor,
+    replay_annotations: torch.Tensor,
+    critic,
+    critic_ema,
+    bins: torch.Tensor,
+    gamma: float,
+    lam: float,
+    slow_regularizer_scale: float,
+) -> ReplayValueLoss:
+    """Ground values on replay while preserving gradients into observed features.
+
+    Inputs use ``(batch, time, ...)`` for posterior features and ``(time,
+    batch)`` for the transition-aligned replay tensors. The final posterior is
+    bootstrap-only, so the trainable value prediction uses every state except
+    the last. Return targets and the slow-value distribution stay detached.
+    """
+    replay_lambda_returns = calculate_replay_lambda_targets(
+        replay_rewards,
+        replay_continues,
+        replay_annotations,
+        gamma,
+        lam,
+    ).transpose(0, 1)
+
+    replay_logits = critic(replay_posterior[:, :-1])
+    logits_flat = replay_logits.reshape(-1, replay_logits.size(-1))
+    targets_flat = replay_lambda_returns.detach().reshape(-1)
+    replay_pair_mask = (
+        replay_mask[:-1]
+        * replay_mask[1:]
+        * (1.0 - replay_is_last[:-1].float())
+    )
+    mask_flat = replay_pair_mask.transpose(0, 1).reshape(-1).float()
+
+    targets_twohot = twohot_encode(targets_flat, bins)
+    per_step_ce = -torch.sum(
+        targets_twohot * F.log_softmax(logits_flat, dim=-1), dim=-1
+    )
+    target_loss = (per_step_ce * mask_flat).sum() / (mask_flat.sum() + 1e-8)
+
+    with torch.no_grad():
+        replay_logits_ema = critic_ema(replay_posterior[:, :-1])
+    ema_logits_flat = replay_logits_ema.reshape(-1, replay_logits_ema.size(-1))
+    ema_probs = F.softmax(ema_logits_flat, dim=-1)
+    per_step_ema = -torch.sum(
+        ema_probs * F.log_softmax(logits_flat, dim=-1), dim=-1
+    )
+    slow_regularizer = (per_step_ema * mask_flat).sum() / (
+        mask_flat.sum() + 1e-8
+    )
+    return ReplayValueLoss(
+        total=target_loss + slow_regularizer_scale * slow_regularizer,
+        target=target_loss,
+        slow_regularizer=slow_regularizer,
     )
 
 
@@ -259,7 +330,12 @@ def dreamer_step(
             )
             metrics.replay_state_masks.append(sample_mask.detach())
 
-        if critic_replay_scale > 0.0 or critic_real_return_scale > 0.0:
+        if not skip_critic and critic_replay_scale > 0.0:
+            # The reference replay-value objective is representation-grounding:
+            # unlike imagined behavior losses, it updates observed features.
+            metrics.replay_posterior_states.append(h_z_joined)
+        elif not skip_critic and critic_real_return_scale > 0.0:
+            # The optional non-reference full-return objective remains head-only.
             metrics.replay_posterior_states.append(h_z_joined.detach())
 
         for key in metrics.wm_components:
@@ -542,49 +618,25 @@ def dreamer_step(
         replay_continues = replay_continues * (1.0 - replay_is_last.float())
         replay_mask = batch.mask[:, train_start_t:].transpose(0, 1)
 
-        replay_lambda_returns = calculate_replay_lambda_targets(
+        replay_value_loss = compute_replay_value_loss(
+            replay_posterior,
             replay_rewards,
+            replay_is_last,
             replay_continues,
+            replay_mask,
             replay_annotations,
+            critic,
+            critic_ema,
+            bins,
             gamma,
             lam,
-        ).transpose(0, 1)
-
-        replay_logits = critic(replay_posterior[:, :-1].detach())
-        logits_flat = replay_logits.reshape(-1, replay_logits.size(-1))
-        targets_flat = replay_lambda_returns.detach().reshape(-1)
-        replay_pair_mask = (
-            replay_mask[:-1]
-            * replay_mask[1:]
-            * (1.0 - replay_is_last[:-1].float())
+            config.critic_ema_regularizer,
         )
-        mask_flat = replay_pair_mask.transpose(0, 1).reshape(-1).float()
-
-        targets_twohot = twohot_encode(targets_flat, bins)
-        per_step_ce = -torch.sum(
-            targets_twohot * F.log_softmax(logits_flat, dim=-1), dim=-1
-        )
-        metrics.replay_loss = (per_step_ce * mask_flat).sum() / (
-            mask_flat.sum() + 1e-8
-        )
-
-        with torch.no_grad():
-            replay_logits_ema = critic_ema(replay_posterior[:, :-1].detach())
-        ema_logits_flat = replay_logits_ema.reshape(-1, replay_logits_ema.size(-1))
-        ema_probs = F.softmax(ema_logits_flat, dim=-1)
-        per_step_ema = -torch.sum(
-            ema_probs * F.log_softmax(logits_flat, dim=-1), dim=-1
-        )
-        metrics.replay_ema_reg = (per_step_ema * mask_flat).sum() / (
-            mask_flat.sum() + 1e-8
-        )
-
-        replay_loss_total = (
-            metrics.replay_loss + config.critic_ema_regularizer * metrics.replay_ema_reg
-        )
+        metrics.replay_loss = replay_value_loss.target
+        metrics.replay_ema_reg = replay_value_loss.slow_regularizer
         total_critic_loss = add_sequence_mean_auxiliary_loss(
             total_critic_loss,
-            replay_loss_total,
+            replay_value_loss.total,
             critic_replay_scale,
             effective_train_steps,
         )
