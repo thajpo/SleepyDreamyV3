@@ -119,7 +119,6 @@ class Config:
 
     # ===== Training: WM-AC ratio =====
     wm_ac_ratio: int = 1
-    actor_warmup_steps: int = 0
 
     # ===== Training: LR schedule =====
     lr_cosine_decay: bool = False

@@ -279,14 +279,10 @@ class WorldModelTrainer:
                 / denom
             )
 
-        # If no random-policy warmup remains, make learned weights available as
-        # soon as trainer initialization finishes. Waiting for the replay buffer
-        # to become ready lets fast collectors generate an avoidable random-data
-        # burst and lets very short runs finish before collectors see the model.
-        if (
-            self.train_step < self.config.max_train_steps
-            and self.train_step >= self.config.actor_warmup_steps
-        ):
+        # Make learned weights available as soon as trainer initialization
+        # finishes. Every trainable component is optimized from the first
+        # learner update; replay readiness remains the startup data gate.
+        if self.train_step < self.config.max_train_steps:
             self.send_models_to_collectors(self.train_step)
 
     def get_data_from_buffer(self) -> EnvData | None:
@@ -450,12 +446,10 @@ class WorldModelTrainer:
             all_tokens = self.encoder(encoder_input)  # (B*T, token_dim)
             all_tokens = all_tokens.view(B, T, -1)
 
-            # Apply the WM:AC ratio to both heads, but freeze only the actor
-            # during actor warmup. This gives the critic time to learn from the
-            # random policy before its estimates can change that policy.
-            in_actor_warmup = self.train_step < self.config.actor_warmup_steps
+            # Apply the WM:AC ratio to both actor and critic. When an AC update
+            # is scheduled, both heads train from the first learner update.
             skip_ac_batch = self.should_skip_ac_update()
-            skip_actor_batch = in_actor_warmup or skip_ac_batch
+            skip_actor_batch = skip_ac_batch
             skip_critic_batch = skip_ac_batch
 
             # Forward pass: RSSM rollout + dreaming + replay grounding
@@ -576,11 +570,7 @@ class WorldModelTrainer:
             # Send models to collector periodically
             if (
                 self.train_step < self.config.max_train_steps
-                and self.train_step >= self.config.actor_warmup_steps
-                and (
-                    self.train_step == self.config.actor_warmup_steps
-                    or self.train_step % self.config.steps_per_weight_sync == 0
-                )
+                and self.train_step % self.config.steps_per_weight_sync == 0
             ):
                 self.send_models_to_collectors(self.train_step)
 

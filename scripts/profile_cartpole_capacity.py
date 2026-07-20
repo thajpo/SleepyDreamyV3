@@ -111,7 +111,6 @@ def training_command(seed: int, steps: int) -> list[str]:
         "train.replay_buffer_size=1000",
         "train.min_buffer_episodes=16",
         "train.num_collectors=1",
-        "train.actor_warmup_steps=0",
         "train.replay_ratio=1.0",
         "train.eval_every=0",
     ]

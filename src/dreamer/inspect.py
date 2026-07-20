@@ -52,6 +52,9 @@ def infer_config_from_checkpoint(
     cfg_path = run_dir / "config.json"
     if cfg_path.exists():
         data = json.loads(cfg_path.read_text())
+        # Historical runs may contain this retired training-only option. It
+        # never affects model construction, so inspection can safely ignore it.
+        data.pop("actor_warmup_steps", None)
         return Config(**data)
 
     return atari100k_pong_config()

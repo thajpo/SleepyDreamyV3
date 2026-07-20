@@ -111,9 +111,8 @@ train:
 
   # Training phases
   wm_ac_ratio: 1  # WM updates per AC update (e.g., 4 = train WM 4x more than AC)
-  actor_warmup_steps: 0  # random collection; critic may train while actor is frozen
 
-  # Cosine LR decay (applies to all optimizers after warmup)
+  # Cosine LR decay (applies to all optimizers over training)
   lr_cosine_decay: false
   lr_cosine_min_factor: 0.1  # Decay to 10% of base LR
 

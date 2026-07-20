@@ -85,15 +85,9 @@ def test_each_collector_receives_the_initial_model_update(tmp_path):
     assert "model_weights_published version=1" not in output
 
 
-def test_actor_warmup_trains_critic_without_updating_actor(tmp_path):
-    output_dir = tmp_path / "critic_warmup"
-    result = _run_training(
-        output_dir,
-        extra_overrides=[
-            "train.actor_warmup_steps=2",
-            "train.critic_real_return_scale=1.0",
-        ],
-    )
+def test_actor_and_critic_train_from_first_update(tmp_path):
+    output_dir = tmp_path / "joint_training"
+    result = _run_training(output_dir)
 
     assert result.returncode == 0, result.stdout + result.stderr
     checkpoint = torch.load(
@@ -102,7 +96,7 @@ def test_actor_warmup_trains_critic_without_updating_actor(tmp_path):
         weights_only=False,
     )
 
-    assert checkpoint["actor_optimizer"]["state"] == {}
+    assert checkpoint["actor_optimizer"]["state"] != {}
     assert checkpoint["critic_optimizer"]["state"] != {}
 
 

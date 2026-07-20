@@ -252,7 +252,7 @@ Current limitations:
 - Ensure GPU is being utilized (check with `nvidia-smi` or `rocm-smi`)
 
 **Policy doesn't learn**:
-- Increase `train.actor_warmup_steps` to give the world model more time
+- Inspect actor entropy and on-policy action-value agreement before changing the objective
 - Try different `train.actor_lr` values (sweep recommended)
 
 ## References
