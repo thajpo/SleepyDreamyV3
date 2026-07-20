@@ -65,8 +65,15 @@ uv run --extra cpu dreamer-train \
   integration coverage.
 - Do not start broad sweeps without a hypothesis, primary metric, fixed seed
   set, sample budget, and stop rule.
-- Record research conclusions in a concise report or manifest rather than
-  relying only on chronological notes.
+- Maintain a contemporaneous research ledger in the relevant report. Before a
+  run, record its hypothesis, causal variable, exact configuration, source
+  commit, seeds, budget, metrics, and stop rule. Afterward, record every run ID
+  and disposition, observed results, interpretation, rejected hypotheses,
+  limitations, and the evidence-selected next decision. Include failed and
+  interrupted runs; do not reconstruct the record only after experiments end.
+- Keep conclusions concise enough to review, but preserve the chain from
+  question to evidence to decision so the investigation remains understandable
+  after the immediate context is gone.
 
 ## Validation Order
 
