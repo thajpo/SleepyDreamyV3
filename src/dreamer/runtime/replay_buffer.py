@@ -40,6 +40,7 @@ class EpisodeReplayBuffer:
     Design:
     - Background thread continuously drains the mp.Queue (never blocks collectors)
     - Circular buffer stores up to max_episodes (FIFO eviction)
+    - Samples uniformly over valid sequence starts, not uniformly over episodes
     - sample() returns fixed-length subsequences (pads short episodes)
     - Blocks only on startup until min_episodes collected
     """
@@ -263,6 +264,8 @@ class EpisodeReplayBuffer:
 
         Blocks until buffer has min_episodes, then returns instantly.
         Samples recent_fraction of batch from newest episodes (recency bias).
+        Within each pool, episode probability is proportional to the number of
+        valid starts so every stored training window is equally likely.
 
         Args:
             batch_size: Number of subsequences to sample
@@ -284,21 +287,28 @@ class EpisodeReplayBuffer:
             # Recent episodes: newest 20% of buffer (or at least 1)
             recent_count = max(1, buffer_len // 5)
             recent_start = buffer_len - recent_count
+            start_counts = [
+                max(1, len(episode[1]) - self.sequence_length + 1)
+                for episode in self.buffer
+            ]
 
-            # Sample indices: n_recent from recent, n_uniform from all
-            if recent_count < n_recent:
+            # Sampling with replacement matches uniform selection over valid
+            # starts: the same long episode may supply multiple subsequences.
+            if n_recent:
                 recent_indices = random.choices(
-                    range(recent_start, buffer_len), k=n_recent
+                    range(recent_start, buffer_len),
+                    weights=start_counts[recent_start:],
+                    k=n_recent,
                 )
             else:
-                recent_indices = random.sample(
-                    range(recent_start, buffer_len), k=n_recent
-                )
+                recent_indices = []
 
-            if buffer_len < n_uniform:
-                uniform_indices = random.choices(range(buffer_len), k=n_uniform)
+            if n_uniform:
+                uniform_indices = random.choices(
+                    range(buffer_len), weights=start_counts, k=n_uniform
+                )
             else:
-                uniform_indices = random.sample(range(buffer_len), k=n_uniform)
+                uniform_indices = []
 
             indices = recent_indices + uniform_indices
 

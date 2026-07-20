@@ -91,6 +91,30 @@ def test_recent_only_sampling_uses_newest_episode():
     assert all(np.allclose(sample[1], 4.0) for sample in samples)
 
 
+def test_episode_selection_is_weighted_by_valid_sequence_starts(monkeypatch):
+    replay = EpisodeReplayBuffer(
+        data_queue=None, max_episodes=20, min_episodes=1, sequence_length=3
+    )
+    for _ in range(9):
+        replay.add_episode(_episode(3, marker=0.0))
+    replay.add_episode(_episode(6, marker=1.0))
+    calls = []
+
+    def choose(population, *, weights, k):
+        calls.append((list(population), list(weights), k))
+        return [population[-1]] * k
+
+    monkeypatch.setattr("dreamer.runtime.replay_buffer.random.choices", choose)
+
+    samples = replay.sample(batch_size=4, recent_fraction=0.5)
+
+    assert calls == [
+        ([8, 9], [1, 4], 2),
+        (list(range(10)), [1] * 9 + [4], 2),
+    ]
+    assert all(np.allclose(sample[1], 1.0) for sample in samples)
+
+
 def test_future_returns_are_not_stored_when_disabled():
     replay = EpisodeReplayBuffer(
         data_queue=None, max_episodes=10, min_episodes=1, sequence_length=2
