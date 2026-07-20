@@ -2,16 +2,58 @@
 
 Generated non-destructively from run manifests and config snapshots. No checkpoint contents were loaded.
 
-- Indexed runs: 37
-- Indexed size: 828.0 MiB
-- Manifest / legacy: 0 / 37
-- Exact-comparison eligible: 0
-- Dispositions: {'incomplete': 11, 'review': 26}
+- Indexed runs: 79
+- Indexed size: 4.6 GiB
+- Manifest / legacy: 41 / 38
+- Exact-comparison eligible: 28
+- Dispositions: {'incomplete': 12, 'keep': 29, 'review': 38}
 
 A blank comparison key means the run lacks the provenance or protocol needed for an exact comparison. Legacy runs are retained for review.
 
 | Run | Status | Disposition | Comparable | Checkpoints | Size |
 |---|---|---|---:|---:|---:|
+| `experiments/2026-07-18_210719_CartPole-v1` | interrupted | review | no | 5 | 77.6 MiB |
+| `experiments/2026-07-18_212048_CartPole-v1` | interrupted | review | no | 5 | 77.6 MiB |
+| `experiments/2026-07-18_213401_CartPole-v1` | completed | keep | yes | 5 | 81.2 MiB |
+| `experiments/2026-07-19_144821_CartPole-v1` | completed | keep | yes | 5 | 81.2 MiB |
+| `experiments/2026-07-19_151553_CartPole-v1` | completed | keep | yes | 5 | 81.2 MiB |
+| `experiments/2026-07-19_152823_CartPole-v1` | completed | keep | yes | 5 | 81.2 MiB |
+| `experiments/2026-07-19_154109_CartPole-v1` | completed | keep | yes | 5 | 81.2 MiB |
+| `experiments/2026-07-19_155514_CartPole-v1` | incomplete | incomplete | no | 0 | 10.4 KiB |
+| `experiments/2026-07-19_155543_CartPole-v1` | completed | keep | yes | 7 | 119.8 MiB |
+| `experiments/2026-07-19_160309_CartPole-v1` | completed | keep | yes | 5 | 81.2 MiB |
+| `experiments/2026-07-19_161541_CartPole-v1` | completed | keep | yes | 7 | 119.8 MiB |
+| `experiments/2026-07-19_cartpole_budgeted_no_advnorm_seed0_3500` | interrupted | review | no | 7 | 114.6 MiB |
+| `experiments/2026-07-19_cartpole_budgeted_no_advnorm_seed1_3500` | completed | keep | yes | 9 | 148.8 MiB |
+| `experiments/2026-07-19_cartpole_budgeted_v2_no_advnorm_seed0_3500` | interrupted | review | no | 0 | 22.0 KiB |
+| `experiments/2026-07-19_cartpole_budgeted_v2_no_advnorm_seed1_3500` | interrupted | review | no | 0 | 21.0 KiB |
+| `experiments/2026-07-19_cartpole_budgeted_v3_no_advnorm_seed0_3500` | completed | keep | yes | 9 | 161.3 MiB |
+| `experiments/2026-07-19_cartpole_budgeted_v3_no_advnorm_seed1_3500` | completed | keep | yes | 9 | 165.8 MiB |
+| `experiments/2026-07-19_cartpole_laprop_actor6e5_seed0_3500` | completed | keep | yes | 9 | 148.8 MiB |
+| `experiments/2026-07-19_cartpole_laprop_actor6e5_seed1_3500` | completed | keep | yes | 9 | 148.8 MiB |
+| `experiments/2026-07-19_cartpole_laprop_corrected_seed0_3500` | completed | keep | yes | 9 | 148.8 MiB |
+| `experiments/2026-07-19_cartpole_laprop_corrected_seed1_3500` | completed | keep | yes | 9 | 148.8 MiB |
+| `experiments/2026-07-19_cartpole_no_batch_advnorm_seed0_3500` | completed | keep | yes | 9 | 148.8 MiB |
+| `experiments/2026-07-19_cartpole_no_batch_advnorm_seed1_3500` | completed | keep | yes | 9 | 148.8 MiB |
+| `experiments/2026-07-19_cartpole_rssm_continuous_seed0_3500` | completed | keep | yes | 9 | 148.8 MiB |
+| `experiments/2026-07-19_cartpole_rssm_continuous_seed1_3500` | completed | keep | yes | 9 | 148.8 MiB |
+| `experiments/2026-07-19_cartpole_rssm_continuous_seed2_3500` | interrupted | review | no | 1 | 16.2 MiB |
+| `experiments/2026-07-19_cartpole_rssm_corrected_seed0_3000` | completed | keep | yes | 5 | 81.2 MiB |
+| `experiments/2026-07-19_cartpole_rssm_corrected_seed0_actor3500` | completed | keep | yes | 7 | 119.8 MiB |
+| `experiments/2026-07-19_cartpole_rssm_corrected_seed2_3000` | completed | keep | yes | 5 | 81.2 MiB |
+| `experiments/2026-07-19_cartpole_rssm_corrected_seed2_actor3500` | completed | keep | yes | 7 | 119.8 MiB |
+| `experiments/2026-07-20_cartpole_joint_window_weighted_no_advnorm_seed0_3500` | completed | keep | yes | 9 | 154.2 MiB |
+| `experiments/2026-07-20_cartpole_joint_window_weighted_no_advnorm_seed1_3500` | completed | keep | yes | 9 | 154.2 MiB |
+| `experiments/2026-07-20_cartpole_window_weighted_no_advnorm_seed0_3500` | completed | keep | yes | 9 | 148.8 MiB |
+| `experiments/2026-07-20_cartpole_window_weighted_no_advnorm_seed1_3500` | completed | keep | yes | 9 | 148.8 MiB |
+| `runs/cartpole_collection_budget_smoke` | completed | keep | no | 1 | 5.2 MiB |
+| `runs/cartpole_critic_warmup_canary_99e543a_seed1_3200` | completed | keep | yes | 3 | 50.1 MiB |
+| `runs/cartpole_current_10k_12e748b/seed_0` | interrupted | review | no | 2 | 32.2 MiB |
+| `runs/cartpole_current_10k_12e748b/seed_1` | interrupted | review | no | 1 | 15.1 MiB |
+| `runs/cartpole_current_10k_12e748b/seed_2` | interrupted | review | no | 1 | 15.1 MiB |
+| `runs/cartpole_current_10k_12e748b_r2/seed_0` | interrupted | review | no | 2 | 32.4 MiB |
+| `runs/cartpole_current_10k_12e748b_r2/seed_1` | interrupted | review | no | 2 | 32.4 MiB |
+| `runs/cartpole_current_10k_12e748b_r2/seed_2` | interrupted | review | no | 2 | 32.5 MiB |
 | `runs/control_ablation/cartpole_enum_h1_warm3k_5k` | legacy-complete | review | no | 1 | 15.8 MiB |
 | `runs/control_ablation/cartpole_enum_h3_temp002_warm3k_5k` | legacy-complete | review | no | 1 | 15.8 MiB |
 | `runs/control_ablation/cartpole_enum_h3_warm3k_5k` | legacy-complete | review | no | 1 | 15.8 MiB |

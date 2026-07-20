@@ -872,6 +872,81 @@ the model most needs after the actor improves. The next isolated fix should
 sample episodes in proportion to their number of valid sequence starts while
 preserving the existing recent/uniform mixture and collection budget.
 
+### Sequence-start sampling result
+
+Commit `b4cd42c` changed episode selection probability to the number of valid
+sequence starts, independently within the recent and global pools. Sampling is
+with replacement so a long episode can contribute multiple windows to one
+batch. The focused contract uses three- and six-row episodes with sequence
+length three and verifies weights of one and four. The full suite passed with
+78 tests, along with compile, scoped type checking, and a 20-update,
+two-collector CPU smoke run.
+
+The frozen warmup benchmark completed from that commit:
+
+| Seed | Manifest frames | Best return (step) | Final return |
+|---:|---:|---:|---:|
+| 0 | 21,338 | 347.05 (3,500) | 347.05 |
+| 1 | 21,464 | 156.80 (3,300) | 136.55 |
+
+Compared with the episode-uniform paced results of `338.70` and `398.15`, this
+does not support sequence-start weighting as a sufficient learning fix: seed 0
+was essentially unchanged and seed 1 was much worse. The implementation is
+still retained because it gives every stored training window equal base
+probability and matches the reference replay semantics. Its causal performance
+hypothesis is rejected rather than promoted from a single favorable seed.
+
+### Actor-warmup removal result
+
+The warmup contract also exposed a poor training abstraction. With
+`actor_warmup_steps=3000` in a 3,500-update run, the collector remained random
+and the actor optimizer remained inactive for 86% of the budget. The critic was
+trained against dreams from a frozen randomly initialized actor, followed by an
+abrupt policy/distribution change and only 500 joint updates. Commit `05b2d96`
+removed this option from authored and runtime configuration. Actor and critic
+now train together from the first scheduled AC update. Historical config
+snapshots containing the retired field remain inspectable because the field
+does not affect model construction. The full suite passed with 79 tests,
+compile and scoped type checks passed, and a two-collector CPU smoke run
+completed normally.
+
+Two fresh seeds then ran the same sequence-weighted, paced, no-advantage-
+normalization contract with joint training from update zero:
+
+| Seed | Manifest frames | Best return (step) | Final return | Probe best/final |
+|---:|---:|---:|---:|---:|
+| 0 | 21,446 | 500.00 (2,600) | 241.60 | 500.0 / 239.0 |
+| 1 | 21,554 | 275.25 (2,800) | 169.70 | 204.1 / 184.2 |
+
+Seed 0 first exceeded 200 at update 1,500 and achieved deterministic 500 at
+updates 2,600 and 2,800, before regressing. This is substantially earlier than
+the old update-3,000 actor release and justifies removing the freeze. Seed 1
+learned less and both final checkpoints remained below their best checkpoint,
+so joint training improves time-to-learning but does not solve stability.
+
+The deterministic on-policy decomposition localizes the best-to-final change:
+
+| Seed/checkpoint | Probe return | Actor/real balanced | Q/real balanced | Q/real corr. | Actor/Q | One-step MSE | Cart-position MSE |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0 best, step 2,600 | 500.0 | 0.651 | 0.656 | 0.162 | 0.764 | 0.172 | 0.079 |
+| 0 final, step 3,500 | 239.0 | 0.556 | 0.564 | -0.019 | 0.974 | 0.847 | 3.141 |
+| 1 best, step 2,800 | 204.1 | 0.480 | 0.416 | -0.123 | 0.901 | 0.116 | 0.304 |
+| 1 final, step 3,500 | 184.2 | 0.518 | 0.562 | 0.013 | 0.869 | 0.120 | 0.294 |
+
+For seed 0, the solved checkpoint proves that the implementation can cross the
+model-to-value-to-actor boundary. The later failure is not constant-action
+deployment: the final action histogram remains balanced. Instead, one-step
+cart-position MSE grows by about 40 times, posterior-conditioned position MSE
+also grows from `0.102` to `3.156`, three-step Q correlation falls to zero, and
+the actor follows that degraded Q preference `97.4%` of the time. Seed 1 never
+develops robust on-policy Q ordering in the first place.
+
+The next bounded investigation should therefore be offline and checkpoint-
+local: measure replay cart-position coverage and per-state reconstruction/Q
+metrics across seed 0 checkpoints 2,500 through 3,500 to identify the first
+update at which position representation degrades. Do not change another loss
+or return to Pong until that transition is characterized.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
