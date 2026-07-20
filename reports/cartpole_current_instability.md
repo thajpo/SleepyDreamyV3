@@ -1259,6 +1259,96 @@ gradient reachability would make the result uninterpretable.
   Treat a behavioral miss as a rejected causal fix; only a clear pass justifies
   replication on seeds 1 and 2.
 
+#### Replay-value representation-gradient result: rejected
+
+The intervention was implemented in `c83c93c`. It extracted the replay-value
+calculation into a focused helper, connected its online critic input to observed
+post-burn-in features, and combined world-model and critic losses into one
+shared-graph backward pass. Replay targets, the slow critic, imagined
+trajectories, and the optional full-return path remained detached. A focused
+test verified gradients in both the critic and non-bootstrap replay features,
+zero gradient in the final bootstrap-only feature, and no gradients in target
+annotations or slow-critic parameters.
+
+Mechanical validation passed: 90 tests, bytecode compilation, the supported
+scoped type gate, a non-dry one-update CPU process smoke, and a 20-update,
+two-collector dry process run. The non-dry smoke used manifest
+`675b8556b6234ca1a68633e7a77a8712` and MLflow run
+`1360e6f518554d0f8a6c1b698eac536e`. Directly expanding Pyright to all of
+`forward.py` and `core.py` still exposed their pre-existing dynamic-model and
+possibly-unbound errors; this experiment did not claim a broader clean type
+baseline.
+
+The frozen seed-0 experiment then completed normally from clean commit
+`c83c93c`:
+
+- output: `experiments/2026-07-20_cartpole_repval_grad_seed0_3500/`
+- manifest: `5e8f4dc5a71f4358acc95da334fc8a61`
+- MLflow run: `cbc7767bc49b421a89852ba38e141f0e`
+- budget: 3,500 learner updates and 21,571 environment frames
+- elapsed time: 952.09 seconds
+- best: 500.0 at update 2,200; final: 399.6; best-to-final gap: 100.4
+
+The behavioral gate failed decisively. After scoring 500.0 at updates 2,200 and
+2,300, the evaluations at updates 2,400--2,800 were respectively 14.2, 35.05,
+13.05, 15.5, and 11.75. Performance later recovered to 343.25 at update 3,000,
+fell again to 160.3 at 3,300, and recovered to 399.6 at 3,500. This is severe
+oscillation rather than permanent erasure, but it violates all three stability
+criteria: post-solve minimum at least 300, final at least 450, and gap at most
+50. Seeds 1 and 2 were therefore not run.
+
+Prospective replay telemetry again rules out boundary starvation during this
+collapse:
+
+| Update interval | Evaluation mean (range) | Replay fraction abs(x) >= 1 | Replay abs(x) p90 | Decoder x MSE | Actor entropy |
+|---|---:|---:|---:|---:|---:|
+| 0--2,199 | 88.06 (9.25--316.5) | 0.045 | 0.515 | 0.109 | 0.524 |
+| 2,200--2,399 | 500.0 (500.0--500.0) | 0.164 | 1.374 | 0.105 | 0.529 |
+| 2,400--2,999 | 34.67 (11.75--118.45) | 0.191 | 1.425 | 0.158 | 0.477 |
+| 3,000--3,500 | 243.37 (160.3--399.6) | 0.197 | 1.449 | 0.153 | 0.468 |
+
+The collapse interval contains slightly *more* boundary data than the solved
+interval. Decoder x error rises by about 50%, but actor entropy remains
+moderate, so this is neither missing boundary experience nor a constant-action
+policy collapse.
+
+The preregistered best/final on-policy probe is in
+`experiments/2026-07-20_cartpole_repval_grad_seed0_on_policy_probe/`:
+
+| Run/checkpoint | Probe return | Actor/real balanced | Q/real balanced | Q/real correlation | Actor/Q | One-step MSE | Prior x MSE | Prior x-dot MSE |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Detached baseline, best 2,400 | 500.0 | 0.598 | 0.655 | 0.008 | 0.923 | 0.166 | 0.423 | 0.206 |
+| Detached baseline, final 3,500 | 378.6 | 0.510 | 0.496 | 0.073 | 0.914 | 0.199 | 0.161 | 0.566 |
+| Representation gradient, best 2,200 | 500.0 | 0.577 | 0.561 | -0.034 | 0.723 | 0.502 | 0.098 | 1.403 |
+| Representation gradient, final 3,500 | 382.25 | 0.551 | 0.551 | 0.058 | 0.880 | 0.102 | 0.084 | 0.310 |
+
+The final checkpoint technically clears the three boundary thresholds, but the
+behavioral gate dominates: a fix that improves final action-ranking metrics
+slightly while permitting a 500-to-11.75 collapse is not a stable solution.
+At the solved checkpoint, one-step prediction error triples and prior
+cart-velocity error is almost seven times the detached baseline. By the final
+checkpoint those errors recover, consistent with competing objectives moving
+the shared representation back and forth.
+
+This result establishes two different facts. First, the original detach really
+does prevent replay value loss from shaping the representation. Second,
+removing it alone is not a valid local fix. In this repository, the shared
+representation is updated by the world-model optimizer at `3e-4`, whereas the
+critic head uses `8e-5`; the audited reference couples these losses through one
+optimizer and also uses a learning-rate ramp. Thus the isolated transplant
+changes not only gradient reachability but effectively applies the value
+gradient to shared parameters at 3.75 times the critic learning rate. The
+experiment does not prove that reference-style representation grounding is
+wrong; it shows that it cannot safely be inserted into the local split-optimizer
+training contract as a one-line semantic correction.
+
+The intervention was reverted in `2161be3`. Its run directory, manifest,
+checkpoints, probe, and summary remain as evidence. The next bounded step should
+be observational: measure world-model and replay-value gradient norms and their
+cosine similarity on the same representation parameters, then audit the full
+optimizer contract (loss ownership, learning rates, clipping, and ramp) before
+testing another coupled-gradient change.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
