@@ -1178,6 +1178,87 @@ because subsequent central-state updates undo that fit. Only after measuring
 that distinction should a replay stratification, auxiliary state loss, or
 optimizer change be selected.
 
+#### On-policy baseline and reference replay-value gradient audit
+
+Before selecting an intervention, the telemetry run's best and final
+checkpoints were evaluated with the existing 20-episode, reset-seed-17--36,
+three-step on-policy counterfactual probe. Artifacts are in
+`experiments/2026-07-20_cartpole_replay_coverage_seed0_on_policy_probe/`.
+
+| Checkpoint | Probe return | Actor/real balanced | Q/real balanced | Q/real correlation | Actor/Q | One-step MSE | Prior x MSE | Prior x-dot MSE |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Best, step 2,400 | 500.0 | 0.598 | 0.655 | 0.008 | 0.923 | 0.166 | 0.423 | 0.206 |
+| Final, step 3,500 | 378.6 | 0.510 | 0.496 | 0.073 | 0.914 | 0.199 | 0.161 | 0.566 |
+
+This reproduces the important boundary even though this run did not end in a
+full collapse. The actor continues to follow the learned three-step Q ordering,
+but that ordering falls from useful to chance-level balanced accuracy. The
+error is not simply cart-position reconstruction in this replication: prior
+position MSE improves while prior cart-velocity MSE grows by 2.7 times.
+
+A source audit then found a concrete semantic difference from the official
+DreamerV3 implementation at reference commit
+[`e3f0224`](https://github.com/danijar/dreamerv3/tree/e3f02248693a79dc8b0ebd62c93683888ddaccfe).
+The reference configuration enables both replay value loss and
+[`repval_grad: True`](https://github.com/danijar/dreamerv3/blob/e3f02248693a79dc8b0ebd62c93683888ddaccfe/dreamerv3/configs.yaml#L108-L116).
+Its replay path conditionally preserves the observed feature graph before the
+value head
+([`agent.py` lines 218--233](https://github.com/danijar/dreamerv3/blob/e3f02248693a79dc8b0ebd62c93683888ddaccfe/dreamerv3/agent.py#L218-L233)).
+Thus the real-sequence value objective shapes both the value head and the
+control-relevant representation, while imagined actor/critic trajectories
+remain stopped at the model boundary.
+
+The local path does the opposite at two points:
+
+```python
+metrics.replay_posterior_states.append(h_z_joined.detach())
+...
+replay_logits = critic(replay_posterior[:, :-1].detach())
+```
+
+Consequently `critic_replay_scale=0.3` currently means "fit the critic head to
+fixed latent features," not the reference algorithm's replay-value grounding.
+This disconnect is directly relevant to the observed failure: boundary states
+are sampled, but their latent/Q ordering can degrade without any value gradient
+asking the representation to retain control-relevant distinctions.
+
+The audit also found reference differences that are *not* part of the next
+intervention: the current reference uses a 1,000-update optimizer learning-rate
+ramp, online rather than slow value targets by default, and one joint optimizer.
+Those remain separate candidates; combining any of them with representation
+gradient reachability would make the result uninterpretable.
+
+#### Preregistered replay-value representation-gradient gate
+
+- **Hypothesis:** allowing only the existing replay value loss to update the
+  observed encoder/RSSM representation will preserve on-policy action ordering
+  after the policy first solves CartPole. Imagined actor and critic gradients
+  must remain stopped at the world-model boundary.
+- **Code intervention:** retain the graph for post-burn-in replay posterior
+  states, remove the detach only on the configured replay-value critic input,
+  and backpropagate the world-model and critic losses jointly so their shared
+  graph is traversed once. Keep replay targets, slow-value targets, imagined
+  states, actor inputs, sampling, loss scales, and optimizer settings unchanged.
+  The disabled `critic_real_return_scale` path remains detached.
+- **Mechanical acceptance:** a focused regression test must show that the
+  replay-value term produces gradients in both the critic and observed latent,
+  while its targets remain detached; the full suite, compile/type gates, and a
+  process smoke run must pass.
+- **Frozen run:** one clean seed-0, 3,500-update run with exactly the telemetry
+  benchmark configuration. Preserve the prospective replay metrics and
+  deterministic 20-episode evaluation every 100 updates.
+- **Primary behavioral gate:** after the first evaluation at 500, no later
+  evaluation may fall below 300, final evaluation must be at least 450, and the
+  best-to-final gap must be at most 50. These thresholds distinguish stability
+  from the baseline's repeated 241--299 regressions and final gap of 108.8.
+- **Primary boundary gate:** rerun the same best/final on-policy probe. Final
+  Q/real balanced accuracy must exceed the baseline `0.496`, actor/real balanced
+  accuracy must exceed `0.510`, and actor/Q agreement must remain above `0.8`.
+- **Stop rule:** stop after code validation, one seed, and its best/final probe.
+  Revert the intervention if gradient reachability or runtime safety fails.
+  Treat a behavioral miss as a rejected causal fix; only a clear pass justifies
+  replication on seeds 1 and 2.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
