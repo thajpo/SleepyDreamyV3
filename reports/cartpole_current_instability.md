@@ -781,6 +781,44 @@ neither run is the final causal benchmark; both seeds must be restarted from
 the corrected commit. Success still requires improved on-policy Q ranking and
 reduced best-to-final return collapse, not merely a strong random-state probe.
 
+### Corrected pacing benchmark
+
+Two fresh seeds completed from clean source commit `a2e7890` with the
+episode-debt limiter. The runs used the frozen no-advantage-normalization
+configuration and changed only collection pacing relative to the prior
+controlled baseline.
+
+| Seed | Admitted frames | Effective replay ratio | Best/final return | On-policy probe return | Actor/real | Q/real | Q-real correlation | Actor/Q |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 21,118 | 15.91 | 338.70 / 338.70 | 311.20 | 0.492 | 0.491 | -0.011 | 0.780 |
+| 1 | 21,328 | 15.75 | 398.15 / 398.15 | 424.70 | 0.485 | 0.567 | 0.057 | 0.686 |
+
+The effective ratio is
+`updates / admitted_frames * batch_size * non_burn_in_length`; its small
+shortfall from 16 is the expected startup population and final episode debt.
+Both runs completed normally without another pacing stall. Each final
+checkpoint was also its best checkpoint, so the best and final probe results
+are identical.
+
+This is a meaningful causal improvement. The prior controlled final returns
+were `147.90` and `204.05`, whereas the paced runs finished at `338.70` and
+`398.15` while consuming only about 21k admitted frames rather than roughly
+1.1 million. Their action histograms were balanced (`49%/51%` and `50%/50%`),
+so the prior constant-action deployment collapse did not recur. The run curves
+were not monotonic, however: seed 1 fell from `281.50` at update 3,300 to
+`193.40` at 3,400 before recovering to `398.15` at 3,500.
+
+The pacing fix is therefore necessary but not sufficient. On actor-induced
+states, actor-versus-real counterfactual agreement remains at chance. Learned
+model/critic Q ranking is also at chance for seed 0 and only modestly above it
+for seed 1, with essentially zero correlation to the real counterfactual value
+margin. The actor no longer merely copies that learned Q ranking, and useful
+closed-loop behavior emerges despite weak local 30-step action ranking. The
+next diagnostic should split the combined learned Q estimate into model-rollout
+error and critic-bootstrap error on these same frozen checkpoints; extending
+training or changing another loss before that split would confound the first
+remaining boundary.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
