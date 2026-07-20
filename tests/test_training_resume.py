@@ -68,7 +68,7 @@ def test_installed_cli_checkpoint_resume_contract(tmp_path):
     assert resumed_checkpoint["run_id"] == resumed_manifest["run_id"]
 
 
-def test_each_collector_receives_the_initial_model_update(tmp_path):
+def test_initial_model_update_is_published_to_each_collector(tmp_path):
     result = _run_training(
         tmp_path / "multi_collector",
         extra_overrides=[
@@ -80,8 +80,10 @@ def test_each_collector_receives_the_initial_model_update(tmp_path):
 
     assert result.returncode == 0, result.stdout + result.stderr
     output = result.stdout + result.stderr
-    assert "model_weights_loaded collector_id=0 version=0" in output
-    assert "model_weights_loaded collector_id=1 version=0" in output
+    # A one-update run may finish before both newly spawned collectors consume
+    # their mailboxes. Publication is the deterministic integration boundary;
+    # tests/test_model_broadcast.py verifies the contents of every mailbox.
+    assert "model_weights_published version=0 delivered=[0, 1] pending=[]" in output
     assert "model_weights_published version=1" not in output
 
 
