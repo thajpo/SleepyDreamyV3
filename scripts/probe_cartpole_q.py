@@ -142,15 +142,23 @@ def predict_one_step(
     z_embed: torch.Tensor,
     action: int,
     n_actions: int,
+    latent_mode: str = "mean",
 ) -> tuple[np.ndarray, float]:
     """Decode the model's predicted next state after a fixed action."""
+    if latent_mode not in {"mean", "mode"}:
+        raise ValueError(f"unsupported latent_mode: {latent_mode}")
     action_onehot = F.one_hot(
         torch.tensor([int(action)], device=h.device), num_classes=n_actions
     ).float()
     h_next, prior_logits = world_model.step_dynamics(z_embed, action_onehot, h)
     prior_logits = unimix_logits(prior_logits, unimix_ratio=0.01)
-    z_probs = F.softmax(prior_logits, dim=-1)
-    h_z_next = world_model.join_h_and_z(h_next, z_probs)
+    if latent_mode == "mode":
+        z_state = F.one_hot(
+            prior_logits.argmax(dim=-1), num_classes=world_model.n_classes
+        ).float()
+    else:
+        z_state = F.softmax(prior_logits, dim=-1)
+    h_z_next = world_model.join_h_and_z(h_next, z_state)
     pred_symlog_state = world_model.decoder(h_z_next)["state"]
     pred_state = symexp(pred_symlog_state).squeeze(0).detach().cpu().numpy()
     continue_prob = (

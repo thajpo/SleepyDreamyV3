@@ -94,3 +94,63 @@ def test_on_policy_summary_rejects_empty_rows():
             critical_margin=15,
             terminal_window=10,
         )
+
+
+def test_on_policy_summary_compares_decomposed_value_preferences():
+    correct = _row(
+        0,
+        episode_return=100,
+        true_delta=10,
+        true_pref=1,
+        actor_correct=True,
+        steps_to_end=20,
+    )
+    correct.update(
+        {
+            "q_delta": -2.0,
+            "q_pref": 0,
+            "hybrid_state_delta": 4.0,
+            "hybrid_state_pref": 1,
+            "decomp_model_return_h1_delta": 0.0,
+            "decomp_model_return_h1_pref": -1,
+            "decomp_critic_bootstrap_h1_delta": -2.0,
+            "decomp_critic_bootstrap_h1_pref": 0,
+        }
+    )
+    wrong = _row(
+        1,
+        episode_return=50,
+        true_delta=-8,
+        true_pref=0,
+        actor_correct=False,
+        steps_to_end=5,
+    )
+    wrong.update(
+        {
+            "actor_action": 1,
+            "q_delta": 3.0,
+            "q_pref": 1,
+            "hybrid_state_delta": -5.0,
+            "hybrid_state_pref": 0,
+            "decomp_model_return_h1_delta": 0.0,
+            "decomp_model_return_h1_pref": -1,
+            "decomp_critic_bootstrap_h1_delta": 3.0,
+            "decomp_critic_bootstrap_h1_pref": 1,
+        }
+    )
+
+    summary = summarize_on_policy_rows(
+        [correct, wrong],
+        checkpoint_path=Path("checkpoint.pt"),
+        train_step=123,
+        critical_margin=15,
+        terminal_window=10,
+    )
+
+    assert summary["hybrid_state_vs_rollout_accuracy"] == 1.0
+    assert summary["hybrid_state_vs_rollout_balanced_accuracy"] == 1.0
+    assert summary["q_vs_rollout_accuracy"] == 0.0
+    assert summary["q_vs_rollout_balanced_accuracy"] == 0.0
+    assert summary["decomp_critic_bootstrap_h1_vs_rollout_accuracy"] == 0.0
+    assert summary["decomp_model_return_h1_margined_actionable_states"] == 0
+    assert summary["actor_vs_q_accuracy"] == 0.5

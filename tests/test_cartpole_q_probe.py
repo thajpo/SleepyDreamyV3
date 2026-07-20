@@ -100,3 +100,21 @@ def test_first_action_enumeration_can_disable_terminal_critic_bootstrap():
 
     assert with_bootstrap[0, 1] > with_bootstrap[0, 0]
     assert torch.allclose(without_bootstrap, torch.zeros_like(without_bootstrap))
+
+
+def test_first_action_enumeration_rejects_unknown_latent_mode():
+    world_model = _BootstrapProbeWorldModel()
+    with pytest.raises(ValueError, match="unsupported latent_mode"):
+        enumerate_first_action_values(
+            initial_h_z=torch.zeros(1, 3),
+            initial_z_embed=torch.zeros(1, 2),
+            actor=None,
+            critic=_BootstrapProbeCritic(),
+            world_model=world_model,
+            n_actions=2,
+            d_hidden=1,
+            bins=torch.tensor([-1.0, 0.0, 1.0]),
+            gamma=1.0,
+            horizon=1,
+            latent_mode="unknown",
+        )

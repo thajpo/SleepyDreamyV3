@@ -126,6 +126,7 @@ def enumerate_first_action_values(
     terminal_reward_penalty=0.0,
     objective="value",
     bootstrap_value=True,
+    latent_mode="mean",
 ):
     """Estimate Q(s, a) by enumerating discrete first actions in the world model.
 
@@ -135,9 +136,14 @@ def enumerate_first_action_values(
     the same latent state. Future actions are enumerated as a tiny deterministic
     tree and the best branch for each first action is used as its value. Set
     ``bootstrap_value`` to false to isolate learned reward and continuation
-    rollout values from the critic's terminal-state estimate.
+    rollout values from the critic's terminal-state estimate. ``latent_mode``
+    can retain the historical probability-vector rollout (``mean``) or use the
+    categorical mode as a one-hot latent (``mode``), matching the support used
+    by the sampled RSSM during training.
     """
     horizon = max(1, int(horizon))
+    if latent_mode not in {"mean", "mode"}:
+        raise ValueError(f"unsupported latent_mode: {latent_mode}")
     batch_size = initial_h_z.shape[0]
     h_dim = world_model.n_blocks * d_hidden
     device = initial_h_z.device
@@ -179,7 +185,12 @@ def enumerate_first_action_values(
             z_embed_flat, action_onehot, h_flat
         )
         prior_logits = unimix_logits(prior_logits, unimix_ratio=0.01)
-        z_state_flat = F.softmax(prior_logits, dim=-1)
+        if latent_mode == "mode":
+            z_state_flat = F.one_hot(
+                prior_logits.argmax(dim=-1), num_classes=world_model.n_classes
+            ).to(dtype=dtype)
+        else:
+            z_state_flat = F.softmax(prior_logits, dim=-1)
         h_z_flat = world_model.join_h_and_z(h_next, z_state_flat)
 
         continue_probs = torch.sigmoid(

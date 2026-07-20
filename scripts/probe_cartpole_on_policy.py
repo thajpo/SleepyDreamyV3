@@ -21,24 +21,116 @@ if __package__:
     from scripts.probe_cartpole_q import (
         action_preference,
         heuristic_action,
+        hybrid_state_score,
         load_checkpoint_models,
         one_step_outcome,
         pearson,
+        predict_one_step,
         rollout_score,
     )
 else:
     from probe_cartpole_q import (  # type: ignore[import-not-found]
         action_preference,
         heuristic_action,
+        hybrid_state_score,
         load_checkpoint_models,
         one_step_outcome,
         pearson,
+        predict_one_step,
         rollout_score,
     )
 
 
 def _fraction(numerator: int, denominator: int) -> float | None:
     return None if denominator == 0 else float(numerator / denominator)
+
+
+def _balanced_preference_accuracy(rows: list[dict], pred_key: str) -> float | None:
+    """Average per-action recall so a constant preference cannot look accurate."""
+    recalls = []
+    for action in (0, 1):
+        action_rows = [row for row in rows if int(row["true_pref"]) == action]
+        if action_rows:
+            recalls.append(
+                sum(int(row[pred_key]) == action for row in action_rows)
+                / len(action_rows)
+            )
+    return float(np.mean(recalls)) if recalls else None
+
+
+def _sign_accuracy(predicted: list[float], actual: list[float]) -> float | None:
+    pairs = [
+        (pred, true)
+        for pred, true in zip(predicted, actual)
+        if abs(float(true)) > 1e-9
+    ]
+    return _fraction(
+        sum((float(pred) > 0.0) == (float(true) > 0.0) for pred, true in pairs),
+        len(pairs),
+    )
+
+
+def _posterior_reconstruct_next_state(
+    world_model,
+    encoder,
+    h: torch.Tensor,
+    z_embed: torch.Tensor,
+    action: int,
+    next_state: np.ndarray,
+    n_actions: int,
+) -> np.ndarray:
+    """Reconstruct a real next state after correcting the prior with its observation."""
+    action_onehot = F.one_hot(
+        torch.tensor([int(action)], device=h.device), num_classes=n_actions
+    ).float()
+    h_next, _prior_logits = world_model.step_dynamics(z_embed, action_onehot, h)
+    tokens = encoder(
+        symlog(torch.from_numpy(next_state).to(h.device).float().unsqueeze(0))
+    )
+    posterior_logits = world_model.compute_posterior(h_next, tokens)
+    posterior_state = F.one_hot(
+        posterior_logits.argmax(dim=-1), num_classes=world_model.n_classes
+    ).float()
+    h_z_next = world_model.join_h_and_z(h_next, posterior_state)
+    reconstructed = symexp(world_model.decoder(h_z_next)["state"])
+    return reconstructed.squeeze(0).cpu().numpy().astype(np.float32)
+
+
+def _preference_metrics(rows: list[dict], actionable: list[dict], prefix: str) -> dict:
+    """Compare one predicted action-value component with trusted real rollouts."""
+    delta_key = f"{prefix}_delta"
+    pref_key = f"{prefix}_pref"
+    component_rows = [
+        row for row in actionable if delta_key in row and pref_key in row
+    ]
+    margined = [row for row in component_rows if abs(float(row[delta_key])) > 1e-6]
+    all_component_rows = [row for row in rows if pref_key in row]
+    return {
+        f"{prefix}_margined_actionable_states": len(margined),
+        f"{prefix}_vs_rollout_accuracy": _fraction(
+            sum(int(row[pref_key]) == int(row["true_pref"]) for row in component_rows),
+            len(component_rows),
+        ),
+        f"{prefix}_vs_rollout_balanced_accuracy": (
+            _balanced_preference_accuracy(component_rows, pref_key)
+        ),
+        f"{prefix}_delta_true_delta_pearson": pearson(
+            [float(row[delta_key]) for row in component_rows],
+            [float(row["true_delta"]) for row in component_rows],
+        ),
+        f"actor_vs_{prefix}_accuracy": _fraction(
+            sum(int(row["actor_action"]) == int(row[pref_key]) for row in margined),
+            len(margined),
+        ),
+        f"mean_abs_{prefix}_delta": (
+            float(np.mean([abs(float(row[delta_key])) for row in all_component_rows]))
+            if all_component_rows
+            else None
+        ),
+        f"{prefix}_pref_hist": dict(
+            Counter(str(row[pref_key]) for row in all_component_rows)
+        ),
+    }
 
 
 def summarize_on_policy_rows(
@@ -75,10 +167,9 @@ def summarize_on_policy_rows(
         if bool(row["chosen_action_terminated"])
         and not bool(row["other_action_terminated"])
     ]
-    q_rows = [row for row in actionable if "q_delta" in row]
-    q_margined = [row for row in q_rows if abs(float(row["q_delta"])) > 1e-6]
-
-    episode_returns = [float(ep_rows[0]["episode_return"]) for ep_rows in by_episode.values()]
+    episode_returns = [
+        float(ep_rows[0]["episode_return"]) for ep_rows in by_episode.values()
+    ]
     episode_error_counts = [
         sum(
             int(row["true_pref"]) >= 0 and not bool(row["actor_correct"])
@@ -96,7 +187,7 @@ def summarize_on_policy_rows(
         for ep_rows in by_episode.values()
     )
 
-    return {
+    summary = {
         "checkpoint": str(checkpoint_path),
         "train_step": train_step,
         "episodes": len(by_episode),
@@ -112,17 +203,8 @@ def summarize_on_policy_rows(
         "actor_vs_rollout_accuracy": _fraction(
             len(actionable) - len(errors), len(actionable)
         ),
-        "q_vs_rollout_accuracy": _fraction(
-            sum(int(row["q_pref"]) == int(row["true_pref"]) for row in q_rows),
-            len(q_rows),
-        ),
-        "q_delta_true_delta_pearson": pearson(
-            [float(row["q_delta"]) for row in q_rows],
-            [float(row["true_delta"]) for row in q_rows],
-        ),
-        "actor_vs_q_accuracy": _fraction(
-            sum(int(row["actor_action"]) == int(row["q_pref"]) for row in q_margined),
-            len(q_margined),
+        "actor_vs_rollout_balanced_accuracy": _balanced_preference_accuracy(
+            actionable, "actor_action"
         ),
         "critical_margin": critical_margin,
         "critical_states": len(critical),
@@ -161,6 +243,21 @@ def summarize_on_policy_rows(
             Counter(str(row["true_pref"]) for row in actionable)
         ),
     }
+    prefixes = sorted(
+        {
+            key.removesuffix("_delta")
+            for key in rows[0]
+            if key.endswith("_delta")
+            and (
+                key == "q_delta"
+                or key.startswith("hybrid_")
+                or key.startswith("decomp_")
+            )
+        }
+    )
+    for prefix in prefixes:
+        summary.update(_preference_metrics(rows, actionable, prefix))
+    return summary
 
 
 def run_on_policy_probe(
@@ -172,6 +269,7 @@ def run_on_policy_probe(
     seed: int,
     rollout_horizon: int,
     model_horizon: int,
+    decomposition_horizons: list[int],
     critical_margin: float,
     terminal_window: int,
 ) -> dict:
@@ -202,6 +300,9 @@ def run_on_policy_probe(
     )
     imagination_discount = learned_continue_discount(
         cfg.gamma, bool(getattr(cfg, "contdisc", True))
+    )
+    decomposition_horizons = sorted(
+        {max(1, int(horizon)) for horizon in decomposition_horizons}
     )
 
     try:
@@ -254,6 +355,95 @@ def run_on_policy_probe(
                                 getattr(cfg, "terminal_reward_penalty", 0.0)
                             ),
                         )
+                        decomposition_values = {}
+                        for horizon in decomposition_horizons:
+                            full_values = (
+                                q_values
+                                if horizon == model_horizon
+                                else enumerate_first_action_values(
+                                    h_z,
+                                    z_embed,
+                                    actor,
+                                    critic,
+                                    world_model,
+                                    cfg.n_actions,
+                                    cfg.d_hidden,
+                                    bins,
+                                    imagination_discount,
+                                    horizon,
+                                    terminal_reward_penalty=float(
+                                        getattr(cfg, "terminal_reward_penalty", 0.0)
+                                    ),
+                                )
+                            )
+                            model_return_values = enumerate_first_action_values(
+                                h_z,
+                                z_embed,
+                                actor,
+                                critic,
+                                world_model,
+                                cfg.n_actions,
+                                cfg.d_hidden,
+                                bins,
+                                imagination_discount,
+                                horizon,
+                                terminal_reward_penalty=float(
+                                    getattr(cfg, "terminal_reward_penalty", 0.0)
+                                ),
+                                bootstrap_value=False,
+                            )
+                            mode_full_values = enumerate_first_action_values(
+                                h_z,
+                                z_embed,
+                                actor,
+                                critic,
+                                world_model,
+                                cfg.n_actions,
+                                cfg.d_hidden,
+                                bins,
+                                imagination_discount,
+                                horizon,
+                                terminal_reward_penalty=float(
+                                    getattr(cfg, "terminal_reward_penalty", 0.0)
+                                ),
+                                latent_mode="mode",
+                            )
+                            mode_model_return_values = enumerate_first_action_values(
+                                h_z,
+                                z_embed,
+                                actor,
+                                critic,
+                                world_model,
+                                cfg.n_actions,
+                                cfg.d_hidden,
+                                bins,
+                                imagination_discount,
+                                horizon,
+                                terminal_reward_penalty=float(
+                                    getattr(cfg, "terminal_reward_penalty", 0.0)
+                                ),
+                                bootstrap_value=False,
+                                latent_mode="mode",
+                            )
+                            decomposition_values[
+                                f"decomp_full_q_h{horizon}"
+                            ] = full_values
+                            decomposition_values[
+                                f"decomp_model_return_h{horizon}"
+                            ] = model_return_values
+                            decomposition_values[
+                                f"decomp_mode_full_q_h{horizon}"
+                            ] = mode_full_values
+                            decomposition_values[
+                                f"decomp_mode_model_return_h{horizon}"
+                            ] = mode_model_return_values
+                            if horizon == 1:
+                                decomposition_values[
+                                    "decomp_critic_bootstrap_h1"
+                                ] = full_values - model_return_values
+                                decomposition_values[
+                                    "decomp_mode_critic_bootstrap_h1"
+                                ] = mode_full_values - mode_model_return_values
                     finally:
                         world_model.h_prev = state_h_prev
 
@@ -262,16 +452,88 @@ def run_on_policy_probe(
                         for candidate in range(cfg.n_actions)
                     ]
                     true_pref = action_preference(true_scores)
-                    chosen_next, chosen_done = one_step_outcome(score_env, state, action)
-                    del chosen_next
+                    real_next = []
+                    real_done = []
+                    predicted_next = []
+                    predicted_continue = []
+                    mode_predicted_next = []
+                    mode_predicted_continue = []
+                    posterior_reconstructed_next = []
+                    state_h_prev = world_model.h_prev.clone()
+                    try:
+                        for candidate in range(cfg.n_actions):
+                            next_state, done = one_step_outcome(
+                                score_env, state, candidate
+                            )
+                            pred_state, continue_prob = predict_one_step(
+                                world_model,
+                                h,
+                                z_embed,
+                                candidate,
+                                cfg.n_actions,
+                            )
+                            mode_pred_state, mode_continue_prob = predict_one_step(
+                                world_model,
+                                h,
+                                z_embed,
+                                candidate,
+                                cfg.n_actions,
+                                latent_mode="mode",
+                            )
+                            posterior_next_state = _posterior_reconstruct_next_state(
+                                world_model,
+                                encoder,
+                                h,
+                                z_embed,
+                                candidate,
+                                next_state,
+                                cfg.n_actions,
+                            )
+                            real_next.append(next_state)
+                            real_done.append(done)
+                            predicted_next.append(pred_state)
+                            predicted_continue.append(continue_prob)
+                            mode_predicted_next.append(mode_pred_state)
+                            mode_predicted_continue.append(mode_continue_prob)
+                            posterior_reconstructed_next.append(
+                                posterior_next_state
+                            )
+                    finally:
+                        world_model.h_prev = state_h_prev
+                    hybrid_state_scores = [
+                        hybrid_state_score(
+                            score_env, predicted_next[candidate], rollout_horizon
+                        )
+                        for candidate in range(cfg.n_actions)
+                    ]
+                    hybrid_continue_scores = [
+                        1.0
+                        + predicted_continue[candidate]
+                        * (hybrid_state_scores[candidate] - 1.0)
+                        for candidate in range(cfg.n_actions)
+                    ]
+                    hybrid_mode_state_scores = [
+                        hybrid_state_score(
+                            score_env, mode_predicted_next[candidate], rollout_horizon
+                        )
+                        for candidate in range(cfg.n_actions)
+                    ]
+                    hybrid_mode_continue_scores = [
+                        1.0
+                        + mode_predicted_continue[candidate]
+                        * (hybrid_mode_state_scores[candidate] - 1.0)
+                        for candidate in range(cfg.n_actions)
+                    ]
+                    chosen_done = real_done[action]
                     other_action = 1 - action
-                    other_next, other_done = one_step_outcome(
-                        score_env, state, other_action
-                    )
-                    del other_next
+                    other_done = real_done[other_action]
                     best_score = max(true_scores)
                     probs = actor_probs.squeeze(0).cpu().numpy()
                     q_values_np = q_values.squeeze(0).cpu().numpy()
+                    decomposition_np = {
+                        key: values.squeeze(0).cpu().numpy()
+                        for key, values in decomposition_values.items()
+                    }
                     row = {
                         "episode": episode,
                         "t": timestep,
@@ -290,6 +552,79 @@ def run_on_policy_probe(
                         "q1": float(q_values_np[1]),
                         "q_delta": float(q_values_np[1] - q_values_np[0]),
                         "q_pref": int(q_values_np[1] > q_values_np[0]),
+                        "hybrid_state_delta": float(
+                            hybrid_state_scores[1] - hybrid_state_scores[0]
+                        ),
+                        "hybrid_state_pref": action_preference(hybrid_state_scores),
+                        "hybrid_continue_delta": float(
+                            hybrid_continue_scores[1] - hybrid_continue_scores[0]
+                        ),
+                        "hybrid_continue_pref": action_preference(
+                            hybrid_continue_scores
+                        ),
+                        "hybrid_mode_state_delta": float(
+                            hybrid_mode_state_scores[1]
+                            - hybrid_mode_state_scores[0]
+                        ),
+                        "hybrid_mode_state_pref": action_preference(
+                            hybrid_mode_state_scores
+                        ),
+                        "hybrid_mode_continue_delta": float(
+                            hybrid_mode_continue_scores[1]
+                            - hybrid_mode_continue_scores[0]
+                        ),
+                        "hybrid_mode_continue_pref": action_preference(
+                            hybrid_mode_continue_scores
+                        ),
+                        "mean_one_step_state_mse": float(
+                            0.5
+                            * (
+                                np.mean((predicted_next[0] - real_next[0]) ** 2)
+                                + np.mean((predicted_next[1] - real_next[1]) ** 2)
+                            )
+                        ),
+                        "mean_one_step_mode_state_mse": float(
+                            0.5
+                            * (
+                                np.mean(
+                                    (mode_predicted_next[0] - real_next[0]) ** 2
+                                )
+                                + np.mean(
+                                    (mode_predicted_next[1] - real_next[1]) ** 2
+                                )
+                            )
+                        ),
+                        "mean_one_step_posterior_state_mse": float(
+                            0.5
+                            * (
+                                np.mean(
+                                    (posterior_reconstructed_next[0] - real_next[0])
+                                    ** 2
+                                )
+                                + np.mean(
+                                    (posterior_reconstructed_next[1] - real_next[1])
+                                    ** 2
+                                )
+                            )
+                        ),
+                        "pred_continue_0": float(predicted_continue[0]),
+                        "pred_continue_1": float(predicted_continue[1]),
+                        "pred_delta_x_dot": float(
+                            predicted_next[1][1] - predicted_next[0][1]
+                        ),
+                        "true_delta_x_dot": float(real_next[1][1] - real_next[0][1]),
+                        "pred_delta_theta_dot": float(
+                            predicted_next[1][3] - predicted_next[0][3]
+                        ),
+                        "true_delta_theta_dot": float(
+                            real_next[1][3] - real_next[0][3]
+                        ),
+                        "mode_pred_delta_x_dot": float(
+                            mode_predicted_next[1][1] - mode_predicted_next[0][1]
+                        ),
+                        "mode_pred_delta_theta_dot": float(
+                            mode_predicted_next[1][3] - mode_predicted_next[0][3]
+                        ),
                         "true_score_0": float(true_scores[0]),
                         "true_score_1": float(true_scores[1]),
                         "true_delta": float(true_scores[1] - true_scores[0]),
@@ -300,6 +635,61 @@ def run_on_policy_probe(
                         "chosen_action_terminated": int(chosen_done),
                         "other_action_terminated": int(other_done),
                     }
+                    for state_index, state_name in enumerate(
+                        ("x", "x_dot", "theta", "theta_dot")
+                    ):
+                        row[f"prior_{state_name}_mse"] = float(
+                            0.5
+                            * (
+                                (
+                                    predicted_next[0][state_index]
+                                    - real_next[0][state_index]
+                                )
+                                ** 2
+                                + (
+                                    predicted_next[1][state_index]
+                                    - real_next[1][state_index]
+                                )
+                                ** 2
+                            )
+                        )
+                        row[f"mode_prior_{state_name}_mse"] = float(
+                            0.5
+                            * (
+                                (
+                                    mode_predicted_next[0][state_index]
+                                    - real_next[0][state_index]
+                                )
+                                ** 2
+                                + (
+                                    mode_predicted_next[1][state_index]
+                                    - real_next[1][state_index]
+                                )
+                                ** 2
+                            )
+                        )
+                        row[f"posterior_{state_name}_mse"] = float(
+                            0.5
+                            * (
+                                (
+                                    posterior_reconstructed_next[0][state_index]
+                                    - real_next[0][state_index]
+                                )
+                                ** 2
+                                + (
+                                    posterior_reconstructed_next[1][state_index]
+                                    - real_next[1][state_index]
+                                )
+                                ** 2
+                            )
+                        )
+                    for key, values in decomposition_np.items():
+                        row.update(
+                            {
+                                f"{key}_delta": float(values[1] - values[0]),
+                                f"{key}_pref": action_preference(values.tolist()),
+                            }
+                        )
 
                     previous_action = F.one_hot(
                         torch.tensor([action], device=device),
@@ -334,8 +724,63 @@ def run_on_policy_probe(
             "seed": seed,
             "rollout_horizon": rollout_horizon,
             "model_horizon": model_horizon,
+            "decomposition_horizons": decomposition_horizons,
+            "mean_one_step_state_mse": float(
+                np.mean([float(row["mean_one_step_state_mse"]) for row in rows])
+            ),
+            "mean_one_step_mode_state_mse": float(
+                np.mean(
+                    [float(row["mean_one_step_mode_state_mse"]) for row in rows]
+                )
+            ),
+            "mean_one_step_posterior_state_mse": float(
+                np.mean(
+                    [
+                        float(row["mean_one_step_posterior_state_mse"])
+                        for row in rows
+                    ]
+                )
+            ),
+            "pred_delta_x_dot_true_pearson": pearson(
+                [float(row["pred_delta_x_dot"]) for row in rows],
+                [float(row["true_delta_x_dot"]) for row in rows],
+            ),
+            "pred_delta_theta_dot_true_pearson": pearson(
+                [float(row["pred_delta_theta_dot"]) for row in rows],
+                [float(row["true_delta_theta_dot"]) for row in rows],
+            ),
+            "pred_delta_x_dot_sign_accuracy": _sign_accuracy(
+                [float(row["pred_delta_x_dot"]) for row in rows],
+                [float(row["true_delta_x_dot"]) for row in rows],
+            ),
+            "pred_delta_theta_dot_sign_accuracy": _sign_accuracy(
+                [float(row["pred_delta_theta_dot"]) for row in rows],
+                [float(row["true_delta_theta_dot"]) for row in rows],
+            ),
+            "mode_pred_delta_x_dot_true_pearson": pearson(
+                [float(row["mode_pred_delta_x_dot"]) for row in rows],
+                [float(row["true_delta_x_dot"]) for row in rows],
+            ),
+            "mode_pred_delta_theta_dot_true_pearson": pearson(
+                [float(row["mode_pred_delta_theta_dot"]) for row in rows],
+                [float(row["true_delta_theta_dot"]) for row in rows],
+            ),
+            "mode_pred_delta_x_dot_sign_accuracy": _sign_accuracy(
+                [float(row["mode_pred_delta_x_dot"]) for row in rows],
+                [float(row["true_delta_x_dot"]) for row in rows],
+            ),
+            "mode_pred_delta_theta_dot_sign_accuracy": _sign_accuracy(
+                [float(row["mode_pred_delta_theta_dot"]) for row in rows],
+                [float(row["true_delta_theta_dot"]) for row in rows],
+            ),
         }
     )
+    for state_name in ("x", "x_dot", "theta", "theta_dot"):
+        for source in ("prior", "mode_prior", "posterior"):
+            key = f"{source}_{state_name}_mse"
+            summary[f"mean_{key}"] = float(
+                np.mean([float(row[key]) for row in rows])
+            )
 
     out_dir.mkdir(parents=True, exist_ok=True)
     with (out_dir / "rows.csv").open("w", newline="") as handle:
@@ -357,6 +802,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=17)
     parser.add_argument("--rollout-horizon", type=int, default=30)
     parser.add_argument("--model-horizon", type=int, default=3)
+    parser.add_argument("--decompose-horizons", nargs="*", type=int, default=[1, 3])
     parser.add_argument("--critical-margin", type=float, default=15.0)
     parser.add_argument("--terminal-window", type=int, default=10)
     args = parser.parse_args()
@@ -379,6 +825,7 @@ def main() -> None:
             seed=args.seed,
             rollout_horizon=args.rollout_horizon,
             model_horizon=args.model_horizon,
+            decomposition_horizons=args.decompose_horizons,
             critical_margin=args.critical_margin,
             terminal_window=args.terminal_window,
         )

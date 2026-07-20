@@ -819,6 +819,59 @@ error and critic-bootstrap error on these same frozen checkpoints; extending
 training or changing another loss before that split would confound the first
 remaining boundary.
 
+### On-policy model/value decomposition
+
+The split probe first corrected a diagnostic validity problem. The original
+enumerated Q helper propagated categorical prior probabilities as continuous
+latent vectors, whereas RSSM training and normal imagination use sampled
+one-hot latents. Because the decoder is trained on one-hot forward values, a
+soft latent can decode to an unsupported average state. The expanded probe
+therefore reports both the historical probability-vector estimate and a
+categorical-mode one-hot estimate. The mode result did not rescue the boundary,
+so the failure below is not an artifact of that probe mismatch.
+
+| Seed | Actor/real balanced acc. | Full Q h3 balanced acc. | Critic bootstrap h1 balanced acc. | Model-only h3 balanced acc. | Q/real corr. |
+|---:|---:|---:|---:|---:|---:|
+| 0 | 0.539 | 0.487 | 0.538 | 0.485 | -0.011 |
+| 1 | 0.494 | 0.599 | 0.503 | 0.508 | 0.057 |
+
+Balanced accuracy is required here because the trusted preferred action is
+strongly imbalanced along each actor trajectory; raw accuracy can make an
+almost-constant preference look useful. Neither the model-only return nor the
+exact horizon-one critic bootstrap contribution is robust across seeds, and
+their value-margin correlations remain near zero.
+
+The physical error is more specific. Every non-time-limit probe failure—19 of
+19 for seed 0 and 13 of 13 for seed 1—ended at the cart-position boundary, not
+the pole-angle boundary. The one-step model preserved the sign of both actions'
+effects on cart and pole velocity on 100% of visited states, so it learned the
+direction of the local control physics. However, decoding either action and
+then handing that state to the real simulator produced an exact 30-step tie on
+essentially every state. Mean one-step state MSE was `0.352`/`0.231`, dominated
+by cart position (`0.795`/`0.613`) and cart velocity (`0.565`/`0.258`), while
+pole angle error was only `0.0038`/`0.0014`. Conditioning the next latent on the
+real next observation did not materially improve those errors, so the gap is
+not isolated to the dynamics prior. The agents learned to balance the pole but
+not to keep the cart centered, matching their observed termination modes.
+
+Replay sampling explains how this selective on-policy gap can persist after
+collection pacing is fixed. The local buffer samples an episode uniformly and
+then samples one subsequence inside it. A 500-step policy episode therefore has
+the same base probability as a roughly 20-step random episode. At actor release
+the two runs had 840/846 collected episodes; at completion they had 878/883.
+Only 38/37 of the 512 retained episodes were therefore generated during actor
+training. With the configured recent mixture, only about 11% of sampled batch
+sequences came from that policy era. Weighting episodes by valid sequence starts
+would put the same data near 40–45%.
+
+Reference Dreamer replay inserts each valid sequence start as a separately
+sampleable item and applies uniform selection over those items. The local
+episode-uniform policy is therefore not a harmless storage detail: it
+systematically underweights the long, cart-boundary-reaching trajectories that
+the model most needs after the actor improves. The next isolated fix should
+sample episodes in proportion to their number of valid sequence starts while
+preserving the existing recent/uniform mixture and collection budget.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
