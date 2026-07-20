@@ -35,6 +35,7 @@ class ForwardResult:
     total_actor_loss: torch.Tensor
     total_critic_loss: torch.Tensor
     metrics: StepMetrics
+    replay_representation_loss: Optional[torch.Tensor] = None
     # Return lambda_returns from the last AC step so the caller can
     # update return-normalization EMA without reaching into internals.
     last_lambda_returns: Optional[torch.Tensor] = None
@@ -111,6 +112,7 @@ def dreamer_step(
     device: torch.device,
     use_pixels: bool,
     do_log_images: bool,
+    collect_gradient_diagnostics: bool = False,
 ) -> ForwardResult:
     """One complete DreamerV3 forward pass over a batch.
 
@@ -161,6 +163,8 @@ def dreamer_step(
     total_actor_loss = None
     total_critic_loss = None
     last_lambda_returns = None
+    replay_posterior_states_with_grad: list[torch.Tensor] = []
+    replay_representation_loss = None
 
     # --- RSSM rollout + per-timestep dreaming ---
     for t_step in range(T):
@@ -261,6 +265,8 @@ def dreamer_step(
 
         if critic_replay_scale > 0.0 or critic_real_return_scale > 0.0:
             metrics.replay_posterior_states.append(h_z_joined.detach())
+        if collect_gradient_diagnostics and critic_replay_scale > 0.0:
+            replay_posterior_states_with_grad.append(h_z_joined)
 
         for key in metrics.wm_components:
             metrics.wm_components[key] = (
@@ -589,6 +595,40 @@ def dreamer_step(
             effective_train_steps,
         )
 
+        if (
+            collect_gradient_diagnostics
+            and len(replay_posterior_states_with_grad) == effective_train_steps
+        ):
+            live_replay_posterior = torch.stack(
+                replay_posterior_states_with_grad, dim=1
+            )
+            live_replay_logits = critic(live_replay_posterior[:, :-1])
+            live_logits_flat = live_replay_logits.reshape(
+                -1, live_replay_logits.size(-1)
+            )
+            live_per_step_ce = -torch.sum(
+                targets_twohot * F.log_softmax(live_logits_flat, dim=-1),
+                dim=-1,
+            )
+            live_target_loss = (live_per_step_ce * mask_flat).sum() / (
+                mask_flat.sum() + 1e-8
+            )
+            live_per_step_ema = -torch.sum(
+                ema_probs * F.log_softmax(live_logits_flat, dim=-1),
+                dim=-1,
+            )
+            live_slow_regularizer = (
+                live_per_step_ema * mask_flat
+            ).sum() / (mask_flat.sum() + 1e-8)
+            replay_representation_loss = (
+                effective_train_steps
+                * critic_replay_scale
+                * (
+                    live_target_loss
+                    + config.critic_ema_regularizer * live_slow_regularizer
+                )
+            )
+
     # --- Full-episode replay return critic grounding ---
     if (
         critic_real_return_scale > 0.0
@@ -627,5 +667,6 @@ def dreamer_step(
         total_actor_loss=total_actor_loss,
         total_critic_loss=total_critic_loss,
         metrics=metrics,
+        replay_representation_loss=replay_representation_loss,
         last_lambda_returns=last_lambda_returns,
     )

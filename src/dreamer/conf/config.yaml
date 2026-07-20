@@ -20,6 +20,7 @@ general:
   dry_run: false  # Skip MLflow/checkpoints for smoke tests
   experiment_name: null  # MLflow experiment name (null = auto from env name)
   log_profile: lean  # lean, full
+  research_gradient_diagnostics: false
   seed: 0
 
 # Environment (overridden by env/*.yaml)

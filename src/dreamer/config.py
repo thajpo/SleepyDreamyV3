@@ -28,6 +28,7 @@ class Config:
     dry_run: bool = False
     experiment_name: Optional[str] = None
     log_profile: str = "lean"  # lean, full
+    research_gradient_diagnostics: bool = False
     seed: int = 0
 
     # ===== Environment =====

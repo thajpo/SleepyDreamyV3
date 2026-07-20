@@ -1403,6 +1403,36 @@ The next diagnostic is preregistered as follows:
   inconclusive. Do not change learning rates, add a ramp, or reconnect the
   gradient until these measurements are analyzed.
 
+The diagnostic implementation is read-only and opt-in through
+`general.research_gradient_diagnostics=true`. On scalar-log updates only, the
+forward pass retains a second live reference to the already-computed replay
+posterior and reconstructs the same target and slow-regularized replay value
+loss at its authored sequence and `0.3` scale. The normal critic loss continues
+to use detached features. `torch.autograd.grad` measures the two component
+gradients without populating parameter `.grad`; normal backward and all three
+optimizer steps remain unchanged. Metrics cover the global shared subspace and
+the encoder, recurrent, and posterior-head groups. A checked summarizer aligns
+each 25-update sample with the most recent deterministic evaluation and
+classifies it as pre-solve, solved, degraded, or intermediate.
+
+A focused invariance test verifies that diagnostic measurement leaves `.grad`
+empty and that the later world-model and critic training gradients exactly
+match an unmeasured control, including the resulting parameter updates. The
+full suite passes with 92 tests, bytecode
+compilation passes, and both the supported type gate and direct checks of the
+new diagnostic/logger/summarizer modules pass. As before, broad direct checking
+of `core.py` and `forward.py` reports their pre-existing dynamic-model and
+possibly-unbound errors; the new diagnostic path introduces no distinct error
+class or clean broad-type claim.
+
+A 12-update non-dry CPU process smoke completed in 3.57 seconds with manifest
+`287642c64b6b43f3b683a1023b22c5b2` and MLflow run
+`dabe1cf229804bb6a6697e03c1b6f580`. It published weights, persisted diagnostic
+metrics at updates 0 and 10, saved a final checkpoint, and shut down normally.
+At update 10, global cosine was `-0.030` and the scaled replay/WM raw norm ratio
+was `0.00041`. This tiny early-batch observation validates plumbing only and is
+not treated as evidence for or against the research hypothesis.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation

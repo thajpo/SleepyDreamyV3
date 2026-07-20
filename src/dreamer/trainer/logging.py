@@ -38,6 +38,7 @@ class StepMetrics:
     replay_loss: Optional[torch.Tensor] = None
     replay_ema_reg: Optional[torch.Tensor] = None
     replay_mc_loss: Optional[torch.Tensor] = None
+    gradient_alignment: dict[str, float] = field(default_factory=dict)
     viz_data: Optional[dict[str, torch.Tensor]] = None
 
 
@@ -263,6 +264,8 @@ def log_step_metrics(
                 m["train/lr/critic"] = critic_optimizer.param_groups[0]["lr"]
             if wm_ac_ratio_cosine and get_current_wm_ac_ratio:
                 m["train/wm_ac_ratio"] = get_current_wm_ac_ratio()
+
+        m.update(metrics.gradient_alignment)
 
         logger.log_scalars(m, step)
 

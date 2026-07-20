@@ -15,6 +15,7 @@ import time
 
 from .logging import create_step_metrics, log_step_metrics, log_progress
 from .forward import dreamer_step
+from .gradient_diagnostics import measure_gradient_alignment
 from ..runtime.replay_buffer import EpisodeReplayBuffer, EnvData
 from .checkpoints import save_checkpoint, load_checkpoint
 from ..models import (
@@ -475,6 +476,10 @@ class WorldModelTrainer:
                 device=self.device,
                 use_pixels=self.use_pixels,
                 do_log_images=do_log_images,
+                collect_gradient_diagnostics=(
+                    bool(self.config.research_gradient_diagnostics)
+                    and self.train_step % self.log_every == 0
+                ),
             )
             total_wm_loss = result.total_wm_loss
             total_actor_loss = result.total_actor_loss
@@ -494,6 +499,20 @@ class WorldModelTrainer:
             if not torch.isfinite(total_wm_loss):
                 raise RuntimeError(
                     f"Non-finite WM loss at step {self.train_step}: {total_wm_loss.item()}"
+                )
+
+            if result.replay_representation_loss is not None:
+                named_wm_parameters = [
+                    (f"encoder.{name}", parameter)
+                    for name, parameter in self.encoder.named_parameters()
+                ] + [
+                    (f"world_model.{name}", parameter)
+                    for name, parameter in self.world_model.named_parameters()
+                ]
+                metrics.gradient_alignment = measure_gradient_alignment(
+                    total_wm_loss,
+                    result.replay_representation_loss,
+                    named_wm_parameters,
                 )
 
             total_wm_loss.backward()
