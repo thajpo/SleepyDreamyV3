@@ -2,11 +2,11 @@
 
 Generated non-destructively from run manifests and config snapshots. No checkpoint contents were loaded.
 
-- Indexed runs: 79
-- Indexed size: 4.6 GiB
-- Manifest / legacy: 41 / 38
-- Exact-comparison eligible: 28
-- Dispositions: {'incomplete': 12, 'keep': 29, 'review': 38}
+- Indexed runs: 81
+- Indexed size: 4.8 GiB
+- Manifest / legacy: 43 / 38
+- Exact-comparison eligible: 29
+- Dispositions: {'incomplete': 12, 'keep': 31, 'review': 38}
 
 A blank comparison key means the run lacks the provenance or protocol needed for an exact comparison. Legacy runs are retained for review.
 
@@ -44,6 +44,8 @@ A blank comparison key means the run lacks the provenance or protocol needed for
 | `experiments/2026-07-19_cartpole_rssm_corrected_seed2_actor3500` | completed | keep | yes | 7 | 119.8 MiB |
 | `experiments/2026-07-20_cartpole_joint_window_weighted_no_advnorm_seed0_3500` | completed | keep | yes | 9 | 154.2 MiB |
 | `experiments/2026-07-20_cartpole_joint_window_weighted_no_advnorm_seed1_3500` | completed | keep | yes | 9 | 154.2 MiB |
+| `experiments/2026-07-20_cartpole_replay_coverage_seed0_3500` | completed | keep | yes | 9 | 154.3 MiB |
+| `experiments/2026-07-20_cartpole_replay_telemetry_smoke` | completed | keep | no | 2 | 10.4 MiB |
 | `experiments/2026-07-20_cartpole_window_weighted_no_advnorm_seed0_3500` | completed | keep | yes | 9 | 148.8 MiB |
 | `experiments/2026-07-20_cartpole_window_weighted_no_advnorm_seed1_3500` | completed | keep | yes | 9 | 148.8 MiB |
 | `runs/cartpole_collection_budget_smoke` | completed | keep | no | 1 | 5.2 MiB |

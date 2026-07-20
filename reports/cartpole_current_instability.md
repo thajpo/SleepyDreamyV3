@@ -1094,6 +1094,90 @@ all coverage fractions and the populated central-bin reconstruction metric.
 The smoke source was intentionally dirty because it preceded the telemetry
 commit and is validation evidence, not an exact-comparison research run.
 
+#### Prospective replay-coverage execution and result
+
+The preregistered seed-0 run completed normally from clean telemetry commit
+`5c02f3b`:
+
+- output: `experiments/2026-07-20_cartpole_replay_coverage_seed0_3500/`
+- manifest: `64f4a60775f743ed85f206fce59291ca`
+- MLflow: `975541a26aec4a639a2c2df5de8bcabd`
+- budget: 3,500 learner updates and 21,772 environment frames in 979.9 seconds
+- result: best deterministic return `500.0` at update 2,400; final return
+  `391.2` at update 3,500
+- disposition: completed at `max_train_steps`; source was clean and the parent
+  stopped and joined the collector normally
+
+The exact command was:
+
+```bash
+OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 \
+NUMEXPR_NUM_THREADS=2 UV_PROJECT_ENVIRONMENT=.venv-rocm \
+uv run --frozen --extra rocm dreamer-train \
+  hydra.run.dir=experiments/2026-07-20_cartpole_replay_coverage_seed0_3500 \
+  general.device=cuda models.d_hidden=128 train.max_train_steps=3500 \
+  train.batch_size=8 train.sequence_length=16 train.wm_lr=3e-4 \
+  train.actor_lr=3e-5 train.critic_lr=8e-5 \
+  train.actor_entropy_coef=1e-3 train.normalize_advantages=false \
+  train.eval_every=100 train.eval_episodes=20 train.checkpoint_interval=500 \
+  train.num_collectors=1 train.replay_buffer_size=512 \
+  train.min_buffer_episodes=16 train.replay_burn_in=4 train.replay_ratio=16 \
+  train.early_stop_ep_length=0 train.critic_real_return_scale=0.0 \
+  train.free_bits_straight_through=false general.seed=0 \
+  general.experiment_name=cartpole_replay_coverage_seed0_3500
+```
+
+`scripts/summarize_cartpole_replay_coverage.py` reads the persisted MLflow
+filesystem metrics, retains the final value for each step, derives coverage
+above absolute-position thresholds, and produces both the aligned 25-update
+time series and half-open interval summaries. The checked output is
+`replay_coverage_summary.json` inside the experiment directory. The primary
+comparison is:
+
+| Updates | Eval mean (range) | Mean fraction \|x\| >= 1 | Mean fraction \|x\| >= 1.5 | Mean replay x p90 | Mean decoder x MSE | Mean x MSE at 1.5--2.0 (batches) | Mean x MSE at 2.0+ (batches) |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 2,400--2,599 | 496.33 (492.65--500.0) | 0.194 | 0.102 | 1.457 | 0.071 | 0.045 (4/8) | 0.109 (3/8) |
+| 2,600--2,999 | 333.86 (241.35--500.0) | 0.269 | 0.132 | 1.518 | 0.129 | 0.259 (8/16) | 0.593 (6/16) |
+| 3,000--3,500 | 410.81 (306.05--475.55) | 0.241 | 0.104 | 1.499 | 0.088 | 0.208 (13/20) | 0.184 (4/20) |
+
+The evaluation curve is oscillatory rather than a single collapse: `500.0` at
+2,400, `294.85` at 2,600, `500.0` at 2,700, `241.35` at 2,900, `447.0` at
+3,000, `306.05` at 3,200, `475.55` at 3,300, and `391.2` at 3,500. Each point
+is a 20-episode deterministic evaluation. Mean actor entropy only declined from
+`0.470` in the solved window to `0.447` during 2,600--3,000 and `0.444`
+afterward, so this run did not undergo a simple entropy or constant-action
+collapse.
+
+The replay-coverage hypothesis is rejected for this replication. Boundary
+coverage did not decline before or during the performance loss. It increased
+while decoder error and evaluation both worsened, then remained high while
+decoder error and evaluation partly recovered. In particular, mean sampled
+coverage at `|x| >= 1` rose by about 39% from the solved interval to
+2,600--3,000. The result rules out insufficient *frequency of sampled boundary
+states* as the immediate cause under sequence-start weighting. It instead
+localizes the next question to why the learner intermittently fits or uses
+those observed states poorly: representation interference, target/value drift,
+or actor sensitivity remain live mechanisms.
+
+This conclusion is deliberately bounded. Each telemetry point is one sampled
+batch with at most 96 valid post-burn-in rows, so individual points are noisy.
+Bin-conditional MSE is only emitted when a bin is populated; the table reports
+the number of contributing batches and does not treat missing bins as zero.
+The summaries average batches rather than individual states. The asynchronous
+collector makes the exact trajectory scheduling-sensitive even with the same
+seed, so this run replicates instability but is not a bitwise continuation of
+the earlier step-2,600-to-3,500 collapse. Finally, one seed rejects this causal
+account for the observed replication but does not estimate a population
+effect.
+
+No training intervention follows from this result yet. The next bounded
+diagnostic should separate representation optimization from representation
+interference on the same prospective run: determine whether boundary decoder
+error rises because those samples receive too little effective gradient, or
+because subsequent central-state updates undo that fit. Only after measuring
+that distinction should a replay stratification, auxiliary state loss, or
+optimizer change be selected.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
