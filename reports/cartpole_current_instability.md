@@ -1259,25 +1259,6 @@ gradient reachability would make the result uninterpretable.
   Treat a behavioral miss as a rejected causal fix; only a clear pass justifies
   replication on seeds 1 and 2.
 
-The implementation extracts the replay value calculation into a focused helper,
-keeps its online critic input connected to observed post-burn-in features, and
-combines world-model and critic losses for one shared-graph backward pass. The
-slow critic distribution, lambda-return targets, imagined trajectories, and
-optional full-return critic input remain detached. A regression test verifies
-nonzero gradients in both the critic and non-bootstrap replay features, zero
-gradient in the final bootstrap-only feature, and no gradients in annotations
-or slow-critic parameters.
-
-Validation completed with 90 tests, bytecode compilation, and the supported
-scoped type gate. Directly checking all of `forward.py` and `core.py` continues
-to expose their pre-existing dynamic-model and possibly-unbound type errors; no
-new clean expanded type baseline is claimed. A non-dry one-update CPU smoke run
-completed with manifest `675b8556b6234ca1a68633e7a77a8712` and MLflow run
-`1360e6f518554d0f8a6c1b698eac536e`; it is dirty by design because it validates
-the uncommitted intervention. A separate 20-update, two-collector dry run
-exercised repeated shared-graph backpropagation, delivered the initial model to
-both independent mailboxes, and shut down normally.
-
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
