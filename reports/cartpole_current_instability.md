@@ -1349,6 +1349,60 @@ cosine similarity on the same representation parameters, then audit the full
 optimizer contract (loss ownership, learning rates, clipping, and ramp) before
 testing another coupled-gradient change.
 
+#### Optimizer-contract audit and preregistered gradient diagnostic
+
+The local optimizer contract differs from the audited reference in ways that
+make raw loss-scale comparisons insufficient:
+
+| Property | Frozen local CartPole contract | Official reference `e3f0224` |
+|---|---|---|
+| Optimizer ownership | separate world-model, actor, and critic LaProp instances | one optimizer over encoder, dynamics, heads, policy, and value |
+| Learning rate | `3e-4` WM, `3e-5` actor, `8e-5` critic | `4e-5` for all modules |
+| Startup schedule | full rate from update 0 | linear 0-to-`4e-5` ramp over 1,000 updates |
+| Replay-value representation gradient | detached | enabled |
+| Gradient clipping | AGC per local optimizer parameter set | AGC on the joint gradient before LaProp transforms |
+
+The local rates are benchmark-specific overrides rather than defaults. With the
+replay representation connected, its gradient reaches encoder/RSSM parameters
+owned by the WM optimizer; it is therefore transformed using the WM optimizer's
+state and `3e-4` step size, not the critic optimizer's `8e-5` rate. LaProp
+normalizes each coordinate using its accumulated second moment, so the 3.75x
+rate ratio does not alone predict a 3.75x parameter displacement. It does prove
+that the rejected trial was not equivalent to the reference's joint optimizer.
+
+The next diagnostic is preregistered as follows:
+
+- **Question:** on an otherwise detached baseline run, are the hypothetical
+  replay-value representation gradient and the authored world-model gradient
+  opposed or badly imbalanced on the shared parameters, and does that relation
+  worsen at or before behavioral degradation?
+- **Observational implementation:** only on existing scalar-log updates, retain
+  a live copy of the replay posterior and construct the same scaled replay-value
+  objective used in `c83c93c`. Use `torch.autograd.grad` to inspect it and the
+  world-model objective separately without writing `.grad` or adding the replay
+  gradient to any optimizer update. Log raw L2 norms, norm ratio, and cosine
+  similarity over parameters reached by both objectives, globally and for the
+  encoder, recurrent dynamics, and posterior head.
+- **Invariance requirements:** diagnostics default off; the normal replay-value
+  training input remains detached; targets and EMA outputs remain detached;
+  enabling diagnostics must not change model gradients or one-step parameter
+  updates under a fixed RNG state. A focused test must establish this before a
+  research run.
+- **Frozen run:** one clean seed-0, 3,500-update run with the exact command and
+  deterministic evaluation protocol used for the prospective replay-coverage
+  baseline, plus the diagnostic flag. Sample diagnostics every 25 updates.
+- **Primary analysis:** align diagnostic points to the evaluation curve. Compare
+  the period before the first evaluation at least 450, periods at least 450,
+  and subsequent periods below 300. Support for gradient interference as a
+  *proximate* instability mechanism requires the degraded period's global mean
+  cosine to be at least 0.10 lower or its median replay/WM norm ratio at least
+  2x higher than the solved period, with the change present no later than the
+  first degraded evaluation.
+- **Stop rule:** run one seed only. If it never produces both a solved and a
+  degraded interval, report the run as mechanically valid but behaviorally
+  inconclusive. Do not change learning rates, add a ramp, or reconnect the
+  gradient until these measurements are analyzed.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
