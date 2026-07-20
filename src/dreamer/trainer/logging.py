@@ -30,6 +30,9 @@ class StepMetrics:
     actor_mpc_margin: list[torch.Tensor] = field(default_factory=list)
     actor_mpc_mask_frac: list[torch.Tensor] = field(default_factory=list)
     actor_q_margin: list[torch.Tensor] = field(default_factory=list)
+    replay_states: list[torch.Tensor] = field(default_factory=list)
+    replay_state_reconstructions: list[torch.Tensor] = field(default_factory=list)
+    replay_state_masks: list[torch.Tensor] = field(default_factory=list)
     replay_posterior_states: list[torch.Tensor] = field(default_factory=list)
     replay_value_annotations: list[torch.Tensor] = field(default_factory=list)
     replay_loss: Optional[torch.Tensor] = None
@@ -73,8 +76,62 @@ def collect_viz_data(
     if use_pixels and "pixels" in obs_t:
         metrics.viz_data["obs_pixels"] = obs_t["pixels"]
         metrics.viz_data["obs_pixels_original"] = batch.pixels_original[:, t_step]
-        metrics.viz_data["reconstruction_pixels"] = obs_reconstruction.get("pixels")
+        reconstruction_pixels = obs_reconstruction.get("pixels")
+        if reconstruction_pixels is not None:
+            metrics.viz_data["reconstruction_pixels"] = reconstruction_pixels
     metrics.viz_data["posterior_probs"] = F.softmax(posterior_logits, dim=-1).detach()
+
+
+def summarize_cartpole_replay_state_metrics(metrics: StepMetrics) -> dict[str, float]:
+    """Summarize physical-state coverage and reconstruction on valid replay rows."""
+    if not (
+        metrics.replay_states
+        and metrics.replay_state_reconstructions
+        and metrics.replay_state_masks
+    ):
+        return {}
+
+    states = torch.cat(metrics.replay_states, dim=0)
+    reconstructions = torch.cat(metrics.replay_state_reconstructions, dim=0)
+    masks = torch.cat(metrics.replay_state_masks, dim=0).bool()
+    if states.shape != reconstructions.shape or states.shape[-1] != 4:
+        return {}
+    if masks.shape[0] != states.shape[0] or not masks.any():
+        return {}
+
+    states = states[masks]
+    reconstructions = reconstructions[masks]
+    squared_error = (reconstructions - states) ** 2
+    abs_x = states[:, 0].abs()
+    result = {
+        "research/cartpole/replay_abs_x/mean": abs_x.mean().item(),
+        "research/cartpole/replay_abs_x/p90": torch.quantile(abs_x, 0.90).item(),
+        "research/cartpole/replay_abs_x/max": abs_x.max().item(),
+    }
+    for state_index, state_name in enumerate(
+        ("x", "x_dot", "theta", "theta_dot")
+    ):
+        result[f"research/cartpole/decoder_mse/{state_name}"] = squared_error[
+            :, state_index
+        ].mean().item()
+
+    position_bins = (
+        (0.0, 0.5, "0_0p5"),
+        (0.5, 1.0, "0p5_1p0"),
+        (1.0, 1.5, "1p0_1p5"),
+        (1.5, 2.0, "1p5_2p0"),
+        (2.0, float("inf"), "2p0_plus"),
+    )
+    for lower, upper, label in position_bins:
+        in_bin = (abs_x >= lower) & (abs_x < upper)
+        result[f"research/cartpole/replay_abs_x_fraction/{label}"] = (
+            in_bin.float().mean().item()
+        )
+        if in_bin.any():
+            result[f"research/cartpole/decoder_x_mse/{label}"] = squared_error[
+                in_bin, 0
+            ].mean().item()
+    return result
 
 
 def log_step_metrics(
@@ -138,6 +195,8 @@ def log_step_metrics(
             if has_vector_obs:
                 m["wm/decoder/state_loss"] = state
                 m["wm/prior/state_loss"] = prior_state
+                if config.environment_name == "CartPole-v1":
+                    m.update(summarize_cartpole_replay_state_metrics(metrics))
 
             m["wm/reward_head/loss"] = reward
             m["wm/continue_head/loss"] = cont

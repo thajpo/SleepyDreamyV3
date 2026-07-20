@@ -20,6 +20,7 @@ from ..models import (
     calculate_lambda_returns,
     learned_continue_discount,
     symlog,
+    symexp,
     twohot_encode,
     unimix_logits,
 )
@@ -245,6 +246,19 @@ def dreamer_step(
             continue
 
         # --- Post-burn-in: accumulate WM components for logging ---
+        state_prediction = obs_reconstruction.get("state")
+        state_target = obs_t.get("state")
+        if (
+            state_prediction is not None
+            and state_target is not None
+            and state_prediction.shape[-1] > 0
+        ):
+            metrics.replay_states.append(state_target.detach())
+            metrics.replay_state_reconstructions.append(
+                symexp(state_prediction.detach())
+            )
+            metrics.replay_state_masks.append(sample_mask.detach())
+
         if critic_replay_scale > 0.0 or critic_real_return_scale > 0.0:
             metrics.replay_posterior_states.append(h_z_joined.detach())
 

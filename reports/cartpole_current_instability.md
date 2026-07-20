@@ -1056,6 +1056,44 @@ evidence requirement is prospective logging of replay absolute-position
 coverage and per-position-bin reconstruction error during a bounded rerun. No
 loss or sampling intervention should be selected before that measurement.
 
+#### Preregistered prospective replay-coverage contract
+
+- **Hypothesis:** before seed 0 loses boundary-state position reconstruction,
+  sampled learner batches lose representation of large absolute cart positions.
+- **Intervention:** observability only. At existing scalar-log steps, detach the
+  sampled post-burn-in states and their already-computed posterior decoder
+  outputs. Log valid-row absolute-position coverage, physical reconstruction
+  MSE for all four state components, and cart-position MSE within the same five
+  absolute-position bins used by the offline probe. Do not alter losses,
+  sampling, gradients, optimizer order, or policy behavior.
+- **Frozen run:** one seed-0, 3,500-update replication of commit `05b2d96`'s
+  joint-training contract after the telemetry commit: batch 8, sequence length
+  16, burn-in 4, replay ratio 16, sequence-start weighting, no advantage
+  normalization, and the same learning rates/evaluation protocol.
+- **Primary comparison:** coverage and decoder error before update 2,600,
+  during 2,600--3,000, and after 3,000. A coverage decline must precede or
+  coincide with binned error growth to support the hypothesis. Stable coverage
+  with rising error rejects it.
+- **Stop rule:** complete one seed, compare the telemetry with evaluation and
+  actor entropy, document the result, and stop before changing training.
+
+The implementation stores detached raw states, physical-space posterior
+reconstructions, and validity masks for post-burn-in learner rows in the
+per-step metrics accumulator. The CartPole logger emits mean, 90th percentile,
+maximum, and five-bin fractions for absolute cart position; physical MSE for
+`x`, `x_dot`, `theta`, and `theta_dot`; and cart-position MSE for every populated
+position bin. Padded sequence rows are excluded. These tensors do not enter a
+loss and no stochastic operation was added.
+
+Two focused summary tests cover padding and every bin edge. The full suite
+passed with 84 tests, compile and the supported scoped type gate passed, and
+the modified logging module passed a direct type check. A one-update non-dry
+CPU integration run completed with manifest `75b7c15bbacd49ccbea73f7be7323928`
+and MLflow run `4ebff07d94174d668cf9a90cd69f0cf1`; its persisted metric files contain
+all coverage fractions and the populated central-bin reconstruction metric.
+The smoke source was intentionally dirty because it preceded the telemetry
+commit and is validation evidence, not an exact-comparison research run.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
