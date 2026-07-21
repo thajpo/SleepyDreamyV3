@@ -1562,6 +1562,152 @@ cannot answer the question on the current training stack.
   head-only grounding and do not stack representation gradients or optimizer
   changes onto it.
 
+#### Exact-return critic-grounding result: rejected
+
+The frozen seed-0 run completed normally from clean preregistration commit
+`48744f1`:
+
+- output: `experiments/2026-07-21_cartpole_exact_return_seed0_3500/`
+- manifest: `1c6e55604b8a405c966c0497e29c4df0`
+- MLflow run: `b6b8d355ffc94a18b88163b914c4c3be`
+- causal variable: `critic_real_return_scale=1.0`; all other frozen benchmark
+  settings matched the detached baseline contract
+- budget: 3,500 learner updates and 21,491 environment frames
+- elapsed time: 1,165.98 seconds
+- disposition: completed at `max_train_steps`; source was clean, final and best
+  checkpoints were retained, and the collector stopped normally
+- result: best deterministic return `292.3` at update 1,600; final return
+  `41.2`; best-to-final gap `251.1`
+
+The full fixed-cohort evaluation curve is:
+
+```text
+100:11.60  200:9.40   300:9.35   400:9.35   500:9.35
+600:9.40   700:9.40   800:9.40   900:20.85  1000:9.35
+1100:63.10 1200:156.00 1300:139.30 1400:154.85 1500:199.05
+1600:292.30 1700:193.05 1800:159.35 1900:138.80 2000:115.20
+2100:137.55 2200:123.00 2300:149.50 2400:134.25 2500:102.85
+2600:163.60 2700:128.60 2800:129.10 2900:103.45 3000:139.90
+3100:129.85 3200:109.80 3300:114.40 3400:105.65 3500:41.20
+```
+
+The behavioral gate fails every applicable criterion. The policy never reached
+450, finished far below 450, and lost 251.1 return from its modest peak. Seeds
+1 and 2 are therefore not authorized by the stop rule. The exact-return path
+was numerically healthy: all 140 logged `loss.critic.replay_mc_return` values
+were finite, with mean `4.544` and range `3.741--5.541`. This is a learning-
+quality failure rather than target overflow, process failure, or missing loss
+execution.
+
+The evidence-selected replay intervals are summarized in
+`replay_coverage_summary.json`:
+
+| Updates | Eval mean (range) | Mean actor entropy | Mean replay fraction abs(x) >= 1 | Mean decoder x MSE | Mean decoder x-dot MSE |
+|---:|---:|---:|---:|---:|---:|
+| 0--1,499 | 44.34 (9.35--156.0) | 0.614 | 0.005 | 0.020 | 0.150 |
+| 1,500--1,699 | 245.68 (199.05--292.3) | 0.426 | 0.108 | 0.275 | 0.313 |
+| 1,700--2,499 | 143.84 (115.2--193.05) | 0.405 | 0.180 | 0.124 | 0.078 |
+| 2,500--3,500 | 115.31 (41.2--163.6) | 0.388 | 0.102 | 0.041 | 0.038 |
+
+The policy degrades while sampled boundary coverage remains material and both
+state-decoder errors improve sharply. Entropy stays moderate rather than
+approaching zero. This repeats the earlier conclusion that the immediate
+failure is not boundary starvation, a numerically broken world-model loss, or
+a simple constant-action collapse.
+
+The preregistered best/final fixed-seeds-17--36 probe is in
+`experiments/2026-07-21_cartpole_exact_return_seed0_on_policy_probe/`:
+
+| Checkpoint | Probe return | Actor/real balanced | Q/real balanced | Q/real correlation | Actor/Q | One-step MSE |
+|---:|---:|---:|---:|---:|---:|---:|
+| Best, step 1,600 | 284.15 | 0.488 | 0.446 | -0.036 | 0.711 | 0.199 |
+| Final, step 3,500 | 43.30 | 0.627 | 0.638 | 0.296 | 0.613 | 0.015 |
+
+The final checkpoint clears the actor/real and Q/real thresholds but fails the
+actor/Q requirement badly. This is not a successful intervention: final
+behavior is poor, and the actor is no longer reliably choosing the action that
+the same checkpoint's three-step critic/model planner ranks higher. The late
+planner ordering and one-step model accuracy improve while behavior gets worse,
+which localizes the remaining question to policy improvement or to a mismatch
+between the planner diagnostic and the actor's actual learning target.
+
+This conclusion is bounded. The probe's true-action label is a 30-step real-
+simulator comparison, while its learned Q comparison uses a three-step model
+horizon. The actor is trained from 15-step imagined lambda returns, so low
+actor/Q agreement could partly reflect horizon mismatch rather than failure to
+follow its own training objective. Before another training intervention, run
+one read-only final-checkpoint probe with model horizon 15 on the same episodes
+and seeds. If actor/Q agreement rises above 0.8, audit horizon-dependent model
+value error; if it remains below 0.8, treat actor-to-value transfer as genuinely
+broken. Do not change training or launch another seed for this check.
+
+The read-only horizon-15 check is saved in
+`experiments/2026-07-21_cartpole_exact_return_seed0_final_h15_probe/`. On the
+same 20 episodes and 248 actionable states, learned Q retained `0.628` balanced
+accuracy against the real rollout preference and `0.294` delta correlation,
+but actor/Q agreement was only `0.601`. This is slightly worse than the
+three-step agreement of `0.613`, not a recovery above `0.8`.
+
+The subsequent source audit found that this does **not** yet establish a broken
+actor-to-value transfer. `enumerate_first_action_values()` expands every future
+action branch and returns the maximum branch for each forced first action. It is
+a model-predictive planner value. The REINFORCE actor instead samples future
+actions from its own policy and is trained on the resulting 15-step lambda
+return. Matching the horizon does not remove this max-planner versus on-policy
+objective difference. The existing `actor/Q` field is still useful as a
+planner-distillation diagnostic, but it is not a direct test of whether the
+actor follows its authored loss.
+
+Before another training run, add one opt-in, read-only Monte Carlo diagnostic
+that forces each first action and then reproduces the training rollout:
+categorical prior sampling, future actions sampled from the 1% unimixed actor,
+learned reward and continuation, slow-critic bootstrap, lambda `0.95`, and the
+15-step horizon. Average 64 rollouts per first action on the final checkpoint's
+same seed-17--36 actor trajectory and report the standard error of each action
+difference. The causal variable is measurement only; no weights or training
+configuration may change. If actor agreement with statistically separated
+policy-conditioned action values is at least `0.8`, the gap is planner versus
+policy improvement. If it remains below `0.8` on at least 100 separated states,
+the actor optimizer is not tracking its own target. If fewer than 100 states
+separate, the sampled target itself is too weak/noisy for a strong transfer
+conclusion. Stop after this final-checkpoint diagnostic and its tests.
+
+The opt-in diagnostic adds `--policy-q-samples` to the on-policy probe. Its
+vectorized estimator leaves all models under `no_grad`, forces each candidate
+first action, samples subsequent latent states and 1%-unimixed actor actions,
+and reuses the authored lambda-return implementation. It reports per-action
+Monte Carlo standard errors and a 95%-separated actor-agreement subset. With the
+option disabled, the historical probe output and computation are unchanged.
+Focused estimator and summary tests pass, as do all 99 fast tests, bytecode
+compilation, the supported type gate plus direct checks of the diagnostic
+modules, and a one-episode CUDA probe smoke.
+
+The preregistered final-checkpoint result is saved in
+`experiments/2026-07-21_cartpole_exact_return_seed0_final_policy_q_probe/`:
+
+- 64 rollouts per first action, 15-step horizon, and the same 20 deployed actor
+  episodes produced 866 states.
+- 562 states had a policy-Q difference larger than 1.96 standard errors; actor
+  agreement on them was `0.683`, failing the `0.8` gate with ample sample size.
+- Across the 248 real-actionable states, policy-Q/real balanced accuracy was
+  `0.632` and delta correlation was `0.287`. Among the 160 both actionable and
+  statistically separated states, balanced accuracy was `0.679`.
+- Mean absolute policy-Q difference was `1.316`. The 178 confident actor/Q
+  mismatches still had mean absolute difference `1.057` and mean deployed actor
+  confidence `0.885`, so the miss is not confined to near-ties or an uncertain
+  actor.
+
+This establishes a current-target mismatch at the final exact-return
+checkpoint: the actor does not reliably select the action favored by the
+sampled lambda-return objective it is authored to optimize. It does not yet
+distinguish an actor implementation error from optimizer lag under moving
+world-model/critic targets. The evidence-selected control is the detached
+baseline's final checkpoint, measured with the identical 64-sample protocol.
+If baseline agreement is at least `0.8`, attribute the new mismatch to the
+exact-return intervention's effect on target consistency; if baseline also
+fails, treat this as a systemic actor-optimization boundary. This is one
+read-only checkpoint measurement; do not train or tune from it.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation

@@ -96,6 +96,53 @@ def test_on_policy_summary_rejects_empty_rows():
         )
 
 
+def test_on_policy_summary_reports_confident_policy_q_agreement():
+    correct = _row(
+        0,
+        episode_return=100,
+        true_delta=10,
+        true_pref=1,
+        actor_correct=True,
+        steps_to_end=10,
+    )
+    correct.update(
+        {
+            "policy_q_delta": 2.0,
+            "policy_q_delta_se": 0.1,
+            "policy_q_pref": 1,
+        }
+    )
+    mismatch = _row(
+        1,
+        episode_return=50,
+        true_delta=-10,
+        true_pref=0,
+        actor_correct=False,
+        steps_to_end=5,
+    )
+    mismatch.update(
+        {
+            "actor_action": 1,
+            "policy_q_delta": -2.0,
+            "policy_q_delta_se": 0.1,
+            "policy_q_pref": 0,
+        }
+    )
+
+    summary = summarize_on_policy_rows(
+        [correct, mismatch],
+        checkpoint_path=Path("checkpoint.pt"),
+        train_step=123,
+        critical_margin=15,
+        terminal_window=10,
+    )
+
+    assert summary["policy_q_confident_states"] == 2
+    assert summary["policy_q_confident_actor_agreement"] == 0.5
+    assert summary["policy_q_confident_actionable_states"] == 2
+    assert summary["policy_q_confident_vs_rollout_balanced_accuracy"] == 1.0
+
+
 def test_on_policy_summary_compares_decomposed_value_preferences():
     correct = _row(
         0,

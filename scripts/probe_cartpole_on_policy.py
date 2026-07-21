@@ -16,7 +16,10 @@ import torch.nn.functional as F
 
 from dreamer.inspect import resolve_device
 from dreamer.models import learned_continue_discount, symlog, symexp
-from dreamer.models.dreaming import enumerate_first_action_values
+from dreamer.models.dreaming import (
+    enumerate_first_action_values,
+    estimate_policy_lambda_action_values,
+)
 if __package__:
     from scripts.probe_cartpole_q import (
         action_preference,
@@ -249,7 +252,7 @@ def summarize_on_policy_rows(
             for key in rows[0]
             if key.endswith("_delta")
             and (
-                key == "q_delta"
+                key in {"q_delta", "policy_q_delta"}
                 or key.startswith("hybrid_")
                 or key.startswith("decomp_")
             )
@@ -257,6 +260,35 @@ def summarize_on_policy_rows(
     )
     for prefix in prefixes:
         summary.update(_preference_metrics(rows, actionable, prefix))
+    policy_q_rows = [row for row in rows if "policy_q_delta_se" in row]
+    if policy_q_rows:
+        separated = [
+            row
+            for row in policy_q_rows
+            if abs(float(row["policy_q_delta"]))
+            > 1.96 * float(row["policy_q_delta_se"])
+        ]
+        separated_actionable = [
+            row for row in separated if int(row["true_pref"]) >= 0
+        ]
+        summary.update(
+            {
+                "policy_q_confident_states": len(separated),
+                "policy_q_confident_actor_agreement": _fraction(
+                    sum(
+                        int(row["actor_action"]) == int(row["policy_q_pref"])
+                        for row in separated
+                    ),
+                    len(separated),
+                ),
+                "policy_q_confident_actionable_states": len(separated_actionable),
+                "policy_q_confident_vs_rollout_balanced_accuracy": (
+                    _balanced_preference_accuracy(
+                        separated_actionable, "policy_q_pref"
+                    )
+                ),
+            }
+        )
     return summary
 
 
@@ -272,6 +304,7 @@ def run_on_policy_probe(
     decomposition_horizons: list[int],
     critical_margin: float,
     terminal_window: int,
+    policy_q_samples: int = 0,
 ) -> dict:
     """Run the deployed deterministic actor and score each visited state."""
     cfg, actor, critic, _q_critic, encoder, world_model, checkpoint, _critic_key, _q_key = (
@@ -304,6 +337,10 @@ def run_on_policy_probe(
     decomposition_horizons = sorted(
         {max(1, int(horizon)) for horizon in decomposition_horizons}
     )
+    policy_q_generator = None
+    if policy_q_samples:
+        policy_q_generator = torch.Generator(device=device)
+        policy_q_generator.manual_seed(seed + 2_000_000)
 
     try:
         with torch.no_grad():
@@ -355,6 +392,30 @@ def run_on_policy_probe(
                                 getattr(cfg, "terminal_reward_penalty", 0.0)
                             ),
                         )
+                        policy_q_values = None
+                        policy_q_standard_errors = None
+                        if policy_q_samples:
+                            (
+                                policy_q_values,
+                                policy_q_standard_errors,
+                            ) = estimate_policy_lambda_action_values(
+                                h_z,
+                                z_embed,
+                                actor,
+                                critic,
+                                world_model,
+                                cfg.n_actions,
+                                cfg.d_hidden,
+                                bins,
+                                imagination_discount,
+                                cfg.lam,
+                                cfg.num_dream_steps,
+                                policy_q_samples,
+                                generator=policy_q_generator,
+                                terminal_reward_penalty=float(
+                                    getattr(cfg, "terminal_reward_penalty", 0.0)
+                                ),
+                            )
                         decomposition_values = {}
                         for horizon in decomposition_horizons:
                             full_values = (
@@ -530,6 +591,16 @@ def run_on_policy_probe(
                     best_score = max(true_scores)
                     probs = actor_probs.squeeze(0).cpu().numpy()
                     q_values_np = q_values.squeeze(0).cpu().numpy()
+                    policy_q_values_np = (
+                        None
+                        if policy_q_values is None
+                        else policy_q_values.squeeze(0).cpu().numpy()
+                    )
+                    policy_q_se_np = (
+                        None
+                        if policy_q_standard_errors is None
+                        else policy_q_standard_errors.squeeze(0).cpu().numpy()
+                    )
                     decomposition_np = {
                         key: values.squeeze(0).cpu().numpy()
                         for key, values in decomposition_values.items()
@@ -635,6 +706,22 @@ def run_on_policy_probe(
                         "chosen_action_terminated": int(chosen_done),
                         "other_action_terminated": int(other_done),
                     }
+                    if policy_q_values_np is not None and policy_q_se_np is not None:
+                        policy_q_delta = float(
+                            policy_q_values_np[1] - policy_q_values_np[0]
+                        )
+                        policy_q_delta_se = float(
+                            np.sqrt(policy_q_se_np[0] ** 2 + policy_q_se_np[1] ** 2)
+                        )
+                        row.update(
+                            {
+                                "policy_q0": float(policy_q_values_np[0]),
+                                "policy_q1": float(policy_q_values_np[1]),
+                                "policy_q_delta": policy_q_delta,
+                                "policy_q_delta_se": policy_q_delta_se,
+                                "policy_q_pref": int(policy_q_delta > 0.0),
+                            }
+                        )
                     for state_index, state_name in enumerate(
                         ("x", "x_dot", "theta", "theta_dot")
                     ):
@@ -725,6 +812,10 @@ def run_on_policy_probe(
             "rollout_horizon": rollout_horizon,
             "model_horizon": model_horizon,
             "decomposition_horizons": decomposition_horizons,
+            "policy_q_samples": policy_q_samples,
+            "policy_q_horizon": (
+                int(cfg.num_dream_steps) if policy_q_samples else None
+            ),
             "mean_one_step_state_mse": float(
                 np.mean([float(row["mean_one_step_state_mse"]) for row in rows])
             ),
@@ -805,12 +896,15 @@ def main() -> None:
     parser.add_argument("--decompose-horizons", nargs="*", type=int, default=[1, 3])
     parser.add_argument("--critical-margin", type=float, default=15.0)
     parser.add_argument("--terminal-window", type=int, default=10)
+    parser.add_argument("--policy-q-samples", type=int, default=0)
     args = parser.parse_args()
 
     if args.episodes <= 0:
         parser.error("--episodes must be positive")
     if args.rollout_horizon <= 0:
         parser.error("--rollout-horizon must be positive")
+    if args.policy_q_samples == 1 or args.policy_q_samples < 0:
+        parser.error("--policy-q-samples must be 0 or at least 2")
 
     device = resolve_device(args.device)
     summaries = []
@@ -828,6 +922,7 @@ def main() -> None:
             decomposition_horizons=args.decompose_horizons,
             critical_margin=args.critical_margin,
             terminal_window=args.terminal_window,
+            policy_q_samples=args.policy_q_samples,
         )
         summaries.append(summary)
         print(json.dumps(summary, indent=2))

@@ -112,6 +112,126 @@ def dream_sequence(
 
 
 @torch.no_grad()
+def estimate_policy_lambda_action_values(
+    initial_h_z,
+    initial_z_embed,
+    actor,
+    critic,
+    world_model,
+    n_actions,
+    d_hidden,
+    bins,
+    gamma,
+    lam,
+    horizon,
+    samples,
+    *,
+    generator=None,
+    terminal_reward_penalty=0.0,
+):
+    """Estimate the actor's own lambda-return target for every first action.
+
+    Unlike :func:`enumerate_first_action_values`, this diagnostic does not take
+    the best future action branch. It forces each candidate first action, then
+    samples latent states and all later actions exactly like ``dream_sequence``.
+    The returned Monte Carlo means therefore measure the action preference that
+    the sampled REINFORCE objective presents to the actor.
+
+    Returns:
+        ``(means, standard_errors)`` with shape ``(batch, n_actions)``.
+    """
+    horizon = int(horizon)
+    samples = int(samples)
+    if horizon < 1:
+        raise ValueError("horizon must be positive")
+    if samples < 2:
+        raise ValueError("samples must be at least 2")
+
+    batch_size = initial_h_z.shape[0]
+    h_dim = world_model.n_blocks * d_hidden
+    device = initial_h_z.device
+    dtype = initial_h_z.dtype
+    rollout_shape = (batch_size, n_actions, samples)
+    rollout_count = batch_size * n_actions * samples
+
+    def expand_rollouts(tensor):
+        return (
+            tensor.view(batch_size, 1, 1, *tensor.shape[1:])
+            .expand(*rollout_shape, *tensor.shape[1:])
+            .reshape(rollout_count, *tensor.shape[1:])
+        )
+
+    def sample_categorical(probs):
+        flat = probs.reshape(-1, probs.shape[-1])
+        draws = torch.multinomial(flat, 1, generator=generator).squeeze(-1)
+        return draws.view(*probs.shape[:-1])
+
+    h_z = expand_rollouts(initial_h_z.detach())
+    h_state = h_z[:, :h_dim]
+    z_embed = expand_rollouts(initial_z_embed.detach())
+    dreamed_states = [h_z]
+    dreamed_rewards = []
+    dreamed_continues = []
+
+    first_actions = (
+        torch.arange(n_actions, device=device)
+        .view(1, n_actions, 1)
+        .expand(*rollout_shape)
+        .reshape(rollout_count)
+    )
+
+    for depth in range(horizon):
+        if depth == 0:
+            action_ids = first_actions
+        else:
+            action_logits = unimix_logits(actor(h_z), unimix_ratio=0.01)
+            action_ids = sample_categorical(F.softmax(action_logits, dim=-1))
+        action_onehot = F.one_hot(action_ids, num_classes=n_actions).to(dtype=dtype)
+
+        h_next, prior_logits = world_model.step_dynamics(
+            z_embed, action_onehot, h_state
+        )
+        prior_probs = F.softmax(
+            unimix_logits(prior_logits, unimix_ratio=0.01), dim=-1
+        )
+        z_indices = sample_categorical(prior_probs)
+        z_state = F.one_hot(
+            z_indices, num_classes=world_model.n_classes
+        ).to(dtype=dtype)
+        h_z = world_model.join_h_and_z(h_next, z_state).detach()
+        dreamed_states.append(h_z)
+
+        reward_logits = world_model.reward_predictor(h_z)
+        rewards = torch.sum(F.softmax(reward_logits, dim=-1) * bins, dim=-1)
+        continue_logits = world_model.continue_predictor(h_z).squeeze(-1)
+        if terminal_reward_penalty:
+            rewards = rewards - float(terminal_reward_penalty) * (
+                1.0 - torch.sigmoid(continue_logits)
+            )
+        dreamed_rewards.append(rewards)
+        dreamed_continues.append(continue_logits)
+
+        h_state = h_next.detach()
+        z_embed = world_model.z_embedding(z_state.view(rollout_count, -1)).detach()
+
+    states = torch.stack(dreamed_states)
+    value_logits = critic(states)
+    values = torch.sum(F.softmax(value_logits, dim=-1) * bins, dim=-1)
+    lambda_returns = calculate_lambda_returns(
+        torch.stack(dreamed_rewards),
+        values,
+        torch.stack(dreamed_continues),
+        gamma,
+        lam,
+        horizon,
+    )
+    first_returns = lambda_returns[0].view(*rollout_shape)
+    means = first_returns.mean(dim=-1)
+    standard_errors = first_returns.std(dim=-1, unbiased=True) / samples**0.5
+    return means, standard_errors
+
+
+@torch.no_grad()
 def enumerate_first_action_values(
     initial_h_z,
     initial_z_embed,
@@ -224,6 +344,7 @@ def enumerate_first_action_values(
         if depth == 0:
             first_action = action_ids
         else:
+            assert first_action is not None
             first_action = (
                 first_action.unsqueeze(2)
                 .expand(batch_size, branch_count, n_actions)
