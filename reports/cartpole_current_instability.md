@@ -1433,6 +1433,66 @@ At update 10, global cosine was `-0.030` and the scaled replay/WM raw norm ratio
 was `0.00041`. This tiny early-batch observation validates plumbing only and is
 not treated as evidence for or against the research hypothesis.
 
+#### Gradient-alignment execution and result
+
+The preregistered run completed normally from clean commit `20ebf54`:
+
+- output: `experiments/2026-07-20_cartpole_gradient_alignment_seed0_3500/`
+- manifest: `3067e0ab16664fc59cd7351925c263c3`
+- MLflow run: `6207c5ea8df748acbaf98144ee3abf5f`
+- budget: 3,500 learner updates and 21,484 environment frames
+- elapsed time: 950.71 seconds
+- result: best evaluation 421.95 at update 1,900; final 134.6
+
+The run never met the preregistered solved threshold of 450, so the primary
+solved-versus-degraded association test is **inconclusive by its stop rule**.
+The checked primary summary is `gradient_alignment_summary.json`; all 140
+telemetry batches are correctly classified as pre-solve. Across the run, the
+global gradient cosine has mean `-0.001`, median `-0.016`, and range
+`-0.658--0.837`. The scaled replay/WM norm ratio has mean `1.322`, median
+`0.721`, 90th percentile `3.026`, maximum `10.344`, and final logged value
+`7.502`. Thus the rejected representation-gradient intervention was not a
+small auxiliary perturbation: on many batches its hypothetical representation
+gradient matched or exceeded the entire authored WM gradient, while its
+direction varied from strongly opposed to strongly aligned.
+
+For exploration only, a second checked summary lowers the performance bands to
+at least 300 versus below 200; it is saved as
+`gradient_alignment_exploratory_300_200.json` and does not replace the
+preregistered gate.
+
+| Exploratory band | Batches | Global cosine mean (median) | Replay/WM ratio mean (median) |
+|---|---:|---:|---:|
+| at least 300 | 16 | 0.037 (-0.009) | 1.639 (0.731) |
+| below 200 after first >=300 | 32 | -0.012 (-0.040) | 1.050 (0.782) |
+
+Neither global criterion is met: cosine is only 0.049 lower, not 0.10, and the
+median norm ratio is 1.07x, not 2x. Encoder cosine shows a larger exploratory
+shift (mean `0.215` to `-0.017`), but this was not the primary test and the
+hypothetical gradient is detached in this baseline, so it cannot itself cause
+the observed baseline degradation. The defensible conclusion is narrower:
+objective scale and direction explain why reconnecting replay value loss was a
+materially risky intervention, but this run does not identify replay/WM
+gradient interference as the original instability mechanism.
+
+This run also exposes a benchmark confound in `evaluate_policy()`. It uses
+`seed + 1_000_000 + step * 1000`, so every checkpoint is evaluated on a
+different set of 20 CartPole initial states. Each score is reproducible, and
+different runs at the same update share seeds, but changes across updates mix
+model change with test-set change. This affects the research curve and best
+checkpoint selection. It does not erase prior fixed-seed evidence of real
+degradation: the earlier best/final on-policy probe used seeds 17--36 for both
+checkpoints and fell from 500.0 to 378.6.
+
+Before another training intervention, evaluate every saved checkpoint from the
+new run on the same fixed seeds 17--36, using posterior and action argmax exactly
+as deployed evaluation does. Include periodic checkpoints 500--3,500 and the
+best checkpoint at 1,900. Record all 20 returns plus mean, range, and solved
+fraction. This is an offline measurement only. If the fixed-seed curve is much
+smoother, repair the benchmark before interpreting more training changes; if it
+retains the large reversals, the instability is genuinely in the learned
+policy/model rather than primarily evaluation sampling noise.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
