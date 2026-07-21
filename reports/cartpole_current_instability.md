@@ -1798,6 +1798,38 @@ target can produce a better deployed actor before another end-to-end run.
 - **Stop rule:** one checkpoint, split, optimizer setting, and seed. Do not tune
   epochs, learning rate, confidence cutoff, or labels after seeing the result.
 
+The probe implementation was committed as `6659b11` after focused tests,
+direct type checking, bytecode compilation, CLI validation, and a one-episode
+CUDA smoke. The preregistered result is saved in
+`experiments/2026-07-21_cartpole_exact_return_frozen_policy_improvement/`:
+
+- collection visited 866 states and retained 581 confident labels, split into
+  465 training and 116 validation examples; the label histogram was 260/321;
+- the copied actor reached `0.998` train accuracy and `0.991` held-out accuracy,
+  with final cross-entropy `0.0010`;
+- on unseen reset seeds 10,017--10,036, the original actor scored `39.0` mean
+  return and the fitted actor scored `44.55`, an improvement of only `5.55`;
+- disposition: failed the preregistered `+50` behavioral gate despite easily
+  passing the `0.8` held-out-fit gate. No hyperparameter or label iteration was
+  run.
+
+Actor representation capacity and ordinary supervised optimization are
+therefore not the blocker at this checkpoint. The final policy-Q target is
+locally learnable on the old actor's state distribution, but one-step
+distillation does not produce robust closed-loop control when the fitted actor
+changes that distribution. The earlier `0.679` policy-Q/real balanced accuracy
+is a local diagnostic, not evidence of a globally useful policy-improvement
+operator.
+
+This rejects “make the actor catch up to the late exact-return target” as the
+next fix. The primary boundary remains action-value target robustness under
+policy-induced distribution shift; actor lag is secondary. Do not iterate
+distillation or stack it into training. The next investigation should explain
+why imagined action preference fails off the actor trajectory despite accurate
+one-step state prediction—most directly by separating prior-latent rollout
+error, learned continuation/value bootstrap error, and compounding horizon
+error on matched real action sequences.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
