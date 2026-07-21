@@ -1525,6 +1525,43 @@ enabled at update 1 completed normally, including collector shutdown. This
 changes evaluation and best-checkpoint selection only; it does not alter the
 training data, losses, or optimizer updates.
 
+#### Preregistered exact-return critic-grounding gate
+
+The next intervention revisits `critic_real_return_scale`, but only after the
+hard-free-bits, RSSM sequence-gradient, posterior-unimix, LaProp, collection
+pacing, sequence sampling, joint-training, and fixed-evaluation corrections.
+The earlier scale-1 canary predates the first three model correctness fixes and
+cannot answer the question on the current training stack.
+
+- **Hypothesis:** adding an exact full-episode return-to-go loss to the critic
+  head will prevent its on-policy action ordering from drifting after useful
+  behavior appears. Complete episodes already carry the required targets, so a
+  sampled subsequence's label includes rewards beyond its right boundary.
+- **Causal variable:** change only `train.critic_real_return_scale` from `0.0`
+  to `1.0`. Retain `critic_replay_scale=0.3`, detached replay features, current
+  model/actor/critic learning rates, fixed collection ratio, sequence-start
+  sampling, no advantage z-score, and all architecture/loss settings. Do not
+  enable gradient-alignment diagnostics in this behavioral run.
+- **Source:** code source `75024df`; launch from its clean docs-only descendant
+  containing this preregistration. The run manifest must record the resolved
+  commit and `dirty=false`.
+- **Frozen run:** seed 0, 3,500 learner updates, batch 8, sequence length 16,
+  burn-in 4, replay ratio 16, one collector, and fixed 20-episode evaluation
+  every 100 updates. Use the same 21k-frame pacing contract as the detached
+  baseline.
+- **Primary behavioral gate:** after the first evaluation at least 450, no
+  later evaluation may fall below 300; final must be at least 450 and the
+  best-to-final gap at most 50. If the run never reaches 450, it fails rather
+  than becoming an unbounded tuning search.
+- **Boundary gate:** run the fixed seeds 17--36 on-policy best/final probe.
+  Final Q/real balanced accuracy must exceed the detached telemetry baseline
+  `0.496`, actor/real must exceed `0.510`, actor/Q must remain above `0.8`, and
+  exact-return loss must remain finite.
+- **Stop rule:** one seed and its best/final probe only. A clear behavioral and
+  boundary pass may be replicated on seeds 1 and 2; otherwise reject scale-1
+  head-only grounding and do not stack representation gradients or optimizer
+  changes onto it.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
