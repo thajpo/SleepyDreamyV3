@@ -16,7 +16,7 @@ Usage:
 import os
 import random
 import tempfile
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Protocol, Sequence
 from datetime import datetime
 from pathlib import Path
@@ -33,6 +33,7 @@ import multiprocessing as mp
 from dreamer.config import (
     Config,
     dump_config_json,
+    load_checkpoint_config,
     validate_config,
 )
 from dreamer.run_manifest import create_run_manifest, finish_run_manifest
@@ -208,12 +209,66 @@ def dictconfig_to_config(cfg: DictConfig) -> Config:
     return Config(**d)
 
 
+def resolve_resume_config(
+    flat_cfg: Config,
+    checkpoint_path: str | Path,
+    *,
+    checkpoint: dict | None = None,
+    allow_semantic_migration: bool = False,
+) -> Config:
+    """Restore checkpoint-defining semantics before constructing models."""
+    if allow_semantic_migration:
+        return flat_cfg
+
+    checkpoint_path = Path(checkpoint_path)
+    if checkpoint is None:
+        checkpoint = torch.load(
+            checkpoint_path, map_location="cpu", weights_only=False
+        )
+    if checkpoint is None:
+        raise ValueError("checkpoint payload is empty")
+    checkpoint_config = load_checkpoint_config(checkpoint_path, checkpoint)
+    if checkpoint_config is not None:
+        return replace(
+            flat_cfg,
+            continue_head_layers=checkpoint_config.continue_head_layers,
+            critic_slow_target=checkpoint_config.critic_slow_target,
+        )
+
+    world_model_state = checkpoint.get("world_model", {})
+    if "continue_predictor.weight" in world_model_state:
+        continue_head_layers = 0
+    elif "continue_predictor.0.weight" in world_model_state:
+        continue_head_layers = 1
+    else:
+        raise ValueError(
+            "checkpoint does not identify its continuation-head architecture"
+        )
+    return replace(
+        flat_cfg,
+        continue_head_layers=continue_head_layers,
+        critic_slow_target=True,
+    )
+
+
 def run_training(
     flat_cfg: Config,
     mlflow_run_name: str | None = None,
     checkpoint_path: str | None = None,
+    allow_resume_semantic_migration: bool = False,
 ):
     """Run training with the given configuration."""
+    checkpoint = None
+    if checkpoint_path:
+        checkpoint = torch.load(
+            checkpoint_path, map_location="cpu", weights_only=False
+        )
+        flat_cfg = resolve_resume_config(
+            flat_cfg,
+            checkpoint_path,
+            checkpoint=checkpoint,
+            allow_semantic_migration=allow_resume_semantic_migration,
+        )
     validate_config(flat_cfg)
     device = resolve_device(flat_cfg.device)
 
@@ -255,11 +310,8 @@ def run_training(
         if flat_cfg.use_pixels
         else "vector"
     )
-    if checkpoint_path and os.path.exists(checkpoint_path):
+    if checkpoint is not None:
         try:
-            checkpoint = torch.load(
-                checkpoint_path, map_location="cpu", weights_only=False
-            )
             checkpoint_mlflow_run_id = checkpoint.get("mlflow_run_id")
         except Exception as exc:
             print(f"  Warning: could not read MLflow run id from checkpoint: {exc}")
@@ -393,11 +445,19 @@ def main(cfg: DictConfig):
 
     flat_cfg = dictconfig_to_config(cfg)
     checkpoint_path = cfg.get("checkpoint_path", None)
+    allow_resume_semantic_migration = bool(
+        cfg.get("allow_resume_semantic_migration", False)
+    )
 
     from hydra.core.hydra_config import HydraConfig
 
     run_name = Path(HydraConfig.get().runtime.output_dir).name
-    run_training(flat_cfg, mlflow_run_name=run_name, checkpoint_path=checkpoint_path)
+    run_training(
+        flat_cfg,
+        mlflow_run_name=run_name,
+        checkpoint_path=checkpoint_path,
+        allow_resume_semantic_migration=allow_resume_semantic_migration,
+    )
 
 
 if __name__ == "__main__":

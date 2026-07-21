@@ -183,7 +183,11 @@ def load_checkpoint_models(checkpoint_path: Path, device: str):
 
     checkpoint = torch.load(checkpoint_path, map_location=device)
     actor.load_state_dict(checkpoint["actor"])
-    critic_key = "critic_ema" if "critic_ema" in checkpoint else "critic"
+    critic_key = (
+        "critic_ema"
+        if cfg.critic_slow_target and "critic_ema" in checkpoint
+        else "critic"
+    )
     critic.load_state_dict(checkpoint[critic_key])
     q_critic_key = None
     if "q_critic_ema" in checkpoint:

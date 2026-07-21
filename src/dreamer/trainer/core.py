@@ -752,6 +752,7 @@ class WorldModelTrainer:
             best_eval_step=self.best_eval_step,
             best_eval_metric=self.best_eval_metric,
             run_id=self.run_manifest_id,
+            config_snapshot=asdict(self.config),
         )
 
     def should_skip_ac_update(self) -> bool:

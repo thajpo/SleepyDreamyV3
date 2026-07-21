@@ -1,8 +1,10 @@
+from dataclasses import asdict
 from pathlib import Path
 
 import torch
 import pytest
 
+from dreamer.config import Config
 from dreamer.trainer.checkpoints import load_checkpoint, save_checkpoint
 from dreamer.trainer.core import EvaluationResult
 
@@ -111,6 +113,15 @@ def test_checkpoint_round_trip_restores_models_and_run_state(tmp_path):
         "best_eval_metric": "episode_reward",
         "run_id": "manifest-test",
     }
+
+
+def test_checkpoint_carries_portable_config_snapshot(tmp_path):
+    snapshot = asdict(Config())
+    path = _save(tmp_path, _components(), config_snapshot=snapshot)
+
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+
+    assert checkpoint["config_snapshot"] == snapshot
 
 
 def test_final_checkpoint_does_not_overwrite_best_checkpoint(tmp_path):

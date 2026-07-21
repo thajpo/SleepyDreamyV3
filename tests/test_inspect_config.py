@@ -1,6 +1,8 @@
 import json
 from dataclasses import asdict
 
+import torch
+
 from dreamer.config import Config
 from dreamer.inspect import infer_config_from_checkpoint
 
@@ -43,3 +45,14 @@ def test_inspector_uses_slow_critic_target_for_historical_config(tmp_path):
     config = infer_config_from_checkpoint(checkpoint_path, config_name=None)
 
     assert config.critic_slow_target is True
+
+
+def test_inspector_reads_config_from_portable_checkpoint(tmp_path):
+    checkpoint_path = tmp_path / "checkpoint_final.pt"
+    snapshot = asdict(Config(continue_head_layers=1, critic_slow_target=False))
+    torch.save({"config_snapshot": snapshot}, checkpoint_path)
+
+    config = infer_config_from_checkpoint(checkpoint_path, config_name=None)
+
+    assert config.continue_head_layers == 1
+    assert config.critic_slow_target is False

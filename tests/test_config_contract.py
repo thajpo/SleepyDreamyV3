@@ -1,10 +1,11 @@
-from dataclasses import replace
+import json
+from dataclasses import asdict, replace
 
 import pytest
 from hydra import compose, initialize_config_module
 
 from dreamer.config import Config, ConfigValidationError, validate_config
-from dreamer.main import dictconfig_to_config, run_training
+from dreamer.main import dictconfig_to_config, resolve_resume_config, run_training
 from dreamer.trainer.core import WorldModelTrainer
 
 
@@ -57,6 +58,37 @@ def test_invalid_run_fails_before_creating_output(monkeypatch):
 
     with pytest.raises(ConfigValidationError, match="checkpoint_interval"):
         run_training(replace(Config(), dry_run=True, checkpoint_interval=0))
+
+
+def test_resume_inherits_historical_checkpoint_semantics(tmp_path):
+    run_dir = tmp_path / "historical"
+    checkpoint_path = run_dir / "checkpoints" / "checkpoint_final.pt"
+    checkpoint_path.parent.mkdir(parents=True)
+    snapshot = asdict(Config())
+    snapshot.pop("continue_head_layers")
+    snapshot.pop("critic_slow_target")
+    (run_dir / "config.json").write_text(json.dumps(snapshot))
+
+    resumed = resolve_resume_config(
+        replace(Config(), continue_head_layers=1, critic_slow_target=False),
+        checkpoint_path,
+        checkpoint={"world_model": {"continue_predictor.weight": object()}},
+    )
+
+    assert resumed.continue_head_layers == 0
+    assert resumed.critic_slow_target is True
+
+
+def test_resume_requires_explicit_semantic_migration(tmp_path):
+    current = replace(Config(), continue_head_layers=1, critic_slow_target=False)
+    resumed = resolve_resume_config(
+        current,
+        tmp_path / "checkpoint.pt",
+        checkpoint={"world_model": {"continue_predictor.weight": object()}},
+        allow_semantic_migration=True,
+    )
+
+    assert resumed is current
 
 
 def test_trainer_requires_collector_queue_before_model_initialization(tmp_path):

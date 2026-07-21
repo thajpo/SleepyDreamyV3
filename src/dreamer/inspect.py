@@ -18,7 +18,12 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from dreamer.config import Config, atari100k_pong_config, default_config
+from dreamer.config import (
+    Config,
+    atari100k_pong_config,
+    default_config,
+    load_checkpoint_config,
+)
 from dreamer.runtime.env import create_env
 from dreamer.models import (
     initialize_actor,
@@ -48,14 +53,9 @@ def infer_config_from_checkpoint(
     if config_name == "default":
         return default_config()
 
-    run_dir = checkpoint_path.parent.parent
-    cfg_path = run_dir / "config.json"
-    if cfg_path.exists():
-        data = json.loads(cfg_path.read_text())
-        # Historical runs may contain this retired training-only option. It
-        # never affects model construction, so inspection can safely ignore it.
-        data.pop("actor_warmup_steps", None)
-        return Config(**data)
+    checkpoint_config = load_checkpoint_config(checkpoint_path)
+    if checkpoint_config is not None:
+        return checkpoint_config
 
     return atari100k_pong_config()
 

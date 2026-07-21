@@ -8,7 +8,9 @@ Design:
 """
 
 import math
+import json
 from dataclasses import dataclass, asdict
+from pathlib import Path
 from typing import Optional
 
 
@@ -164,6 +166,42 @@ class Config:
 def default_config() -> Config:
     """Legacy inspector fallback when a checkpoint has no config snapshot."""
     return Config()
+
+
+def config_from_snapshot(data: dict) -> Config:
+    """Construct a runtime config from a current or historical snapshot."""
+    normalized = dict(data)
+    normalized.pop("actor_warmup_steps", None)
+    return Config(**normalized)
+
+
+def load_checkpoint_config(
+    checkpoint_path: str | Path,
+    checkpoint: dict | None = None,
+) -> Config | None:
+    """Load the authored config carried by or stored beside a checkpoint."""
+    if checkpoint is not None:
+        snapshot = checkpoint.get("config_snapshot")
+        if isinstance(snapshot, dict):
+            return config_from_snapshot(snapshot)
+
+    checkpoint_path = Path(checkpoint_path)
+    config_path = checkpoint_path.parent.parent / "config.json"
+    if config_path.exists():
+        return config_from_snapshot(json.loads(config_path.read_text()))
+
+    if checkpoint is None and checkpoint_path.exists():
+        import torch
+
+        checkpoint = torch.load(
+            checkpoint_path, map_location="cpu", weights_only=False
+        )
+        if checkpoint is None:
+            return None
+        snapshot = checkpoint.get("config_snapshot")
+        if isinstance(snapshot, dict):
+            return config_from_snapshot(snapshot)
+    return None
 
 
 def atari100k_pong_config() -> Config:

@@ -1,8 +1,18 @@
+import json
+from dataclasses import asdict, replace
+
 import gymnasium as gym
 import numpy as np
 import pytest
 import torch
 
+from dreamer.config import Config
+from dreamer.models import (
+    initialize_actor,
+    initialize_critic,
+    initialize_q_critic,
+    initialize_world_model,
+)
 from dreamer.models.dreaming import (
     enumerate_first_action_values,
     estimate_policy_lambda_action_values,
@@ -10,9 +20,57 @@ from dreamer.models.dreaming import (
 from scripts.probe_cartpole_q import (
     action_preference,
     hybrid_state_score,
+    load_checkpoint_models,
     one_step_outcome,
     rollout_score,
 )
+
+
+@pytest.mark.parametrize(
+    ("use_slow_target", "expected_key"),
+    [(False, "critic"), (True, "critic_ema")],
+)
+def test_checkpoint_loader_selects_authored_critic_target(
+    tmp_path, use_slow_target, expected_key
+):
+    cfg = replace(
+        Config(),
+        d_hidden=16,
+        num_latents=4,
+        rnn_n_blocks=1,
+        critic_slow_target=use_slow_target,
+    )
+    actor = initialize_actor("cpu", cfg)
+    critic = initialize_critic("cpu", cfg)
+    critic_ema = initialize_critic("cpu", cfg)
+    q_critic = initialize_q_critic("cpu", cfg)
+    encoder, world_model = initialize_world_model("cpu", cfg, batch_size=1)
+    with torch.no_grad():
+        critic.mlp[-1].bias.fill_(1.0)
+        critic_ema.mlp[-1].bias.fill_(2.0)
+
+    run_dir = tmp_path / "run"
+    checkpoint_path = run_dir / "checkpoints" / "checkpoint_final.pt"
+    checkpoint_path.parent.mkdir(parents=True)
+    (run_dir / "config.json").write_text(json.dumps(asdict(cfg)))
+    torch.save(
+        {
+            "actor": actor.state_dict(),
+            "critic": critic.state_dict(),
+            "critic_ema": critic_ema.state_dict(),
+            "q_critic": q_critic.state_dict(),
+            "encoder": encoder.state_dict(),
+            "world_model": world_model.state_dict(),
+        },
+        checkpoint_path,
+    )
+
+    loaded = load_checkpoint_models(checkpoint_path, "cpu")
+
+    loaded_critic = loaded[2]
+    assert loaded[7] == expected_key
+    expected_bias = 1.0 if expected_key == "critic" else 2.0
+    assert torch.all(loaded_critic.mlp[-1].bias == expected_bias)
 
 
 @pytest.mark.parametrize(

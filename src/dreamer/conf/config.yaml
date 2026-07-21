@@ -10,6 +10,7 @@ defaults:
 # Optional checkpoint used to resume a run. This orchestration field is not
 # part of the flattened model/training Config snapshot.
 checkpoint_path: null
+allow_resume_semantic_migration: false
 
 # General settings
 general:

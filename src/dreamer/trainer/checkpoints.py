@@ -38,6 +38,7 @@ def save_checkpoint(
     best_eval_step=None,
     best_eval_metric=None,
     run_id=None,
+    config_snapshot=None,
 ) -> str:
     """Save training state atomically and return the checkpoint path."""
     if final and label is not None:
@@ -67,6 +68,7 @@ def save_checkpoint(
         "best_eval_step": best_eval_step,
         "best_eval_metric": best_eval_metric,
         "run_id": run_id,
+        "config_snapshot": config_snapshot,
     }
     destination = Path(checkpoint_dir) / f"checkpoint_{suffix}.pt"
     destination.parent.mkdir(parents=True, exist_ok=True)

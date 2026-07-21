@@ -68,6 +68,36 @@ def test_installed_cli_checkpoint_resume_contract(tmp_path):
     assert resumed_checkpoint["run_id"] == resumed_manifest["run_id"]
 
 
+def test_cli_resume_restores_checkpoint_model_and_target_semantics(tmp_path):
+    original_dir = tmp_path / "historical_semantics"
+    resumed_dir = tmp_path / "resumed_semantics"
+    original = _run_training(
+        original_dir,
+        extra_overrides=[
+            "models.continue_head_layers=0",
+            "train.critic_slow_target=true",
+        ],
+    )
+    assert original.returncode == 0, original.stdout + original.stderr
+
+    original_checkpoint = original_dir / "checkpoints" / "checkpoint_final.pt"
+    resumed = _run_training(resumed_dir, checkpoint=original_checkpoint)
+    assert resumed.returncode == 0, resumed.stdout + resumed.stderr
+
+    resumed_config = json.loads((resumed_dir / "config.json").read_text())
+    resumed_checkpoint = torch.load(
+        resumed_dir / "checkpoints" / "checkpoint_final.pt",
+        map_location="cpu",
+        weights_only=False,
+    )
+
+    assert resumed_config["continue_head_layers"] == 0
+    assert resumed_config["critic_slow_target"] is True
+    assert "continue_predictor.weight" in resumed_checkpoint["world_model"]
+    assert resumed_checkpoint["config_snapshot"]["continue_head_layers"] == 0
+    assert resumed_checkpoint["config_snapshot"]["critic_slow_target"] is True
+
+
 def test_initial_model_update_is_published_to_each_collector(tmp_path):
     result = _run_training(
         tmp_path / "multi_collector",

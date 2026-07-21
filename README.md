@@ -87,13 +87,16 @@ uv run --extra cpu dreamer-train \
 ```
 
 Resume into a new output directory while restoring the checkpoint's trainer
-state and MLflow run identity:
+state, model architecture, value-target semantics, and MLflow run identity:
 
 ```bash
 uv run --extra cpu dreamer-train \
   checkpoint_path=runs/example/checkpoints/checkpoint_final.pt \
   train.max_train_steps=20000
 ```
+
+Set `allow_resume_semantic_migration=true` to intentionally use the current
+continuation-head and critic-target settings instead of the checkpoint's.
 
 ### Hyperparameter Sweeps
 
