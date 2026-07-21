@@ -87,20 +87,34 @@ def summarize_channel(
     )
     terminals = np.asarray([bool(row["terminal"]) for row in rows])
     predicted_terminal = values < float(gamma) / 2.0
-    terminal_recall = float(predicted_terminal[terminals].mean())
-    nonterminal_recall = float((~predicted_terminal[~terminals]).mean())
+    has_terminal = bool(terminals.any())
+    has_nonterminal = bool((~terminals).any())
+    terminal_recall = (
+        float(predicted_terminal[terminals].mean()) if has_terminal else None
+    )
+    nonterminal_recall = (
+        float((~predicted_terminal[~terminals]).mean())
+        if has_nonterminal
+        else None
+    )
+    balanced_accuracy = (
+        (terminal_recall + nonterminal_recall) / 2.0
+        if terminal_recall is not None and nonterminal_recall is not None
+        else None
+    )
     return {
         "effective_discount_mean": float(values.mean()),
-        "terminal_mean": float(values[terminals].mean()),
-        "nonterminal_mean": float(values[~terminals].mean()),
+        "terminal_mean": (
+            float(values[terminals].mean()) if has_terminal else None
+        ),
+        "nonterminal_mean": (
+            float(values[~terminals].mean()) if has_nonterminal else None
+        ),
         "brier": float(np.mean((values - targets) ** 2)),
         "failure_roc_auc": binary_roc_auc(
             (1.0 - values).tolist(), terminals.tolist()
         ),
-        "balanced_accuracy_at_half_discount": (
-            terminal_recall + nonterminal_recall
-        )
-        / 2.0,
+        "balanced_accuracy_at_half_discount": balanced_accuracy,
     }
 
 
