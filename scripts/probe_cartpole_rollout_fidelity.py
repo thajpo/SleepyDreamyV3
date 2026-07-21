@@ -101,6 +101,13 @@ def _pearson(xs: list[float], ys: list[float]) -> float | None:
     return float(np.corrcoef(x, y)[0, 1])
 
 
+def optional_masked_mean(
+    values: torch.Tensor, mask: torch.Tensor
+) -> float | None:
+    """Return a masked mean, or None when the cohort is empty."""
+    return float(values[mask].mean().item()) if bool(mask.any()) else None
+
+
 @torch.no_grad()
 def collect_real_episodes(
     cfg,
@@ -363,15 +370,13 @@ def continuation_calibration(
     terminal_mask = terminals.bool()
     nonterminal_mask = ~terminal_mask
     target_discount = float(gamma) * nonterminal_mask.float()
+    terminal_mean = optional_masked_mean(predicted_continue, terminal_mask)
+    nonterminal_mean = optional_masked_mean(predicted_continue, nonterminal_mask)
     return {
         "transitions": int(len(predicted_continue)),
         "terminal_transitions": int(terminal_mask.sum().item()),
-        "predicted_continue_terminal_mean": float(
-            predicted_continue[terminal_mask].mean().item()
-        ),
-        "predicted_continue_nonterminal_mean": float(
-            predicted_continue[nonterminal_mask].mean().item()
-        ),
+        "predicted_continue_terminal_mean": terminal_mean,
+        "predicted_continue_nonterminal_mean": nonterminal_mean,
         "effective_discount_brier": float(
             ((predicted_discount - target_discount) ** 2).mean().item()
         ),

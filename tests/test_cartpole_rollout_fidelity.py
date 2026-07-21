@@ -3,6 +3,7 @@ import torch
 
 from scripts.probe_cartpole_rollout_fidelity import (
     discounted_return_to_go,
+    optional_masked_mean,
     return_error_components,
 )
 
@@ -50,3 +51,10 @@ def test_return_error_decomposition_is_exact():
         components["final_discount_error"]
         + components["critic_transport_error"]
     )
+
+
+def test_optional_masked_mean_marks_empty_cohort_unavailable():
+    values = torch.tensor([1.0, 3.0])
+
+    assert optional_masked_mean(values, torch.tensor([True, False])) == 1.0
+    assert optional_masked_mean(values, torch.tensor([False, False])) is None
