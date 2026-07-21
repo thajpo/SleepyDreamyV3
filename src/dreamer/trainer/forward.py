@@ -89,6 +89,23 @@ def calculate_replay_lambda_targets(
     )
 
 
+def select_critic_target_values(
+    online_values: torch.Tensor,
+    slow_values: torch.Tensor,
+    *,
+    use_slow_target: bool,
+) -> torch.Tensor:
+    """Select a detached value target for returns and the policy baseline.
+
+    Reference DreamerV3 uses the online value prediction for these targets by
+    default and retains the slow value model as a distributional regularizer.
+    The explicit switch preserves the semantics of historical local runs that
+    instead used the slow model for both roles.
+    """
+    target = slow_values if use_slow_target else online_values
+    return target.detach()
+
+
 def dreamer_step(
     *,
     encoder,
@@ -328,9 +345,15 @@ def dreamer_step(
             dreamed_values = torch.sum(dreamed_values_probs * bins, dim=-1)
             metrics.dreamed_values.append(dreamed_values.detach().cpu())
 
+            critic_target_values = select_critic_target_values(
+                dreamed_values,
+                dreamed_values_ema,
+                use_slow_target=bool(getattr(config, "critic_slow_target", True)),
+            )
+
             lambda_returns = calculate_lambda_returns(
                 dreamed_rewards,
-                dreamed_values_ema,
+                critic_target_values,
                 dreamed_continues,
                 imagination_discount,
                 lam,
@@ -360,7 +383,7 @@ def dreamer_step(
                 dreamed_values_logits_ema=dreamed_values_logits_ema,
                 critic_ema_coef=critic_ema_coef,
                 sample_mask=sample_mask,
-                actor_baseline_values=dreamed_values_ema,
+                actor_baseline_values=critic_target_values,
             )
             if (
                 not skip_actor

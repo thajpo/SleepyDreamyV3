@@ -71,6 +71,7 @@ train:
   weight_decay: 0.0
   critic_ema_decay: 0.98        # critic target network polyak decay
   critic_ema_regularizer: 1.0   # scale of critic EMA regularization loss
+  critic_slow_target: false     # reference uses online value for returns/baseline
   critic_replay_scale: 0.3      # replay critic loss scale (βrepval)
   critic_real_return_scale: 0.0 # full-episode replay return-to-go loss scale
   q_critic_scale: 0.0           # explicit Q(s,a) critic loss scale
