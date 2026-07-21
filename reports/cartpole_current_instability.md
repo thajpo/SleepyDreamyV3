@@ -1830,6 +1830,42 @@ one-step state prediction—most directly by separating prior-latent rollout
 error, learned continuation/value bootstrap error, and compounding horizon
 error on matched real action sequences.
 
+#### Preregistered matched-sequence rollout-fidelity audit
+
+- **Question:** when the actor's real action sequence is held fixed, does
+  multi-step return error come primarily from critic calibration at real
+  posterior states, learned reward/continuation along the prefix, or carrying
+  the critic through prior-latent dynamics?
+- **Frozen checkpoints:** exact-return final and detached replay-coverage final.
+  Use each checkpoint's deployed deterministic actor and slow critic without
+  updating any parameters.
+- **Data contract:** 20 episodes on reset seeds 17--36. Record each real state,
+  chosen action, reward, posterior latent, and discounted real return-to-go.
+  For every start with a complete matched prefix, replay the exact real actions
+  through 64 categorical-prior samples at horizons 1, 3, 5, 10, and 15.
+- **Decomposition:** compare the model's prefix plus prior-state critic bootstrap
+  against real return-to-go. Decompose its signed error into (a) an oracle
+  prefix plus critic at the real future posterior, (b) learned reward error
+  under the real discount, (c) continuation error within the prefix and on the
+  final bootstrap, and (d) prior-latent critic transport after controlling for
+  the predicted discount. The five signed terms must sum to total error on
+  every row. Also record decoded prior-state mean/sample MSE and predicted
+  versus actual survival discount.
+- **Primary decision:** at horizon 15 on the exact-return checkpoint, compare
+  RMS oracle critic error with RMS model-minus-oracle rollout error. The larger
+  term is the dominant boundary. Within rollout error, compare RMS reward,
+  continuation-prefix, final-discount, and prior-latent critic-transport terms.
+  Horizon trends and the detached checkpoint are required context, not
+  additional interventions.
+- **Limitations:** horizon rows require the real episode to survive the whole
+  matched prefix, so terminal-transition continuation calibration is reported
+  separately and long horizons describe pre-terminal states. Time-limit-
+  truncated episodes must be identified rather than treated as physical
+  failures.
+- **Stop rule:** two frozen checkpoints, the five fixed horizons, and one
+  64-sample seed stream. Do not train, tune thresholds, or add another model
+  variant after observing the decomposition.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
