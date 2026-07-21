@@ -1493,6 +1493,38 @@ smoother, repair the benchmark before interpreting more training changes; if it
 retains the large reversals, the instability is genuinely in the learned
 policy/model rather than primarily evaluation sampling noise.
 
+The fixed-seed audit was run from clean evaluator commit `9987361`; its complete
+per-episode output is `fixed_seed_checkpoint_evaluation.json` in the experiment
+directory.
+
+| Checkpoint update | Original changing-seed mean | Fixed seeds 17--36 mean | Fixed range | Fixed solved fraction |
+|---:|---:|---:|---:|---:|
+| 500 | 9.30 | 9.10 | 8--11 | 0.00 |
+| 1,000 | 9.45 | 9.40 | 8--10 | 0.00 |
+| 1,500 | 381.00 | 395.85 | 226--500 | 0.25 |
+| 1,900 (best artifact) | 421.95 | 396.20 | 269--500 | 0.40 |
+| 2,000 | 201.30 | 220.80 | 162--419 | 0.00 |
+| 2,500 | 105.65 | 100.85 | 81--163 | 0.00 |
+| 3,000 | 218.15 | 197.15 | 144--429 | 0.00 |
+| 3,500 | 134.60 | 137.80 | 98--191 | 0.00 |
+
+The fixed cohort preserves the large reversals and closely tracks the original
+means. Evaluation sampling noise is therefore not the cause of this run's
+instability: the same 20 initial states lose about 75% of their mean return from
+update 1,900 to 2,500 and do not recover by 3,500. Nevertheless, changing seeds
+across updates remains an avoidable benchmark and checkpoint-selection
+confound. Future in-training evaluations will use one fixed seed cohort per run;
+the update number remains a logging coordinate, not part of environment reset
+state.
+
+The fixed-cohort change is isolated in `evaluation_episode_seed()`: run seed 0
+always evaluates episodes on reset seeds 1,000,000 onward, regardless of
+checkpoint update. Validation passes with 95 tests, bytecode compilation, and
+the supported scoped type gate. A one-update CPU process smoke with evaluation
+enabled at update 1 completed normally, including collector shutdown. This
+changes evaluation and best-checkpoint selection only; it does not alter the
+training data, losses, or optimizer updates.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation

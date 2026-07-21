@@ -47,6 +47,11 @@ def seed_everything(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def evaluation_episode_seed(training_seed: int, episode_index: int) -> int:
+    """Return a stable per-episode seed shared by every checkpoint in a run."""
+    return int(training_seed) + 1_000_000 + int(episode_index)
+
+
 @dataclass(frozen=True)
 class EvaluationResult:
     """Deterministic evaluation metrics used for logging and checkpoint choice."""
@@ -835,9 +840,10 @@ class WorldModelTrainer:
         episode_rewards = []
 
         with torch.no_grad():
-            eval_seed = int(getattr(self.config, "seed", 0)) + 1_000_000 + step * 1000
             for episode_idx in range(num_episodes):
-                obs, _info = env.reset(seed=eval_seed + episode_idx)
+                obs, _info = env.reset(
+                    seed=evaluation_episode_seed(self.config.seed, episode_idx)
+                )
                 h = torch.zeros(
                     1,
                     self.config.d_hidden * self.config.rnn_n_blocks,
