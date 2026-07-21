@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""Evaluate CartPole checkpoints on one fixed set of reset seeds."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import statistics
+from pathlib import Path
+
+import gymnasium as gym
+import torch
+import torch.nn.functional as F
+
+from dreamer.inspect import resolve_device
+from dreamer.models import symlog
+
+if __package__:
+    from scripts.probe_cartpole_q import load_checkpoint_models
+else:
+    from probe_cartpole_q import load_checkpoint_models  # type: ignore[import-not-found]
+
+
+def summarize_returns(returns: list[float]) -> dict[str, float | int]:
+    """Summarize a non-empty set of CartPole episode returns."""
+    if not returns:
+        raise ValueError("at least one episode return is required")
+    return {
+        "episodes": len(returns),
+        "mean_return": statistics.fmean(returns),
+        "median_return": statistics.median(returns),
+        "min_return": min(returns),
+        "max_return": max(returns),
+        "solved_fraction": sum(value >= 500.0 for value in returns) / len(returns),
+    }
+
+
+def evaluate_checkpoint(
+    checkpoint_path: Path,
+    *,
+    device: str,
+    episodes: int,
+    seed: int,
+) -> dict[str, object]:
+    """Run the deployed argmax policy without counterfactual probe overhead."""
+    (
+        cfg,
+        actor,
+        _critic,
+        _q_critic,
+        encoder,
+        world_model,
+        checkpoint,
+        _critic_key,
+        _q_key,
+    ) = load_checkpoint_models(checkpoint_path, device)
+    train_step = checkpoint.get("step", checkpoint.get("train_step"))
+    env = gym.make(cfg.environment_name)
+    env_spec = env.spec
+    max_episode_steps = (
+        int(env_spec.max_episode_steps)
+        if env_spec is not None and env_spec.max_episode_steps is not None
+        else 500
+    )
+    returns: list[float] = []
+    h_prev_backup = world_model.h_prev.clone()
+
+    try:
+        with torch.no_grad():
+            for episode in range(episodes):
+                obs, _ = env.reset(seed=seed + episode)
+                h = torch.zeros(
+                    1,
+                    cfg.d_hidden * cfg.rnn_n_blocks,
+                    device=device,
+                )
+                previous_action = torch.zeros(1, cfg.n_actions, device=device)
+                z_prev = torch.zeros(
+                    1,
+                    world_model.n_latents,
+                    world_model.n_classes,
+                    device=device,
+                )
+                z_prev_embed = world_model.z_embedding(z_prev.view(1, -1))
+                episode_return = 0.0
+
+                for _timestep in range(max_episode_steps):
+                    state = torch.as_tensor(obs, dtype=torch.float32, device=device)
+                    h, _ = world_model.step_dynamics(
+                        z_prev_embed, previous_action, h
+                    )
+                    tokens = encoder(symlog(state.unsqueeze(0)))
+                    posterior_logits = world_model.compute_posterior(h, tokens)
+                    posterior_index = posterior_logits.argmax(dim=-1)
+                    z_sample = F.one_hot(
+                        posterior_index,
+                        num_classes=world_model.n_classes,
+                    ).float()
+                    actor_input = world_model.join_h_and_z(h, z_sample)
+                    action = actor(actor_input).argmax(dim=-1)
+                    previous_action = F.one_hot(
+                        action, num_classes=cfg.n_actions
+                    ).float()
+                    z_prev_embed = world_model.z_embedding(z_sample.view(1, -1))
+
+                    obs, reward, terminated, truncated, _ = env.step(
+                        int(action.item())
+                    )
+                    episode_return += float(reward)
+                    if terminated or truncated:
+                        break
+                returns.append(episode_return)
+    finally:
+        world_model.h_prev = h_prev_backup
+        env.close()
+
+    return {
+        "checkpoint": str(checkpoint_path.resolve()),
+        "train_step": train_step,
+        "seed_start": seed,
+        "seed_end": seed + episodes - 1,
+        "returns": returns,
+        **summarize_returns(returns),
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("checkpoints", nargs="+", type=Path)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--device", default="cpu")
+    parser.add_argument("--episodes", type=int, default=20)
+    parser.add_argument("--seed", type=int, default=17)
+    args = parser.parse_args()
+    if args.episodes <= 0:
+        parser.error("--episodes must be positive")
+
+    device = resolve_device(args.device)
+    results = []
+    for checkpoint in args.checkpoints:
+        print(f"Evaluating {checkpoint} on {device}...")
+        result = evaluate_checkpoint(
+            checkpoint.resolve(),
+            device=device,
+            episodes=args.episodes,
+            seed=args.seed,
+        )
+        results.append(result)
+        print(
+            f"  step={result['train_step']} mean={result['mean_return']:.2f} "
+            f"range={result['min_return']:.0f}--{result['max_return']:.0f}"
+        )
+
+    rendered = json.dumps(results, indent=2) + "\n"
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(rendered)
+    else:
+        print(rendered, end="")
+
+
+if __name__ == "__main__":
+    main()
