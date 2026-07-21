@@ -1708,6 +1708,68 @@ exact-return intervention's effect on target consistency; if baseline also
 fails, treat this as a systemic actor-optimization boundary. This is one
 read-only checkpoint measurement; do not train or tune from it.
 
+The detached control was run from clean diagnostic commit `32a5ad8` and is
+saved in
+`experiments/2026-07-21_cartpole_detached_baseline_final_policy_q_probe/`:
+
+| Final checkpoint | Return | Confident states | Actor/policy-Q | Confident actionable states | Policy-Q/real balanced | Policy-Q/real correlation |
+|---|---:|---:|---:|---:|---:|---:|
+| Detached baseline | 378.6 | 4,131 | 0.949 | 2,130 | 0.438 | 0.074 |
+| Exact-return scale 1 | 43.3 | 562 | 0.683 | 160 | 0.679 | 0.287 |
+
+The control passes the `0.8` actor-agreement threshold by a wide margin. The
+exact-return auxiliary therefore introduced the actor/current-target mismatch;
+it is not a general action-index, sign, or REINFORCE plumbing error. At the same
+time, the control exposes why the detached baseline remains unreliable: its
+actor faithfully follows a policy-conditioned target whose real-action ranking
+is worse than chance on the confident actionable subset. Exact-return grounding
+improves that target ranking but changes it faster or less consistently than
+the actor tracks it. This is a critic/actor time-scale and target-consistency
+tradeoff, not a successful fix.
+
+One bounded temporal audit will distinguish whether mismatch appears before or
+after the exact-return run's behavioral peak. Reuse the identical 64-sample,
+15-step, seeds-17--36 protocol on the exact-return best checkpoint at update
+1,600 and periodic checkpoints 2,000 and 3,000; combine them with the existing
+final result. Record return, confident actor/policy-Q agreement, and policy-Q/
+real metrics. If agreement is at least `0.8` at the peak and later falls, target
+drift/actor lag is the proximate mechanism. If it is already below `0.8` at the
+peak, head-only grounding creates an inconsistent policy-improvement target
+throughout useful behavior. Stop after these three read-only checkpoints; do
+not alter training.
+
+The temporal audit is saved in
+`experiments/2026-07-21_cartpole_exact_return_policy_q_temporal_probe/`:
+
+| Update | Probe return | Confident states | Actor/policy-Q | Confident actionable states | Policy-Q/real balanced | Policy-Q/real correlation | Mean abs policy-Q delta |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1,600 best | 284.15 | 3,842 | 0.804 | 1,483 | 0.425 | -0.038 | 1.118 |
+| 2,000 | 113.60 | 1,482 | 0.815 | 1,060 | 0.439 | 0.005 | 0.533 |
+| 3,000 | 137.75 | 2,072 | 0.582 | 1,009 | 0.500 | 0.003 | 2.280 |
+| 3,500 final | 43.30 | 562 | 0.683 | 160 | 0.679 | 0.287 | 1.316 |
+
+The first behavioral degradation occurs while the actor still passes the
+agreement gate: from update 1,600 to 2,000, return falls by 60% while actor/
+policy-Q agreement remains `0.804--0.815` and the policy-conditioned target is
+worse than chance against real action values. Thus actor lag is not the cause
+of the initial collapse. The actor is following bad learned advice.
+
+A second failure appears later. By update 3,000 the target's mean action margin
+has quadrupled while actor agreement falls to `0.582`. At the final checkpoint
+the target becomes materially more correct against real rollouts, but agreement
+recovers only to `0.683` and behavior reaches its minimum. Exact-return
+grounding therefore improves critic/model action ordering too late and with a
+time scale the actor does not track. It neither prevents the original target-
+quality collapse nor yields a stable later policy improvement.
+
+The bounded conclusion is now stronger: reject scale-1 head-only exact-return
+grounding as a training fix, retain the policy-Q diagnostic, and do not launch
+replication seeds. The original first broken boundary remains learned on-policy
+action-value quality; once that target changes, actor/target consistency becomes
+a second boundary. A next intervention must address target construction and
+policy improvement together or demonstrate, offline, that a frozen improved
+target can produce a better deployed actor before another end-to-end run.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
