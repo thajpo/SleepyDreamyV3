@@ -428,6 +428,17 @@ critic-only seed-1 gate isolates this slow-target correction against the prior
 failed gate. Exact real-return grounding remains the next bounded intervention
 if the slow-target gate fails.
 
+**Correction, 2026-07-21:** the source claim above was wrong. At reference
+commit [`e3f0224`](https://github.com/danijar/dreamerv3/blob/e3f02248693a79dc8b0ebd62c93683888ddaccfe/dreamerv3/configs.yaml#L108-L110),
+both `imag_loss.slowtar` and `repl_loss.slowtar` are `False`. The implementation
+selects the online value when that flag is false and uses the slow value only
+as a regularization target
+([`agent.py` lines 397--422](https://github.com/danijar/dreamerv3/blob/e3f02248693a79dc8b0ebd62c93683888ddaccfe/dreamerv3/agent.py#L397-L422)).
+The local July 19 change therefore moved away from, rather than toward, that
+reference contract. Its historical experiments remain valid measurements of
+the slow-target variant, but their source-conformance interpretation is
+withdrawn.
+
 ## Critic target and free-bits gates
 
 Four seed-1 critic-only runs used the same 3,000-update configuration and the
@@ -2030,6 +2041,194 @@ linearly separable half-space.
   seeds 1 and 2 only if both mechanical and behavioral gates pass. Otherwise
   reject the isolated head-capacity hypothesis and do not add class weighting
   or reward-head changes to the failed run.
+
+#### Continuation-head conformance canary result
+
+The canary completed normally at source commit `4648035` with manifest run ID
+`4a87926bbf7141a3b67454653b968ce0` and MLflow run ID
+`0604a4a67ac5496bbd77fcf1f7f3e517`. It performed 3,500 learner updates and
+21,677 environment steps in 1,180 seconds. The run and its generated probes are
+retained under
+`experiments/2026-07-21_cartpole_continue_mlp_seed0_3500/`,
+`experiments/2026-07-21_cartpole_continue_mlp_continuation_probe/`, and
+`experiments/2026-07-21_cartpole_continue_mlp_rollout_fidelity/`.
+
+The behavioral result was reachable control followed by collapse, not failure
+to learn. Fixed-cohort evaluation remained near `9.35` through update 1,500,
+then rose through `31.8`, `156.35`, `332.95`, and `437.60` at updates
+1,600--2,000. It first exceeded `450` at update 2,100, reached `500.0` at
+update 2,600, and immediately became unstable: `372.35`, `200.85`, `214.0`,
+and `284.6` at updates 2,700--3,000. The final score was `247.4`. It therefore
+failed all three preservation conditions: it fell below `300` after reaching
+`450`, finished below `400`, and had a best-to-final gap of `252.6`. Actor
+entropy remained moderate around the collapse, so this was not a deterministic
+single-action entropy collapse.
+
+The mechanical gate also failed. The best checkpoint solved all 20 fixed-seed
+episodes to the 500-step truncation and consequently exposed no physical
+terminal rows. At the final checkpoint, the same fixed seeds averaged `207.0`
+and supplied 20 physical failures. Mean posterior effective discount was
+`0.9597` on terminal transitions versus `0.9794` on nonterminal transitions;
+failure AUC was only `0.7558`, and terminal balanced accuracy at half discount
+was `0.5`. Terminal posterior label-error RMS was `0.9635`, while posterior-to-
+prior transport RMS was only `0.0103`. The larger head therefore still learned
+weak risk ranking rather than a calibrated termination decision.
+
+Matched-action rollout decomposition preserves the earlier diagnosis while
+showing that simple observation reconstruction is not the collapse boundary.
+At horizon 15, learned reward error remained negligible at both best and final
+checkpoints (`0.0173` and `0.0546` RMS). Final-discount error worsened from
+`5.525` to `9.745` RMS, while mean decoded-state MSE improved from `0.1379` to
+`0.0561`. Model-target correlation was effectively absent at both checkpoints
+(`-0.111` and `0.034`). Absolute critic errors are not interpreted as a direct
+implementation defect because the probe compares deterministic finite-horizon
+realized returns with a critic trained for the stochastic imagined policy and
+because CartPole's 500-step time limit is hidden from the observation.
+
+The isolated capacity hypothesis is rejected, so seeds 1 and 2 and further
+head tuning are stopped by the preregistered rule. The nonlinear head remains a
+reference-conformance correction, but it is neither the mechanical nor the
+behavioral fix. This single seed demonstrates that the current stack can learn
+a solved controller and then trains away from it; the next question is where
+the learned action ordering changes on an unchanged set of solved-policy
+histories.
+
+#### Preregistered fixed-history best-to-final drift audit
+
+- **Hypothesis:** after the solved update-2,600 checkpoint, learned action-value
+  ordering degrades on the same histories before or together with the actor.
+  If true, changing state visitation is not required to explain the collapse.
+- **Fixed histories:** drive seeds 17--36 deterministically with the best
+  checkpoint's actor. Evaluate those identical observations and preceding
+  actions with the best, update-3,000, and final update-3,500 checkpoints.
+- **Frozen probe:** use `scripts/probe_cartpole_checkpoint_drift.py` on CUDA
+  with 20 episodes, seed 17, real counterfactual rollout horizon 30, and model
+  horizon 3. Retain per-state rows and summaries under
+  `experiments/2026-07-21_cartpole_continue_mlp_fixed_history_drift/`.
+- **Primary metrics:** actor-versus-real and learned-Q-versus-real balanced
+  accuracy, correlation between learned and real action deltas, and actor-
+  versus-Q agreement. Secondary metrics are posterior and one-step state MSE,
+  with results stratified by cart position.
+- **Decision rule:** classify the earliest measurable boundary as value/target
+  drift if Q-versus-real accuracy or delta correlation falls while the actor
+  continues to agree with Q; classify it as actor fitting/lag if Q remains
+  useful while actor-versus-Q agreement falls; classify representation as
+  primary only if fixed-history current-posterior or one-step errors degrade
+  sufficiently to explain the ordering loss. Mixed movement remains a coupled
+  instability rather than being forced into one class.
+- **Stop rule:** this is a read-only three-checkpoint comparison. Do not change
+  training from its result alone unless the fixed-history evidence identifies a
+  specific boundary and a single bounded intervention.
+
+The solved-history half of this audit completed with 10,000 identical states,
+of which 794 had different 30-step real outcomes for the two first actions.
+The best, update-3,000, and final checkpoints respectively achieved actor-
+versus-real balanced accuracies `0.598`, `0.630`, and `0.628`; Q-versus-real
+accuracies `0.625`, `0.626`, and `0.643`; and actor-versus-Q agreements
+`0.914`, `0.990`, and `0.926`. The final checkpoint therefore has not forgotten
+the solved checkpoint's familiar action ordering. Current-posterior cart-
+position MSE also improves from `0.0724` at best to `0.0533` at final. Despite
+that, each checkpoint's learned-versus-real action-delta correlation is weak
+(`0.057`, `0.147`, and `0.056`), so the solution does not rest on a robust
+global value margin.
+
+This rejects simple fixed-distribution value forgetting and triggers one
+preregistered symmetric extension before selecting a training intervention:
+
+- **Hypothesis:** the final policy's closed-loop trajectories enter a different,
+  harder state/history distribution on which learned action ordering is poor.
+  The old best controller either retains a recovery advantage there, indicating
+  policy drift, or also fails, indicating that the apparently solved controller
+  never acquired a robust recovery landscape.
+- **Fixed histories:** drive the same seeds 17--36 with the final checkpoint's
+  deterministic actor; evaluate the best, update-3,000, and final checkpoints
+  on those identical histories with the same horizons and metrics.
+- **Decision rule:** a best-checkpoint actor/real advantage over final supports
+  actor-policy drift; poor and similar best/final accuracy plus a broader cart-
+  position distribution supports a shared out-of-distribution recovery gap;
+  useful final Q with poor final actor/Q agreement supports actor fitting. Stop
+  after this symmetric comparison and choose at most one intervention.
+
+#### Fixed-history drift result
+
+The generated evidence is retained under
+`experiments/2026-07-21_cartpole_continue_mlp_fixed_history_drift/` and
+`experiments/2026-07-21_cartpole_continue_mlp_fixed_history_drift_final_source/`.
+The symmetric extension confirms a closed-loop recovery-distribution failure.
+Final-policy histories average absolute cart position `0.750`, versus `0.387`
+under the solved policy; `32.5%` of final-policy states have `|x| >= 1`, versus
+`6.0%`, and `59.5%` are action-critical under the 30-step counterfactual,
+versus `7.9%`.
+
+On final-policy histories, best/update-3,000/final actor-versus-real balanced
+accuracies are `0.334`, `0.468`, and `0.506`; Q-versus-real accuracies are
+`0.448`, `0.493`, and `0.521`; and learned-versus-real action-delta
+correlations are `-0.069`, `0.018`, and `-0.072`. The final actor agrees with
+its Q preference on `96.2%` of action-critical rows, so actor fitting or lag is
+not the first broken boundary. At `|x| >= 1.5`, final Q/real accuracy is near
+chance or worse and delta correlation is strongly negative. The best checkpoint
+also fails on those histories, so it learned a narrow stabilizing orbit rather
+than a robust recovery controller that the final policy merely forgot.
+
+The final model's current-posterior cart-position MSE on its own histories is
+only `0.0471`, and its one-step prior MSE is `0.0339`; those aggregate errors are
+slightly lower than the best model's values on the same histories. Although
+errors grow in the rare `|x| >= 2` bin, visual-state reconstruction does not
+track the much larger and earlier action-ordering failure. Combined with the
+matched-rollout result, this classifies the first actionable boundary as
+imagined value/target quality in recovery states. The actor faithfully follows
+that bad ordering, and closed-loop action changes then move it from the narrow
+solved orbit into an action-critical distribution.
+
+No training intervention is selected from correlation alone. The next bounded
+step is a source audit of imagination, lambda-return construction, critic
+training, and actor objectives against the reference algorithm. A change is
+permitted only if that audit finds a concrete semantic divergence capable of
+producing wrong action ordering; otherwise the next experiment must target
+recovery-state coverage explicitly and remain a single-variable canary.
+
+#### Preregistered online-value-target conformance canary
+
+The source audit found one concrete semantic divergence in the live value path.
+Reference commit `e3f0224`, which remains upstream `main`, configures both
+imagined and replay lambda returns with `slowtar: False`. The online value
+prediction supplies the lambda-return bootstrap and policy baseline; the slow
+value remains a distributional regularizer. Local commit `8bd2ad9` instead
+changed both bootstrap and baseline to the slow critic based on the now-
+corrected opposite source claim.
+
+- **Hypothesis:** the slow target cannot adapt quickly enough when the policy
+  begins visiting recovery states, so stale action ordering helps move the
+  closed-loop controller out of its narrow solved orbit. Restoring the online
+  target while retaining slow-value regularization will improve post-solve
+  stability and recovery-state Q ordering.
+- **Code intervention:** add an explicit authored
+  `train.critic_slow_target=false`; use detached online value predictions for
+  imagined lambda-return construction and the actor baseline when false. Keep
+  the EMA critic, its `0.98` update decay, and its scale-1 distributional
+  regularizer unchanged. Historical configs lacking the field default to true,
+  preserving the semantics of their checkpoints and reports.
+- **Not changed:** continuation/reward/world-model heads, replay-value scale and
+  detach behavior, replay sampling and pacing, optimizer ownership and rates,
+  actor objective and entropy, advantage normalization, horizons, and
+  architecture sizes. Missing RMSNorm/depth and optimizer-ramp differences are
+  recorded but deliberately excluded.
+- **Frozen run:** seed 0 under the exact 3,500-update continuation-head canary
+  command and fixed 20-episode evaluation cohort: hidden 128, batch 8, sequence
+  16, burn-in 4, replay ratio 16, buffer 512/start 16, learning rates `3e-4`,
+  `3e-5`, and `8e-5`, entropy `1e-3`, no advantage z-score, no exact-return
+  auxiliary, and no actor warmup.
+- **Behavioral gate:** reach mean return `450`; never fall below `300`
+  afterward; final at least `400`; best-to-final gap at most `100`.
+- **Boundary gate:** rerun fixed-seed best/final on-policy and symmetric fixed-
+  history probes. Final Q-versus-real balanced accuracy on final-policy
+  histories must exceed the slow-target canary's `0.521`, learned-versus-real
+  action-delta correlation must become positive, and actor-versus-Q agreement
+  must remain above `0.8`.
+- **Stop rule:** validate and run seed 0 only. Replicate seeds 1 and 2 only if
+  both behavioral and boundary gates pass. A failure rejects the stale-target
+  causal hypothesis; it does not justify combining head-depth, optimizer-ramp,
+  or replay-coverage changes.
 
 ## Reliability follow-up
 
