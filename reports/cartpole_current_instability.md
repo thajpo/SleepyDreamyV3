@@ -1955,6 +1955,82 @@ until this frozen distinction is measured.
   sampling stream, and no training or threshold tuning. Choose the next
   intervention from this boundary result only.
 
+#### Posterior-versus-prior continuation result
+
+The frozen audit completed normally from clean diagnostic commit `a116e57`.
+Artifacts are in
+`experiments/2026-07-21_cartpole_continuation_posterior_prior/`; the exact
+signed decomposition has zero residual on every transition.
+
+| Checkpoint | Terminal rows | Posterior failure AUC | Posterior terminal / nonterminal discount | Posterior terminal-error RMS | Prior terminal-error RMS | Posterior-to-prior transport RMS | Terminal KL q/p |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Exact-return final | 20 | 0.812 | 0.942 / 0.965 | 0.942 | 0.943 | 0.0020 | 0.496 |
+| Detached baseline final | 18 | 0.902 | 0.972 / 0.988 | 0.972 | 0.973 | 0.0019 | 0.884 |
+
+The primary decision classifies continuation prediction/supervision as the
+broken boundary on both checkpoints. On exact-return terminal transitions,
+posterior label error is about 462 times the RMS transport error; on the
+detached checkpoint it is about 524 times larger. Supplying the real next
+observation therefore does not make the head predict termination. Prior and
+posterior expectations are nearly identical even though their categorical
+latent KL is nonzero, so the earlier excessive rollout discount cannot be
+attributed to losing an otherwise-good terminal prediction in latent
+transport.
+
+The head does retain weak risk ordering. Posterior failure AUC exceeds `0.8`
+on both checkpoints, and continuation falls as trajectories enter the last ten
+steps. But no posterior or prior prediction crosses half of the task discount;
+terminal/nonterminal balanced accuracy at that decision point is exactly
+`0.5`. The model acts like a slightly state-dependent average hazard estimator,
+not a classifier that recognizes an observed terminal state.
+
+This result supersedes historical measurements from older checkpoints where
+posterior continuation on terminal rows reached `0.25--0.42`; it does not
+contradict them. The present conclusion is scoped to the current training
+stack and two current final checkpoints. Terminal sample sizes are 20 and 18,
+but the effect is too large and consistent across all rows to be sampling
+noise.
+
+The source audit found a matching architectural divergence. The current
+[reference DreamerV3 configuration](https://github.com/danijar/dreamerv3/blob/main/dreamerv3/configs.yaml)
+uses a one-hidden-layer continuation MLP with RMS normalization and SiLU; its
+size-1M override uses 64 hidden units. This repository's continuation predictor
+has been one linear projection since `b4eb689`. That restriction is especially
+material for CartPole's non-linear, two-sided terminal set: failure is the
+union of positive and negative cart-position or pole-angle thresholds, not one
+linearly separable half-space.
+
+#### Preregistered continuation-head conformance canary
+
+- **Hypothesis:** replacing only the linear continuation projection with the
+  reference-style one-hidden-layer, `d_hidden`-wide RMSNorm/SiLU MLP will turn
+  the existing terminal-risk ordering into calibrated imagined survival and
+  prevent the policy/value collapse caused by weak continuation differences.
+- **Causal variable:** add one hidden continuation layer. Keep the reward head,
+  encoder, RSSM, actor, critic, losses, optimizer rates, replay sampling,
+  collection ratio, and detached critic representation path unchanged. New
+  Hydra runs use one layer; legacy checkpoint configs default to zero layers so
+  all existing evidence remains loadable with its authored architecture.
+- **Frozen run:** seed 0 for 3,500 updates under the exact prospective replay-
+  coverage command: `d_hidden=128`, batch 8, sequence 16, burn-in 4, replay
+  ratio 16, 16 startup episodes, 512-episode buffer, learning rates `3e-4`,
+  `3e-5`, and `8e-5`, fixed 20-episode evaluation every 100 updates, no exact-
+  return auxiliary, no actor warmup, and no advantage normalization. Retain
+  replay coverage telemetry but add no other training intervention.
+- **Mechanical gate:** on the final fixed seeds 17--36, posterior terminal
+  effective discount must fall below `0.5`, posterior failure AUC remain at
+  least `0.8`, and posterior-to-prior transport must remain smaller than
+  posterior label error. This tests the intended mechanism rather than merely
+  loss execution.
+- **Behavioral gate:** the run must reach fixed-cohort mean return `450`, never
+  fall below `300` afterward, finish at least `400`, and have best-to-final gap
+  at most `100`. If it never reaches `450`, it fails rather than triggering
+  tuning.
+- **Stop rule:** one seed and its frozen continuation/rollout probes. Replicate
+  seeds 1 and 2 only if both mechanical and behavioral gates pass. Otherwise
+  reject the isolated head-capacity hypothesis and do not add class weighting
+  or reward-head changes to the failed run.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation

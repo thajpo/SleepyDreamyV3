@@ -175,6 +175,8 @@ def dictconfig_to_config(cfg: DictConfig) -> Config:
             d["d_hidden"] = models.d_hidden
         if "num_latents" in models:
             d["num_latents"] = models.num_latents
+        if "continue_head_layers" in models:
+            d["continue_head_layers"] = models.continue_head_layers
         if "encoder" in models:
             enc = models.encoder
             if "cnn" in enc:

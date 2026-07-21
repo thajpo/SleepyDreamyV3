@@ -113,6 +113,7 @@ def initialize_world_model(device, cfg, batch_size=1):
     models_config = SimpleNamespace(
         d_hidden=cfg.d_hidden,
         num_latents=cfg.num_latents,
+        continue_head_layers=cfg.continue_head_layers,
         encoder=encoder_config,
         rnn=SimpleNamespace(n_blocks=cfg.rnn_n_blocks),
     )

@@ -41,6 +41,7 @@ environment:
 models:
   d_hidden: 64
   num_latents: 32
+  continue_head_layers: 1  # reference conhead: one RMSNorm/SiLU hidden layer
   encoder:
     cnn:
       stride: 2

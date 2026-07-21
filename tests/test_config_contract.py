@@ -17,6 +17,7 @@ def test_hydra_yaml_defines_every_runtime_field():
     assert runtime_config.environment_name == "CartPole-v1"
     assert runtime_config.log_profile == "lean"
     assert runtime_config.num_bins == 255
+    assert runtime_config.continue_head_layers == 1
     validate_config(runtime_config)
 
 
@@ -26,6 +27,7 @@ def test_hydra_yaml_defines_every_runtime_field():
         (replace(Config(), replay_burn_in=64), "burn-in < sequence_length"),
         (replace(Config(), checkpoint_interval=0), "checkpoint_interval"),
         (replace(Config(), d_hidden=63), "divisible by 16"),
+        (replace(Config(), continue_head_layers=2), "continue_head_layers"),
         (replace(Config(), actor_loss_mode="mystery"), "actor_loss_mode"),
         (
             replace(Config(), gamma=0.95, horizon=333, contdisc=True),

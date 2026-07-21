@@ -48,6 +48,9 @@ class Config:
     # ===== Model architecture =====
     d_hidden: int = 64
     num_latents: int = 32
+    # Zero preserves historical linear-head checkpoint construction. Authored
+    # Hydra configs use the reference-style one-hidden-layer continuation MLP.
+    continue_head_layers: int = 0
 
     # Encoder CNN (pixels only)
     encoder_cnn_stride: int = 2
@@ -231,6 +234,8 @@ def validate_config(cfg: Config) -> None:
 
     if cfg.d_hidden < 16 or cfg.d_hidden % 16 != 0:
         errors.append("d_hidden must be at least 16 and divisible by 16")
+    if cfg.continue_head_layers not in {0, 1}:
+        errors.append("continue_head_layers must be 0 or 1")
     if not 0 <= cfg.replay_burn_in < cfg.sequence_length:
         errors.append("replay_burn_in must satisfy 0 <= burn-in < sequence_length")
     if cfg.min_buffer_episodes > cfg.replay_buffer_size:

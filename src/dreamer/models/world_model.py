@@ -92,7 +92,21 @@ class RSSMWorldModel(nn.Module):
         reward_out = int(num_bins)
         self.reward_predictor = nn.Linear(h_z_dim, reward_out)
         nn.init.zeros_(self.reward_predictor.weight)  # Reward is initalized to zero
-        self.continue_predictor = nn.Linear(h_z_dim, 1)
+        continue_head_layers = int(
+            getattr(models_config, "continue_head_layers", 0)
+        )
+        if continue_head_layers == 0:
+            # Preserve the parameter layout of historical checkpoints.
+            self.continue_predictor = nn.Linear(h_z_dim, 1)
+        elif continue_head_layers == 1:
+            self.continue_predictor = nn.Sequential(
+                nn.Linear(h_z_dim, self.d_hidden),
+                nn.RMSNorm(self.d_hidden),
+                nn.SiLU(),
+                nn.Linear(self.d_hidden, 1),
+            )
+        else:
+            raise ValueError("continue_head_layers must be 0 or 1")
 
         # Decoder. Outputs distribution of mean predictions for pixel/vector observations
         if use_pixels:
