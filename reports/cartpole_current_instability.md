@@ -1770,6 +1770,34 @@ a second boundary. A next intervention must address target construction and
 policy improvement together or demonstrate, offline, that a frozen improved
 target can produce a better deployed actor before another end-to-end run.
 
+#### Preregistered frozen policy-improvement probe
+
+- **Question:** is the exact-return final checkpoint's improved policy-Q target
+  actionable, or does it fail as soon as a new actor changes the visited-state
+  distribution?
+- **Frozen sources:** exact-return final encoder, RSSM, reward/continue heads,
+  and slow critic. Start from a copy of its deployed actor; never write back to
+  the checkpoint or resume the trainer.
+- **Dataset:** follow the original deterministic actor for reset seeds 17--36.
+  At each visited posterior latent, estimate both 15-step policy-conditioned
+  lambda returns with 64 rollouts per action. Retain only labels whose action
+  difference exceeds 1.96 standard errors. Use a deterministic 80/20 train/
+  validation split.
+- **Actor fit:** fine-tune only the copied actor for 20 epochs with AdamW,
+  learning rate `1e-3`, batch size 128, and ordinary cross-entropy. These are
+  the existing frozen-latent supervision-probe settings, used as a capacity
+  diagnostic rather than a proposed online optimizer.
+- **Evaluation:** compare the original and fitted deterministic actors on the
+  same 20 unseen reset seeds 10,017--10,036 with the frozen encoder/RSSM.
+- **Gate:** the target is actionable only if held-out label accuracy is at least
+  `0.8` and mean real return improves by at least 50 over the original actor.
+  If fitting succeeds without behavioral gain, reject one-step frozen target
+  distillation because its labels do not survive the induced distribution
+  shift. If fitting itself fails, actor representation/capacity remains the
+  nearer boundary.
+- **Stop rule:** one checkpoint, split, optimizer setting, and seed. Do not tune
+  epochs, learning rate, confidence cutoff, or labels after seeing the result.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
