@@ -1926,6 +1926,35 @@ boundary. If both are weak, continuation supervision/imbalance or head capacity
 is the boundary. Do not change the actor, critic, or end-to-end configuration
 until this frozen distinction is measured.
 
+#### Preregistered posterior-versus-prior continuation audit
+
+- **Question:** is excessive imagined termination discount caused by the
+  continuation head itself, or by the transition from observation-conditioned
+  posterior latents to imagination-only prior latents?
+- **Frozen checkpoints and trajectories:** reuse the exact-return and detached
+  final checkpoints, their deployed deterministic actors, 20 episodes, and
+  reset seeds 17--36. Do not update parameters.
+- **Matched transition contract:** for every real action, encode the actual next
+  observation and evaluate continuation under 64 samples from its posterior.
+  From the identical pre-action latent and action, evaluate the same head under
+  64 samples from the learned prior. Retain the posterior-mode prediction used
+  by deterministic deployment, physical terminal/truncation flags, distance to
+  physical termination, posterior/prior KL, and prior probability assigned to
+  posterior modal categories.
+- **Metrics:** decompose prior effective-discount error exactly into posterior
+  label error plus prior-minus-posterior transport error. Report RMS/mean on all
+  transitions and terminal transitions, failure ROC AUC, terminal/nonterminal
+  means, effective-discount Brier score, and distance-to-terminal strata.
+- **Primary decision:** on the exact-return checkpoint's terminal transitions,
+  compare posterior-label-error RMS with transport-error RMS. If transport is
+  larger and posterior failure AUC is at least `0.8`, the prior/posterior
+  dynamics gap is primary. If posterior error is larger or posterior AUC is
+  below `0.8`, continuation prediction/supervision is primary. The detached
+  checkpoint tests whether the classification generalizes.
+- **Stop rule:** two checkpoints, the fixed 20 episodes and 64 samples, one
+  sampling stream, and no training or threshold tuning. Choose the next
+  intervention from this boundary result only.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
