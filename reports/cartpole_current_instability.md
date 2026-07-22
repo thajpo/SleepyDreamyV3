@@ -2673,6 +2673,68 @@ states. That difference gives terminal replay starts full actor/critic weight
 instead of suppressing them. It must be quantified and preregistered separately
 before any new run; no optimizer or architecture change is selected here.
 
+#### Preregistered continuation-coverage canary
+
+The weighting audit found that correcting the consumer alone cannot currently
+provide the intended terminal mask. On deterministic seeds 17--36, the update-
+500 head assigns physical terminal states mean continuation probability `0.992`.
+On histories fixed by the collapsed final actor, the best update-2,700 head
+assigns terminals `0.441` mean probability with `0.65` recall below probability
+`0.5`; the final head assigns those identical terminals `0.986`, has zero
+terminal recall, and has balanced terminal/live accuracy `0.500`. Its live mean
+is `0.958`. The final continuation head is therefore an always-continue
+classifier, not a usable source of the missing start weight.
+
+The producer-side cause is a replay edge bias. Reference commit `e3f0224`
+inserts a sliding sequence at every environment step and permits sequences to
+span episode resets, whose `is_first` flags reset recurrent state. Local replay
+stores each episode separately and samples only fully contained length-`T`
+windows (except one padded window for episodes shorter than `T`). For an episode
+of length `L >= T`, an interior transition occurs in as many as `T` sampled
+windows, but the physical terminal transition occurs only in the one window
+whose end equals the episode end. With the frozen `T=16`, terminal continuation
+labels can therefore receive about one-sixteenth the inclusion multiplicity of
+interior live labels exactly as learned episodes grow longer. This compounds
+the natural one-terminal-per-episode imbalance and matches the observed drift:
+the head partially recognizes failures at the best checkpoint, then forgets
+them while recent episode length increases.
+
+- **Hypothesis:** per-episode full-window sampling starves the continuation head
+  of failure labels, allowing it to become overoptimistically constant and to
+  inflate imagined survival/value near the cart boundary. Correcting only the
+  continuation loss for each row's window-inclusion probability will preserve
+  terminal discrimination and reduce post-solve collapse.
+- **Causal variable:** have replay return a continuation importance weight for
+  every sampled row. For a full episode, compute each transition's exact number
+  of valid length-`T` windows and weight it by the episode's mean inclusion
+  multiplicity divided by its own multiplicity; padded short episodes retain
+  unit weights. Apply these weights only to continuation BCE. This makes all
+  transitions within an episode contribute equally in expectation while
+  preserving mean continuation-loss scale. Do not change sequence selection,
+  reward/reconstruction/KL losses, actor/critic losses, the currently missing
+  start-continuation multiplier, or any run hyperparameter.
+- **Mechanical gate:** enumerating every valid window of synthetic episodes
+  must show equal aggregate continuation weight for every transition and mean
+  sampled-row weight one; terminal weighting must affect only continuation BCE.
+  Padded masks and exact-return fields must remain aligned. Focused/full tests,
+  compile/type gates, and a one-update process smoke must pass.
+- **Frozen run:** repeat the return-normalizer seed-0 run for 3,500 learner
+  updates with its exact configuration, evaluation cohort, and one-thread host
+  resource cap.
+- **Behavioral gate:** reach mean return `450`; never fall below `300`
+  afterward; final at least `400`; best-to-final gap at most `100`.
+- **Continuation gate:** on deterministic seeds 17--36, the final posterior
+  continuation probability on physical terminal transitions must be below
+  `0.5`, terminal recall must exceed `0.5`, and terminal/live balanced accuracy
+  must exceed `0.7`. The current matched-history baselines are `0.986`, `0.0`,
+  and `0.500`, respectively.
+- **Boundary gate:** if the behavior gate passes, rerun the final-policy fixed-
+  history Q comparison; final Q/real accuracy and correlation must not regress
+  below `0.592` and `0.088`, and actor/Q agreement must remain above `0.8`.
+- **Stop rule:** validate and run seed 0 only. Failure rejects terminal-label
+  coverage as sufficient and does not authorize stacking the deferred start-
+  continuation multiplier, loss-class balancing, or architecture changes.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
