@@ -3792,6 +3792,131 @@ suite passes (`188 passed`), as do compile and the project-scoped type checks.
 This establishes the collection contract but is not behavioral evidence; the
 frozen canary remains required.
 
+#### Episode-coherent collector canary result
+
+The frozen seed-0 run completed normally under
+`experiments/2026-07-22_cartpole_episode_coherent_seed0_3500/`, with manifest
+run ID `e3620074487546ffaf3f796dfef605bf` and MLflow run ID
+`ab14d731464447f8926977a2f45e6d33`. It used 3,500 updates, 21,474 environment
+steps, and 1,007.7 seconds from clean source `5221e5c`. The collector applied
+163 snapshots at episode boundaries, while newest-wins mailboxes replaced 536
+stale pending snapshots across 700 publications. Final shutdown was normal.
+
+The full 20-episode evaluation curve was:
+
+```text
+100:9.35 200:9.35 300:9.35 400:9.35 500:115.05 600:139.55
+700:374.05 800:303.45 900:223.70 1000:405.20 1100:387.80
+1200:201.40 1300:388.95 1400:262.15 1500:434.85 1600:428.25
+1700:500.00 1800:486.80 1900:500.00 2000:493.45 2100:464.15
+2200:375.35 2300:434.75 2400:384.25 2500:333.50 2600:434.45
+2700:457.90 2800:416.15 2900:305.55 3000:261.90 3100:364.65
+3200:246.00 3300:210.10 3400:217.65 3500:200.40
+```
+
+The behavioral gate fails. The run first reaches 500 at update 1,700 and then
+holds above 300 through update 2,900, but falls to 261.90 at update 3,000 and
+finishes at 200.40. Its best-to-final gap is 299.60. Episode coherence therefore
+does not solve CartPole, but it materially changes the failure trajectory: the
+prior stream run first solves at 1,100 and has several sub-300 collapses before
+3,000, whereas this run sustains a contiguous 1,200-update post-solve interval
+above the floor. Retain the runtime change as a recurrent-policy correctness
+fix, not as a sufficient learning fix.
+
+The required final continuation audit is retained under
+`experiments/2026-07-22_cartpole_episode_coherent_continuation_probe/`. On seeds
+17--36 it averages 194.3 return over 3,886 transitions. Posterior terminal
+effective discount is 0.930 versus 0.987 on live rows, failure AUC is 0.992,
+and the distance profile is monotonic from 0.930 at failure to 0.990 at distance
+ten or greater. Prior AUC is 0.989 and posterior/prior transport RMS is 0.00164.
+The continuation head remains poorly calibrated at the 0.5 cutoff, but it has
+not forgotten terminal-risk ordering; that is not the first remaining boundary.
+
+The best/final on-policy comparison is retained under
+`experiments/2026-07-22_cartpole_episode_coherent_on_policy_probe/`:
+
+| Metric | Best, update 1,700 | Final, update 3,500 |
+|---|---:|---:|
+| Mean return / solved fraction | 500.0 / 1.0 | 194.3 / 0.0 |
+| Actor/real balanced accuracy | 0.607 | 0.604 |
+| Critical-margin accuracy | 0.553 | 0.508 |
+| Terminal-window accuracy | 0.514 | 0.430 |
+| Three-step Q/real balanced accuracy | 0.648 | 0.628 |
+| Three-step Q/real correlation | 0.119 | 0.004 |
+| Actor/three-step-Q agreement | 0.867 | 0.589 |
+| Mean absolute Q action margin | 0.201 | 3.804 |
+| Mean one-step state MSE | 0.140 | 0.043 |
+
+Final world-model one-step fidelity improves by about threefold, and balanced
+Q/real ranking changes little, but Q correlation disappears, Q margins inflate
+nineteenfold, and actor/Q agreement falls by 0.278. Every final episode again
+enters the negative-x drift regime and crosses the left cart boundary; the last
+episode, for example, reaches x `-2.381` with negative velocity while alternating
+actions. Trusted real rollouts prefer action 1 on 2,162 of 2,297 actionable
+final states, while the actor takes action 0 slightly more often overall.
+
+Episode coherence therefore removes artificial recurrent discontinuities but
+does not remove the learned late target/actor drift. The remaining failure is
+not global one-step model accuracy or continuation ordering. Before selecting
+the next training change, repeat the exact policy-conditioned target readout on
+this cleaner solved/final pair; the planner-like three-step Q result cannot tell
+whether the actor has stopped following its authored REINFORCE target.
+
+#### Preregistered episode-coherent policy-target readout
+
+- **Question:** after removing recurrent snapshot mixing, does late actor/Q
+  disagreement reflect failure to track the actual sampled lambda-return target,
+  or does that authored target itself become wrong on the left-drift states?
+- **Frozen cohort:** compare best update 1,700 and final update 3,500 on reset
+  seeds 17--19, using 64 sampled, 15-step policy-conditioned returns per forced
+  first action and the existing 1.96-combined-standard-error separation rule.
+- **Interpretation:** at least 100 separated states per checkpoint makes actor/
+  target agreement categorical. Best at least 0.8 followed by final below 0.8
+  selects transfer lag; agreement at least 0.8 for both with worse target/real
+  ranking selects target quality; both moving selects a coupled failure.
+- **Stop rule:** these two read-only checkpoints only. Do not increase samples
+  or begin another training intervention before recording the result.
+
+#### Episode-coherent policy-target-readout result
+
+The result is retained under
+`experiments/2026-07-22_cartpole_episode_coherent_policy_q_probe/`:
+
+| Metric | Best, update 1,700 | Final, update 3,500 |
+|---|---:|---:|
+| Three-seed mean return | 500.0 | 191.67 |
+| Statistically separated states | 610 | 264 |
+| Actor/target agreement there | 0.870 | 0.803 |
+| Separated actionable states | 189 | 146 |
+| Target/real balanced accuracy there | 0.548 | 0.507 |
+| All-state target/real balanced accuracy | 0.540 | 0.577 |
+| Mean absolute target action margin | 0.151 | 3.022 |
+
+Both checkpoints exceed the 100-state support floor and both actor/target
+agreements meet the categorical `0.8` threshold. The remaining failure is
+therefore target quality rather than simple actor fitting: final targets become
+about twenty times more separated in magnitude, yet their confident action
+ordering is at chance against trusted real rollouts. The actor continues to
+express that target accurately enough to fail with it.
+
+The one-step decomposition localizes most of this action margin to critic
+bootstrap, not reward. At final, the one-step critic-bootstrap preference
+selects action 0 on 507 of 575 states, has mean absolute difference 5.31, and
+only 0.191 raw accuracy against the heavily action-1 recovery distribution.
+The learned one-step reward difference remains approximately zero, as expected
+for CartPole's constant reward. Continuation has strong failure ordering but
+only modest action-specific discrimination. The actionable boundary is thus
+the imagined critic/lambda-return target on recovery states.
+
+This reproduces the earlier target-quality diagnosis after removing collector
+state mixing. The next source-conformance candidate is the still-missing
+imagination start-continuation weight: local policy/value losses give every
+replay start weight one, including terminal states, whereas pinned reference
+weights the first action by predicted continuation of the observed start and
+carries that factor through the imagined trajectory. Its causal reach must be
+measured before authorizing another canary because terminal and near-terminal
+starts are rare.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
