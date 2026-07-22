@@ -21,7 +21,10 @@ from dreamer.models import (
     symexp,
     symexp_twohot_bins,
 )
-from dreamer.models.dreaming import enumerate_first_action_values
+from dreamer.models.dreaming import (
+    enumerate_first_action_values,
+    estimate_policy_lambda_action_values,
+)
 
 if __package__:
     from scripts.probe_cartpole_q import (
@@ -85,7 +88,7 @@ def _mean(rows: list[dict], key: str) -> float | None:
 def _diagnostic_metrics(rows: list[dict]) -> dict:
     actionable = [row for row in rows if int(row["true_pref"]) >= 0]
     q_margined = [row for row in actionable if abs(float(row["q_delta"])) > 1e-6]
-    return {
+    metrics = {
         "states": len(rows),
         "actionable_states": len(actionable),
         "actor_vs_real_balanced_accuracy": _balanced_accuracy(
@@ -109,6 +112,48 @@ def _diagnostic_metrics(rows: list[dict]) -> dict:
         "true_pref_hist": dict(Counter(str(row["true_pref"]) for row in rows)),
         "q_pref_hist": dict(Counter(str(row["q_pref"]) for row in rows)),
     }
+    policy_q_rows = [row for row in rows if "policy_q_delta" in row]
+    if policy_q_rows:
+        separated = [
+            row
+            for row in policy_q_rows
+            if abs(float(row["policy_q_delta"]))
+            > 1.96 * float(row["policy_q_delta_se"])
+        ]
+        separated_actionable = [
+            row for row in separated if int(row["true_pref"]) >= 0
+        ]
+        metrics.update(
+            {
+                "policy_q_confident_states": len(separated),
+                "policy_q_confident_actionable_states": len(separated_actionable),
+                "actor_vs_policy_q_confident_accuracy": _fraction(
+                    sum(
+                        int(row["target_actor_action"])
+                        == int(row["policy_q_pref"])
+                        for row in separated
+                    ),
+                    len(separated),
+                ),
+                "policy_q_vs_real_confident_balanced_accuracy": (
+                    _balanced_accuracy(separated_actionable, "policy_q_pref")
+                ),
+                "mean_abs_policy_q_delta": _mean(
+                    [
+                        {"value": abs(float(row["policy_q_delta"]))}
+                        for row in policy_q_rows
+                    ],
+                    "value",
+                ),
+                "mean_policy_q_delta_se": _mean(
+                    policy_q_rows, "policy_q_delta_se"
+                ),
+                "policy_q_pref_hist": dict(
+                    Counter(str(row["policy_q_pref"]) for row in policy_q_rows)
+                ),
+            }
+        )
+    return metrics
 
 
 def summarize_fixed_history_rows(
@@ -219,6 +264,7 @@ def run_fixed_history_probe(
     seed: int,
     rollout_horizon: int,
     model_horizon: int,
+    policy_q_samples: int = 0,
 ) -> dict:
     """Drive CartPole with one actor while evaluating a target checkpoint."""
     (
@@ -268,6 +314,10 @@ def run_fixed_history_probe(
     imagination_discount = learned_continue_discount(
         target_cfg.gamma, bool(getattr(target_cfg, "contdisc", True))
     )
+    policy_q_generator = None
+    if policy_q_samples:
+        policy_q_generator = torch.Generator(device=device)
+        policy_q_generator.manual_seed(seed + 2_000_000)
     rows: list[dict] = []
     source_h_backup = source_world_model.h_prev.clone()
     target_h_backup = target_world_model.h_prev.clone()
@@ -352,6 +402,32 @@ def run_fixed_history_probe(
                                 getattr(target_cfg, "terminal_reward_penalty", 0.0)
                             ),
                         )
+                        policy_q_values = None
+                        policy_q_standard_errors = None
+                        if policy_q_samples:
+                            (
+                                policy_q_values,
+                                policy_q_standard_errors,
+                            ) = estimate_policy_lambda_action_values(
+                                target_h_z,
+                                target_z_embed,
+                                target_actor,
+                                target_critic,
+                                target_world_model,
+                                target_cfg.n_actions,
+                                target_cfg.d_hidden,
+                                bins,
+                                imagination_discount,
+                                target_cfg.lam,
+                                target_cfg.num_dream_steps,
+                                policy_q_samples,
+                                generator=policy_q_generator,
+                                terminal_reward_penalty=float(
+                                    getattr(
+                                        target_cfg, "terminal_reward_penalty", 0.0
+                                    )
+                                ),
+                            )
                         current_reconstruction = symexp(
                             target_world_model.decoder(target_h_z)["state"]
                         ).squeeze(0).cpu().numpy().astype(np.float32)
@@ -409,6 +485,29 @@ def run_fixed_history_probe(
                         "true_delta": float(true_scores[1] - true_scores[0]),
                         "true_pref": int(true_pref),
                     }
+                    if (
+                        policy_q_values is not None
+                        and policy_q_standard_errors is not None
+                    ):
+                        policy_values_np = policy_q_values.squeeze(0).cpu().numpy()
+                        policy_se_np = (
+                            policy_q_standard_errors.squeeze(0).cpu().numpy()
+                        )
+                        row.update(
+                            {
+                                "policy_q0": float(policy_values_np[0]),
+                                "policy_q1": float(policy_values_np[1]),
+                                "policy_q_delta": float(
+                                    policy_values_np[1] - policy_values_np[0]
+                                ),
+                                "policy_q_delta_se": float(
+                                    np.sqrt(policy_se_np[0] ** 2 + policy_se_np[1] ** 2)
+                                ),
+                                "policy_q_pref": int(
+                                    policy_values_np[1] > policy_values_np[0]
+                                ),
+                            }
+                        )
                     for state_index, state_name in enumerate(STATE_NAMES):
                         row[f"current_posterior_{state_name}_mse"] = float(
                             (current_reconstruction[state_index] - state[state_index])
@@ -491,8 +590,16 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=17)
     parser.add_argument("--rollout-horizon", type=int, default=30)
     parser.add_argument("--model-horizon", type=int, default=3)
+    parser.add_argument(
+        "--policy-q-samples",
+        type=int,
+        default=0,
+        help="sampled policy-conditioned lambda returns per forced first action",
+    )
     args = parser.parse_args()
     args.device = resolve_device(args.device)
+    if args.policy_q_samples < 0 or args.policy_q_samples == 1:
+        parser.error("--policy-q-samples must be zero or at least two")
 
     summaries = []
     source_name = (
@@ -512,6 +619,7 @@ def main() -> None:
             seed=args.seed,
             rollout_horizon=args.rollout_horizon,
             model_horizon=args.model_horizon,
+            policy_q_samples=args.policy_q_samples,
         )
         summaries.append(summary)
         print(json.dumps(summary, indent=2))

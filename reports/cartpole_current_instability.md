@@ -4211,6 +4211,44 @@ actor/critic rate ratio `3e-5/8e-5`.
 
 ## Reliability follow-up
 
+### Preregistered fixed-history actor/target time-scale audit
+
+The decoded-mean canary failed with both incorrect learned target ordering and
+late actor/target disagreement, but those endpoint readouts do not say which
+boundary broke first. A new training run would therefore be premature.
+
+- **Question:** on one checkpoint-independent state history, does the learned
+  policy-conditioned target become wrong before the actor stops following it,
+  or does actor lag appear while the target is still useful?
+- **Frozen history:** drive CartPole with the decoded-mean canary's best
+  checkpoint on reset seeds 17--18. Evaluate periodic updates 500, 1,000,
+  1,500, 2,000, 2,500, 3,000, and 3,500 plus best update 1,200 on exactly those
+  states and previous actions. Use deterministic posterior modes, the
+  checkpoint's 15-step policy-conditioned lambda-return target, 64 Monte Carlo
+  samples per forced first action, and the existing 30-step trusted-real action
+  score. No weights change.
+- **Primary readouts:** at every checkpoint, report the number of target action
+  differences exceeding 1.96 combined standard errors, actor/target agreement
+  there, target/real balanced accuracy on confident actionable states, action
+  preference counts, target margin, and one-step model error. Across adjacent
+  checkpoints, report target-preference and actor-action flip rates on the
+  aligned `(episode, timestep)` rows.
+- **Interpretation:** target/real accuracy falling below `0.592` while
+  actor/target agreement remains at least `0.8` selects target-quality failure
+  as the first broken boundary. Actor/target agreement below `0.8` while target
+  accuracy remains at least `0.592` selects actor lag. Both failing at the first
+  adequately supported checkpoint selects a coupled optimization failure.
+  Fewer than 100 confident actionable rows at a checkpoint is descriptive, not
+  categorical.
+- **Stop rule:** these eight checkpoint views and two reset seeds only. Do not
+  launch training or change rates after seeing the result; use it to decide
+  whether an integrated current-stack reference optimizer canary is justified.
+
+The diagnostic extends the existing fixed-history probe to expose the exact
+sampled policy-conditioned target alongside its deterministic branch-max Q
+readout. The generated rows retain the standard errors and confidence rule so
+uncertain Monte Carlo preferences cannot masquerade as categorical labels.
+
 Interrupted manifests correctly record `status: interrupted` and evaluation
 history, but incorrectly retain `progress.train_step: 0` and `env_steps: 0`.
 Fix this bookkeeping issue separately from the learning experiment so it does

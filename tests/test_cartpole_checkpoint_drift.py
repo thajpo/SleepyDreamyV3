@@ -17,6 +17,8 @@ def _row(
     actor_action: int,
     q_delta: float,
     true_delta: float,
+    policy_q_delta: float | None = None,
+    policy_q_delta_se: float = 0.1,
 ) -> dict:
     row = {
         "episode": episode,
@@ -33,6 +35,10 @@ def _row(
         row[f"current_posterior_{state_name}_mse"] = 1.0
         row[f"one_step_prior_{state_name}_mse"] = 2.0
         row[f"one_step_posterior_{state_name}_mse"] = 3.0
+    if policy_q_delta is not None:
+        row["policy_q_delta"] = policy_q_delta
+        row["policy_q_delta_se"] = policy_q_delta_se
+        row["policy_q_pref"] = int(policy_q_delta > 0.0)
     return row
 
 
@@ -109,3 +115,51 @@ def test_fixed_history_summary_rejects_empty_input():
             target_checkpoint=Path("target.pt"),
             train_step=None,
         )
+
+
+def test_fixed_history_summary_reports_confident_policy_target_boundary():
+    rows = [
+        _row(
+            episode=0,
+            x=0.1,
+            true_pref=0,
+            q_pref=0,
+            actor_action=0,
+            q_delta=-1.0,
+            true_delta=-1.0,
+            policy_q_delta=-1.0,
+        ),
+        _row(
+            episode=0,
+            x=0.2,
+            true_pref=1,
+            q_pref=1,
+            actor_action=0,
+            q_delta=1.0,
+            true_delta=1.0,
+            policy_q_delta=1.0,
+        ),
+        _row(
+            episode=0,
+            x=0.3,
+            true_pref=1,
+            q_pref=1,
+            actor_action=1,
+            q_delta=1.0,
+            true_delta=1.0,
+            policy_q_delta=0.1,
+        ),
+    ]
+
+    summary = summarize_fixed_history_rows(
+        rows,
+        source_checkpoint=Path("source.pt"),
+        target_checkpoint=Path("target.pt"),
+        train_step=1000,
+    )
+
+    assert summary["policy_q_confident_states"] == 2
+    assert summary["policy_q_confident_actionable_states"] == 2
+    assert summary["actor_vs_policy_q_confident_accuracy"] == 0.5
+    assert summary["policy_q_vs_real_confident_balanced_accuracy"] == 1.0
+    assert summary["policy_q_pref_hist"] == {"0": 1, "1": 2}
