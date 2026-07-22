@@ -246,6 +246,78 @@ def test_actor_advantage_uses_slow_critic_baseline():
     assert actor_loss.item() > 0.0
 
 
+def test_start_continuation_weights_entire_imagined_actor_critic_trajectory():
+    horizon = 3
+    batch_size = 2
+    bins = torch.linspace(-2.0, 2.0, 5)
+    value_logits = torch.zeros(horizon, batch_size, bins.numel())
+    values = torch.zeros(horizon, batch_size)
+    lambda_returns = torch.ones(horizon, batch_size)
+    successor_continues = torch.full((horizon, batch_size), 20.0)
+    action_logits = torch.zeros(horizon, batch_size, 2)
+    sampled_actions = torch.zeros(horizon, batch_size, dtype=torch.long)
+
+    unweighted_actor, unweighted_critic, _entropy = compute_actor_critic_losses(
+        value_logits,
+        values,
+        lambda_returns,
+        successor_continues,
+        action_logits,
+        sampled_actions,
+        bins,
+        S=1.0,
+        gamma=0.997,
+        actor_entropy_coef=0.0,
+        normalize_advantages=False,
+    )
+    weighted_actor, weighted_critic, _entropy = compute_actor_critic_losses(
+        value_logits,
+        values,
+        lambda_returns,
+        successor_continues,
+        action_logits,
+        sampled_actions,
+        bins,
+        S=1.0,
+        gamma=0.997,
+        actor_entropy_coef=0.0,
+        normalize_advantages=False,
+        start_continue_logits=torch.zeros(batch_size),
+    )
+
+    assert weighted_actor.item() == pytest.approx(unweighted_actor.item() * 0.5)
+    assert weighted_critic.item() == pytest.approx(
+        unweighted_critic.item() * 0.5
+    )
+
+
+def test_start_continuation_weight_is_not_a_world_model_gradient_path():
+    bins = torch.linspace(-2.0, 2.0, 5)
+    value_logits = torch.zeros(1, 1, bins.numel(), requires_grad=True)
+    action_logits = torch.zeros(1, 1, 2, requires_grad=True)
+    start_continue_logits = torch.zeros(1, requires_grad=True)
+
+    actor_loss, critic_loss, _entropy = compute_actor_critic_losses(
+        value_logits,
+        torch.zeros(1, 1),
+        torch.ones(1, 1),
+        torch.zeros(1, 1),
+        action_logits,
+        torch.zeros(1, 1, dtype=torch.long),
+        bins,
+        S=1.0,
+        gamma=0.997,
+        actor_entropy_coef=0.0,
+        normalize_advantages=False,
+        start_continue_logits=start_continue_logits,
+    )
+    (actor_loss + critic_loss).backward()
+
+    assert value_logits.grad is not None
+    assert action_logits.grad is not None
+    assert start_continue_logits.grad is None
+
+
 def test_observation_decoder_skips_state_head_when_n_observations_zero():
     mlp_cfg = SimpleNamespace(hidden_dim_ratio=8)
     cnn_cfg = SimpleNamespace(

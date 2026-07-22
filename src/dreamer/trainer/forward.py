@@ -55,6 +55,7 @@ class ReinforceActorBatch:
     dreamed_actions_sampled: torch.Tensor
     sample_mask: torch.Tensor
     actor_baseline_values: torch.Tensor
+    start_continue_logits: Optional[torch.Tensor]
 
 
 def replay_value_features(
@@ -563,6 +564,12 @@ def dreamer_step(
             if critic_replay_scale > 0.0:
                 metrics.replay_value_annotations.append(lambda_returns[0].detach())
 
+            start_continue_logits = (
+                continue_logits.detach().squeeze(-1)
+                if bool(getattr(config, "weight_imagination_starts", False))
+                else None
+            )
+
             (
                 actor_loss,
                 critic_loss,
@@ -583,6 +590,7 @@ def dreamer_step(
                 critic_ema_coef=critic_ema_coef,
                 sample_mask=sample_mask,
                 actor_baseline_values=critic_target_values,
+                start_continue_logits=start_continue_logits,
             )
             if (
                 not skip_actor
@@ -597,6 +605,7 @@ def dreamer_step(
                         dreamed_actions_sampled=dreamed_actions_sampled,
                         sample_mask=sample_mask,
                         actor_baseline_values=critic_target_values,
+                        start_continue_logits=start_continue_logits,
                     )
                 )
             if (
@@ -796,6 +805,7 @@ def dreamer_step(
                     normalize_advantages=config.normalize_advantages,
                     sample_mask=actor_batch.sample_mask,
                     actor_baseline_values=actor_batch.actor_baseline_values,
+                    start_continue_logits=actor_batch.start_continue_logits,
                 )
                 recomputed_actor_losses.append(recomputed_actor_loss)
             total_actor_loss = torch.stack(recomputed_actor_losses).sum()

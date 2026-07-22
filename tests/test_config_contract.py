@@ -26,6 +26,7 @@ def test_hydra_yaml_defines_every_runtime_field():
     assert runtime_config.critic_slow_target is False
     assert runtime_config.optimizer_contract == "reference"
     assert runtime_config.optimizer_warmup_steps == 1000
+    assert runtime_config.weight_imagination_starts is True
     assert runtime_config.wm_lr == runtime_config.actor_lr
     assert runtime_config.actor_lr == runtime_config.critic_lr
     validate_config(runtime_config)
@@ -97,6 +98,7 @@ def test_resume_inherits_historical_checkpoint_semantics(tmp_path):
     snapshot.pop("replay_sequence_mode")
     snapshot.pop("optimizer_contract")
     snapshot.pop("optimizer_warmup_steps")
+    snapshot.pop("weight_imagination_starts")
     (run_dir / "config.json").write_text(json.dumps(snapshot))
 
     resumed = resolve_resume_config(
@@ -117,6 +119,7 @@ def test_resume_inherits_historical_checkpoint_semantics(tmp_path):
     assert resumed.replay_sequence_mode == "episode"
     assert resumed.optimizer_contract == "legacy"
     assert resumed.optimizer_warmup_steps == 0
+    assert resumed.weight_imagination_starts is False
 
 
 def test_resume_requires_explicit_semantic_migration(tmp_path):
@@ -173,6 +176,7 @@ def test_resume_restores_checkpoint_authored_loss_and_bin_semantics(tmp_path):
         b_start=-5,
         b_end=6,
         num_bins=127,
+        weight_imagination_starts=True,
     )
     current = replace(
         Config(),
@@ -181,6 +185,7 @@ def test_resume_restores_checkpoint_authored_loss_and_bin_semantics(tmp_path):
         b_start=-20,
         b_end=20,
         num_bins=255,
+        weight_imagination_starts=False,
     )
 
     resumed = resolve_resume_config(
@@ -195,6 +200,7 @@ def test_resume_restores_checkpoint_authored_loss_and_bin_semantics(tmp_path):
     assert resumed.normalize_advantages is True
     assert resumed.free_bits_straight_through is True
     assert (resumed.b_start, resumed.b_end, resumed.num_bins) == (-5, 6, 127)
+    assert resumed.weight_imagination_starts is True
 
 
 def test_resume_infers_reference_rssm_core_without_config_snapshot(tmp_path):

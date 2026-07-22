@@ -108,6 +108,8 @@ train:
   terminal_reward_penalty: 0.0
   balance_continuation: false  # false preserves the natural continuation prior
   continuation_balance_rate: 0.01  # terminal-prevalence EMA rate when enabled
+  # Weight the whole imagined loss trajectory by continuation at its replay start.
+  weight_imagination_starts: true
 
   # Loss coefficients (DreamerV3 paper: βpred=1, βdyn=1, βrep=0.1)
   beta_dyn: 1.0

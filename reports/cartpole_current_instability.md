@@ -3917,6 +3917,58 @@ carries that factor through the imagined trajectory. Its causal reach must be
 measured before authorizing another canary because terminal and near-terminal
 starts are rare.
 
+#### Preregistered imagination-start-weight canary
+
+The source audit confirms one exact consumer mismatch. The pinned reference
+constructs its imagination weight sequence from the learned continuation at
+the observed replay start followed by the learned continuations of imagined
+successors. Local `compute_actor_critic_losses()` instead prefixes successor
+continuations with one. Thus local step-zero policy and value losses are never
+discounted by the start continuation, and every later imagined loss is missing
+that same multiplicative factor. Return construction itself is already based
+on successor continuations and will remain unchanged.
+
+The causal prior is deliberately weak. Training telemetry from the episode-
+coherent seed-0 run reports mean start continuation weight about `0.971`, so
+the correction removes only about `2.9%` of aggregate actor/value loss mass.
+Its only plausible high-leverage route is selective suppression of rare
+failure-adjacent starts. The final continuation probe also found terminal-state
+probability `0.930`, making even that suppression modest late in training.
+This evidence does not justify a sweep.
+
+- **Hypothesis:** multiplying every imagined actor/value loss by the detached
+  continuation probability of its observed replay start prevents rare
+  terminal or near-terminal starts from authoring disproportionately harmful
+  critic targets, improving late recovery-state target ranking and behavioral
+  retention.
+- **Single causal variable:** add the missing start factor to the existing
+  imagined-loss weights. Keep lambda-return construction, successor discount
+  recurrence, replay, collector episode coherence, architecture, optimizers,
+  rates, seeds, and all other settings fixed. New authored runs enable the
+  behavior; historical checkpoint snapshots that lack the field retain the
+  old unit-prefix semantics unless semantic migration is explicitly allowed.
+- **Frozen run:** one CartPole seed (`0`), clean source after validation,
+  `3,500` learner updates, one collector, `d_hidden=128`, reference RSSM,
+  one-hidden-layer continuation head, stream replay, replay ratio `16`, buffer
+  `512`, minimum `16` episodes, batch `8`, sequence length `16`, burn-in `4`,
+  world-model/actor/critic rates `3e-4/3e-5/8e-5`, legacy optimizer contract,
+  no warmup, entropy `1e-3`, online critic target, evaluation every `100`
+  updates over `20` deterministic episodes, checkpoints every `500`, and no
+  early stop. This is otherwise identical to the episode-coherent canary.
+- **Behavior gate:** reach mean evaluation at least `475`; after the first such
+  evaluation, never fall below `300`; finish at least `400`; and keep the
+  best-to-final gap at most `100`.
+- **Boundary readout:** regardless of the behavioral result, repeat the frozen
+  reset-seed `17`--`19`, 64-sample, 15-step policy-target probe on best and
+  final. A credible target-quality improvement requires final confident
+  target/real balanced accuracy above the prior `0.507` and at least `0.55`,
+  with at least 100 separated states. Actor/target agreement must remain at
+  least `0.8`; otherwise the selected boundary has moved to actor fitting.
+- **Stop rule:** run this seed once. Do not add seeds or combine another
+  learning intervention if either gate fails. Retain the source-conforming
+  correction as semantics infrastructure, record the negative result, and
+  return to source/data-flow localization of the critic target.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation

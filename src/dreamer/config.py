@@ -123,6 +123,9 @@ class Config:
     terminal_reward_penalty: float = 0.0
     balance_continuation: bool = False
     continuation_balance_rate: float = 0.01
+    # False preserves historical unit-prefix imagination-loss weighting.
+    # Authored Hydra runs include the observed start continuation like DreamerV3.
+    weight_imagination_starts: bool = False
 
     # ===== Training: loss coefficients =====
     beta_dyn: float = 1.0

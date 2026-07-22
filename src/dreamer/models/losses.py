@@ -204,6 +204,7 @@ def compute_actor_critic_losses(
     critic_ema_coef=1.0,
     sample_mask=None,
     actor_baseline_values=None,
+    start_continue_logits=None,
 ):
     """
     Compute actor and critic losses for policy gradient training.
@@ -225,6 +226,9 @@ def compute_actor_critic_losses(
         sample_mask: Optional validity mask for imagined starts
         actor_baseline_values: Selected detached baseline values; online by
             default, or slow-critic values for historical semantics
+        start_continue_logits: Optional continuation logits for the observed
+            replay starts. When provided, their detached probabilities weight
+            the entire imagined loss trajectory, matching DreamerV3.
 
     Returns:
         Tuple of (actor_loss, critic_loss, entropy)
@@ -235,7 +239,15 @@ def compute_actor_critic_losses(
     continue_probs = torch.sigmoid(dreamed_continues).detach()
     discount = gamma * continue_probs
     # Weight timestep t by product_{i < t} (gamma * continue_i), matching Dreamer weighting.
-    weight_prefix = torch.ones(1, Bsz, device=discount.device, dtype=discount.dtype)
+    if start_continue_logits is None:
+        weight_prefix = torch.ones(
+            1, Bsz, device=discount.device, dtype=discount.dtype
+        )
+    else:
+        weight_prefix = (
+            torch.sigmoid(start_continue_logits).detach().reshape(1, Bsz)
+        )
+        weight_prefix = weight_prefix.to(device=discount.device, dtype=discount.dtype)
     if H > 1:
         weights = torch.cumprod(torch.cat([weight_prefix, discount[:-1]], dim=0), dim=0)
     else:
@@ -298,6 +310,7 @@ def compute_actor_critic_losses(
         normalize_advantages=normalize_advantages,
         sample_mask=sample_mask,
         actor_baseline_values=actor_baseline_values,
+        start_continue_logits=start_continue_logits,
     )
 
     return actor_loss, critic_loss, entropy
@@ -315,13 +328,22 @@ def compute_reinforce_actor_loss(
     normalize_advantages=True,
     sample_mask=None,
     actor_baseline_values=None,
+    start_continue_logits=None,
 ):
     """Compute the discrete REINFORCE loss for one imagined start batch."""
     H, Bsz = lambda_returns.shape[:2]
     H_train = max(1, H)
     continue_probs = torch.sigmoid(dreamed_continues).detach()
     discount = gamma * continue_probs
-    weight_prefix = torch.ones(1, Bsz, device=discount.device, dtype=discount.dtype)
+    if start_continue_logits is None:
+        weight_prefix = torch.ones(
+            1, Bsz, device=discount.device, dtype=discount.dtype
+        )
+    else:
+        weight_prefix = (
+            torch.sigmoid(start_continue_logits).detach().reshape(1, Bsz)
+        )
+        weight_prefix = weight_prefix.to(device=discount.device, dtype=discount.dtype)
     if H > 1:
         weights = torch.cumprod(
             torch.cat([weight_prefix, discount[:-1]], dim=0), dim=0

@@ -250,6 +250,9 @@ def resolve_resume_config(
             num_bins=checkpoint_config.num_bins,
             balance_continuation=checkpoint_config.balance_continuation,
             continuation_balance_rate=checkpoint_config.continuation_balance_rate,
+            weight_imagination_starts=(
+                checkpoint_config.weight_imagination_starts
+            ),
             replay_sequence_mode=checkpoint_config.replay_sequence_mode,
         )
 
@@ -281,6 +284,7 @@ def resolve_resume_config(
         b_end=20,
         num_bins=255,
         balance_continuation=False,
+        weight_imagination_starts=False,
         replay_sequence_mode="episode",
     )
 
