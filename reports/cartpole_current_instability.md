@@ -2376,6 +2376,52 @@ contain the episode boundary receive the incorrect target.
   sufficient cause and does not authorize stacking value-head, optimizer-ramp,
   or representation-gradient changes.
 
+#### Truncation-bootstrap canary result
+
+The frozen seed-0 canary completed normally at source commit `2207409` with
+manifest run ID `6237f54a2abe4ca3b4cce092ef7eca28` and MLflow run ID
+`a1196f2b69aa489197f6b29a508c1131`. It used 3,500 learner updates, 21,011
+environment steps, and 1,118.8 seconds on ROCm. The collector loaded every
+published revision observed during monitoring, the parent exited successfully,
+and periodic, best, and final checkpoints were retained under
+`experiments/2026-07-22_cartpole_truncation_bootstrap_seed0_3500/`.
+
+The behavior gate fails. Evaluation stayed at the `9.4` floor through update
+1,500, jumped to `493.05` at 1,600, and immediately fell below the required
+post-solve floor: `218.00` at 1,700, `154.60` at 1,800, and `136.90` at 1,900.
+It subsequently recovered to `453.45` at 2,300 and `483.55` at 2,700, then
+fell to `163.95` at 2,800. It ended at `237.15`; the best-to-final gap is
+`255.90`. These repeated large changes in a fixed 20-episode evaluation cohort
+show that the run can rediscover near-solved behavior but cannot retain it.
+
+The preregistered fixed-history evidence is retained under
+`experiments/2026-07-22_cartpole_truncation_bootstrap_fixed_history_final_source/`.
+The final policy averages return `226.85` on seeds 17--36 and supplies 2,451
+actionable rows from 4,537 fixed states.
+
+| Final-policy histories | Target | Q/real balanced | Q/real corr. | Actor/Q | Actor/real balanced | Posterior x MSE | One-step prior x MSE |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Return 226.85 | Best 1,600 | 0.227 | -0.232 | 0.828 | 0.109 | 1.075 | 1.107 |
+| Return 226.85 | Final 3,500 | 0.293 | -0.264 | 0.849 | 0.481 | 0.330 | 0.286 |
+
+The boundary gate also fails: final Q/real balanced accuracy is `0.293`, below
+the required `0.433`; correlation is negative rather than positive; only the
+actor/Q agreement floor passes. The best checkpoint performs even worse on the
+final policy's histories and represents their cart position poorly, while the
+final checkpoint adapts its representation but still learns an inverted or
+otherwise unreliable action ordering. The first actionable broken boundary
+therefore remains recovery-state value/target quality, with the actor mostly
+following the critic it is given.
+
+This rejects missing truncation bootstrap as a sufficient cause of instability,
+while retaining the correction as required replay semantics. Only windows that
+contain a 500-step boundary receive the corrected target, so its sparse causal
+reach is a plausible limitation. Seeds 1 and 2 and all combined interventions
+are stopped by the preregistered rule. The next step is another bounded source
+audit focused on value-target construction and gradient ownership; a further
+training change requires a concrete divergence that can affect the much broader
+recovery distribution.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
