@@ -2500,6 +2500,64 @@ operational resource limit, not an authored model, data, optimizer, or RNG
 change. It must first demonstrate normal bounded CPU use and adequate
 throughput before consuming the full canary budget.
 
+#### Symmetric two-hot canary result
+
+The resource-limited clean retry completed normally from source commit
+`7ba5282` with manifest run ID `3601530f568b48a286ea3be7f4672595`
+and MLflow run ID `92a6db1fe8da4fa7957de4d4d81ee15c`. It used 3,500
+learner updates, 21,543 environment steps, and 1,026.4 seconds on ROCm. OpenMP,
+MKL, and OpenBLAS were limited to one thread per Dreamer process; observed
+Dreamer CPU use stayed near one trainer core plus a small collector fraction
+while the unrelated VLA study continued. The run completed at
+`max_train_steps`, saved best/final/periodic checkpoints, and stopped the
+collector normally under
+`experiments/2026-07-22_cartpole_symmetric_twohot_seed0_3500_retry2/`.
+
+The mechanical mechanism passes. The resolved support is `[-20, 20]`, and the
+first logged imagined reward and critic-value means are both exactly `0.0`.
+Reward reaches approximately `1.0` by update 50, so zero initialization does
+not prevent the supervised reward head from learning its CartPole target.
+
+The behavioral gate fails, but with substantially different dynamics. Return
+stayed at `9.4` through update 1,600, reached `142.0` at 1,700 and `323.65` at
+1,800, then oscillated between `147.2` and `337.75` through update 2,800. It
+late-solved at `500.0` for updates 2,900 and 3,000 and remained high at `484.5`
+at 3,100. It then collapsed to `235.2` at 3,200 and `217.1` at 3,300, partly
+recovered to `437.3`, and ended at `324.6`. The post-solve floor is below
+`300`, the final is below `400`, and the best-to-final gap is `175.4`.
+
+The preregistered fixed-history evidence is retained under
+`experiments/2026-07-22_cartpole_symmetric_twohot_fixed_history_final_source/`.
+The final policy averages return `332.3` on seeds 17--36; its trajectories have
+mean absolute cart position `0.949`, with `46.0%` of states at `|x| >= 1`, and
+supply 4,431 actionable rows from 6,646 fixed states.
+
+| Final-policy histories | Target | Q/real balanced | Q/real corr. | Actor/Q | Actor/real balanced | Posterior x MSE | One-step prior x MSE |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Return 332.3 | Best 2,900 | 0.347 | -0.076 | 0.875 | 0.313 | 0.682 | 0.696 |
+| Return 332.3 | Final 3,500 | 0.559 | 0.009 | 0.816 | 0.506 | 0.451 | 0.405 |
+
+The boundary gate passes all literal thresholds: final Q/real balanced accuracy
+exceeds the preceding `0.293`, correlation is positive, and actor/Q agreement
+remains above `0.8`. The margin is not uniformly reassuring: correlation is
+only `0.009`, and the final policy visits the broadest recovery distribution of
+these canaries. Still, the final checkpoint improves both representation error
+and action ordering over its solved best checkpoint on those identical
+histories. It has not simply forgotten the solved controller's local value
+landscape; it adapts after the policy moves into harder states, too late to
+prevent the closed-loop failure.
+
+This rejects cold two-hot bias as a sufficient cause of instability while
+retaining the correction as required source semantics and a measurable boundary
+improvement. It also suggests that the historical `+23.505` prior supplied
+accidental optimism: removing it delays useful behavior by roughly 1,200
+updates, but ultimately produces a cleaner late value ranking. Seeds 1 and 2
+are stopped because the behavioral gate dominates. The next bounded source
+audit should focus on imagined-loss weighting and return-normalization update
+scope, which directly control policy-improvement step scale while leaving the
+now-improved distributional support intact. No optimizer or architecture
+change is selected from this result alone.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation

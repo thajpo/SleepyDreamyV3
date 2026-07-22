@@ -2,11 +2,11 @@
 
 Generated non-destructively from run manifests and config snapshots. No checkpoint contents were loaded.
 
-- Indexed runs: 91
-- Indexed size: 5.8 GiB
-- Manifest / legacy: 53 / 38
-- Exact-comparison eligible: 35
-- Dispositions: {'incomplete': 12, 'keep': 39, 'review': 40}
+- Indexed runs: 92
+- Indexed size: 5.9 GiB
+- Manifest / legacy: 54 / 38
+- Exact-comparison eligible: 36
+- Dispositions: {'incomplete': 12, 'keep': 40, 'review': 40}
 
 A blank comparison key means the run lacks the provenance or protocol needed for an exact comparison. Legacy runs are retained for review.
 
@@ -57,6 +57,7 @@ A blank comparison key means the run lacks the provenance or protocol needed for
 | `experiments/2026-07-21_cartpole_online_target_seed0_3500` | completed | keep | yes | 9 | 164.2 MiB |
 | `experiments/2026-07-22_cartpole_symmetric_twohot_seed0_3500` | interrupted | review | no | 1 | 18.3 MiB |
 | `experiments/2026-07-22_cartpole_symmetric_twohot_seed0_3500_retry1` | interrupted | review | no | 2 | 36.5 MiB |
+| `experiments/2026-07-22_cartpole_symmetric_twohot_seed0_3500_retry2` | completed | keep | yes | 9 | 164.2 MiB |
 | `experiments/2026-07-22_cartpole_truncation_bootstrap_seed0_3500` | completed | keep | yes | 9 | 164.2 MiB |
 | `runs/cartpole_collection_budget_smoke` | completed | keep | no | 1 | 5.2 MiB |
 | `runs/cartpole_critic_warmup_canary_99e543a_seed1_3200` | completed | keep | yes | 3 | 50.1 MiB |
