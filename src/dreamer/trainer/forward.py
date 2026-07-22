@@ -107,6 +107,34 @@ def add_sequence_mean_auxiliary_loss(
     return accumulated_loss + sequence_length * scale * auxiliary_loss
 
 
+def normalize_sequence_losses(
+    total_wm_loss: torch.Tensor,
+    total_actor_loss: torch.Tensor,
+    total_critic_loss: torch.Tensor,
+    *,
+    replay_length: int,
+    imagination_starts: int,
+    replay_representation_loss: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    """Reduce accumulated sequence objectives to their authored means."""
+    if replay_length <= 0:
+        raise ValueError("replay_length must be positive")
+    if imagination_starts <= 0:
+        raise ValueError("imagination_starts must be positive")
+
+    normalized_representation_loss = (
+        replay_representation_loss / imagination_starts
+        if replay_representation_loss is not None
+        else None
+    )
+    return (
+        total_wm_loss / replay_length,
+        total_actor_loss / imagination_starts,
+        total_critic_loss / imagination_starts,
+        normalized_representation_loss,
+    )
+
+
 def calculate_replay_lambda_targets(
     rewards: torch.Tensor,
     is_last: torch.Tensor,
@@ -808,6 +836,19 @@ def dreamer_step(
         )
 
     assert total_wm_loss is not None and total_actor_loss is not None and total_critic_loss is not None
+    (
+        total_wm_loss,
+        total_actor_loss,
+        total_critic_loss,
+        replay_representation_loss,
+    ) = normalize_sequence_losses(
+        total_wm_loss,
+        total_actor_loss,
+        total_critic_loss,
+        replay_length=T,
+        imagination_starts=effective_train_steps,
+        replay_representation_loss=replay_representation_loss,
+    )
 
     return ForwardResult(
         total_wm_loss=total_wm_loss,

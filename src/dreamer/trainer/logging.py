@@ -175,9 +175,11 @@ def log_step_metrics(
             norm = 1.0 / sequence_length
             wm_cpu = {k: v.item() for k, v in metrics.wm_components.items()}
 
-            m["loss/wm/total"] = total_wm_loss.item() * norm
-            m["loss/actor/total"] = total_actor_loss.item() * norm
-            m["loss/critic/total"] = total_critic_loss.item() * norm
+            # ForwardResult totals are already reduced over their sequence
+            # axes. Component accumulators remain sums over post-burn-in rows.
+            m["loss/wm/total"] = total_wm_loss.item()
+            m["loss/actor/total"] = total_actor_loss.item()
+            m["loss/critic/total"] = total_critic_loss.item()
 
             if metrics.replay_loss is not None:
                 m["loss/critic/replay"] = float(metrics.replay_loss.item())
@@ -346,15 +348,14 @@ def log_progress(
     elapsed_total: float,
 ):
     """Log training progress to stdout and MLflow (throughput, ETA, env stats)."""
-    norm = max(1, seq_len)
     eta_hours = (max_steps - step) / steps_per_sec / 3600 if steps_per_sec > 0 else 0
 
     print(
         f"Step {step}/{max_steps} | "
         f"{steps_per_sec:.2f} steps/s | ETA: {eta_hours:.1f}h | "
-        f"WM: {total_wm_loss.item() / norm:.4f} | "
-        f"Actor: {total_actor_loss.item() / norm:.4f} | "
-        f"Critic: {total_critic_loss.item() / norm:.4f}"
+        f"WM: {total_wm_loss.item():.4f} | "
+        f"Actor: {total_actor_loss.item():.4f} | "
+        f"Critic: {total_critic_loss.item():.4f}"
     )
 
     m = {
