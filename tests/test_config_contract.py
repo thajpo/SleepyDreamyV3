@@ -24,6 +24,10 @@ def test_hydra_yaml_defines_every_runtime_field():
     assert runtime_config.continue_head_layers == 1
     assert runtime_config.replay_sequence_mode == "stream"
     assert runtime_config.critic_slow_target is False
+    assert runtime_config.optimizer_contract == "reference"
+    assert runtime_config.optimizer_warmup_steps == 1000
+    assert runtime_config.wm_lr == runtime_config.actor_lr
+    assert runtime_config.actor_lr == runtime_config.critic_lr
     validate_config(runtime_config)
 
 
@@ -35,6 +39,19 @@ def test_hydra_yaml_defines_every_runtime_field():
         (replace(Config(), d_hidden=63), "divisible by 16"),
         (replace(Config(), rssm_core="mystery"), "rssm_core"),
         (replace(Config(), continue_head_layers=2), "continue_head_layers"),
+        (replace(Config(), optimizer_contract="mystery"), "optimizer_contract"),
+        (
+            replace(Config(), optimizer_warmup_steps=-1),
+            "optimizer_warmup_steps",
+        ),
+        (
+            replace(
+                Config(),
+                optimizer_contract="reference",
+                actor_lr=3e-5,
+            ),
+            "requires equal",
+        ),
         (
             replace(Config(), replay_sequence_mode="mystery"),
             "replay_sequence_mode",
@@ -78,6 +95,8 @@ def test_resume_inherits_historical_checkpoint_semantics(tmp_path):
     snapshot.pop("continue_head_layers")
     snapshot.pop("critic_slow_target")
     snapshot.pop("replay_sequence_mode")
+    snapshot.pop("optimizer_contract")
+    snapshot.pop("optimizer_warmup_steps")
     (run_dir / "config.json").write_text(json.dumps(snapshot))
 
     resumed = resolve_resume_config(
@@ -96,6 +115,8 @@ def test_resume_inherits_historical_checkpoint_semantics(tmp_path):
     assert resumed.continue_head_layers == 0
     assert resumed.critic_slow_target is True
     assert resumed.replay_sequence_mode == "episode"
+    assert resumed.optimizer_contract == "legacy"
+    assert resumed.optimizer_warmup_steps == 0
 
 
 def test_resume_requires_explicit_semantic_migration(tmp_path):
@@ -108,6 +129,40 @@ def test_resume_requires_explicit_semantic_migration(tmp_path):
     )
 
     assert resumed is current
+
+
+def test_resume_restores_reference_optimizer_contract_and_rates(tmp_path):
+    checkpoint_config = replace(
+        Config(),
+        optimizer_contract="reference",
+        optimizer_warmup_steps=1000,
+        wm_lr=4e-5,
+        actor_lr=4e-5,
+        critic_lr=4e-5,
+    )
+    current = replace(
+        Config(),
+        wm_lr=3e-4,
+        actor_lr=3e-5,
+        critic_lr=8e-5,
+    )
+
+    resumed = resolve_resume_config(
+        current,
+        tmp_path / "checkpoint.pt",
+        checkpoint={
+            "config_snapshot": asdict(checkpoint_config),
+            "world_model": {},
+        },
+    )
+
+    assert resumed.optimizer_contract == "reference"
+    assert resumed.optimizer_warmup_steps == 1000
+    assert (resumed.wm_lr, resumed.actor_lr, resumed.critic_lr) == (
+        4e-5,
+        4e-5,
+        4e-5,
+    )
 
 
 def test_resume_infers_reference_rssm_core_without_config_snapshot(tmp_path):

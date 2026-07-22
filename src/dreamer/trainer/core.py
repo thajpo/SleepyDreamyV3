@@ -343,8 +343,9 @@ class WorldModelTrainer:
                 time.sleep(0.01)
                 continue
 
-            # Apply cosine LR schedule (if enabled)
-            if self.config.lr_cosine_decay:
+            # Apply the authored LR schedule. Reference runs ramp every module
+            # together; historical runs retain their constant/cosine behavior.
+            if self.config.lr_cosine_decay or self.config.optimizer_warmup_steps:
                 self.apply_lr_schedule()
 
             # Data loading
@@ -478,13 +479,24 @@ class WorldModelTrainer:
                     named_wm_parameters,
                 )
 
-            total_wm_loss.backward()
             has_critic_grad = bool(total_critic_loss.requires_grad)
             has_actor_grad = bool(total_actor_loss.requires_grad)
-            if has_critic_grad:
-                total_critic_loss.backward()
-            if has_actor_grad:
-                total_actor_loss.backward()
+            if self.config.optimizer_contract == "reference":
+                # Replay value grounding shares the observed encoder/RSSM graph
+                # with the world-model objective. Traverse the combined graph
+                # once, exactly as the reference's single aggregate loss does.
+                combined_loss = total_wm_loss
+                if has_critic_grad:
+                    combined_loss = combined_loss + total_critic_loss
+                if has_actor_grad:
+                    combined_loss = combined_loss + total_actor_loss
+                combined_loss.backward()
+            else:
+                total_wm_loss.backward()
+                if has_critic_grad:
+                    total_critic_loss.backward()
+                if has_actor_grad:
+                    total_actor_loss.backward()
 
             # AGC: clip gradients based on param/grad norm ratio (DreamerV3).
             # Use more aggressive clipping for pixel observations (prevent NaN).
@@ -744,8 +756,24 @@ class WorldModelTrainer:
         return max(1, round(ratio))
 
     def apply_lr_schedule(self):
-        """Apply cosine LR decay to all optimizers."""
-        scale = self.get_cosine_schedule(1.0, self.config.lr_cosine_min_factor)
+        """Apply a shared linear warmup followed by the optional cosine decay."""
+        warmup = int(self.config.optimizer_warmup_steps)
+        if warmup > 0 and self.train_step < warmup:
+            scale = self.train_step / warmup
+        elif self.config.lr_cosine_decay:
+            if warmup > 0:
+                duration = max(1, self.config.max_train_steps - warmup)
+                progress = min(1.0, (self.train_step - warmup) / duration)
+                cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+                scale = self.config.lr_cosine_min_factor + (
+                    1.0 - self.config.lr_cosine_min_factor
+                ) * cosine
+            else:
+                scale = self.get_cosine_schedule(
+                    1.0, self.config.lr_cosine_min_factor
+                )
+        else:
+            scale = 1.0
         for pg in self.wm_optimizer.param_groups:
             pg["lr"] = self.config.wm_lr * scale
         for pg in self.actor_optimizer.param_groups:

@@ -57,6 +57,18 @@ class ReinforceActorBatch:
     actor_baseline_values: torch.Tensor
 
 
+def replay_value_features(
+    features: torch.Tensor,
+    *,
+    optimizer_contract: str,
+    critic_replay_scale: float,
+) -> torch.Tensor:
+    """Select whether replay-value loss may shape observed representations."""
+    if optimizer_contract == "reference" and critic_replay_scale > 0.0:
+        return features
+    return features.detach()
+
+
 def calculate_return_normalizer_update(
     return_batches: list[tuple[torch.Tensor, torch.Tensor]],
     ret_lo: float,
@@ -466,7 +478,14 @@ def dreamer_step(
             metrics.replay_state_masks.append(sample_mask.detach())
 
         if critic_replay_scale > 0.0 or critic_real_return_scale > 0.0:
-            metrics.replay_posterior_states.append(h_z_joined.detach())
+            replay_features = replay_value_features(
+                h_z_joined,
+                optimizer_contract=getattr(
+                    config, "optimizer_contract", "legacy"
+                ),
+                critic_replay_scale=critic_replay_scale,
+            )
+            metrics.replay_posterior_states.append(replay_features)
         if collect_gradient_diagnostics and critic_replay_scale > 0.0:
             replay_posterior_states_with_grad.append(h_z_joined)
 

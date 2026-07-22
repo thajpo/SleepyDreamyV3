@@ -84,6 +84,10 @@ class Config:
     critic_lr: float = 4e-5
 
     # ===== Training: optimizer settings =====
+    # Legacy preserves historical split-rate, detached replay-value updates.
+    # Authored Hydra runs use the coherent reference optimizer contract.
+    optimizer_contract: str = "legacy"  # legacy, reference
+    optimizer_warmup_steps: int = 0
     weight_decay: float = 0.0
     critic_ema_decay: float = 0.98
     critic_ema_regularizer: float = 1.0
@@ -288,6 +292,18 @@ def validate_config(cfg: Config) -> None:
         errors.append("rssm_core must be 'legacy' or 'reference'")
     if cfg.continue_head_layers not in {0, 1}:
         errors.append("continue_head_layers must be 0 or 1")
+    if cfg.optimizer_contract not in {"legacy", "reference"}:
+        errors.append("optimizer_contract must be 'legacy' or 'reference'")
+    if cfg.optimizer_warmup_steps < 0:
+        errors.append("optimizer_warmup_steps must be >= 0")
+    if cfg.optimizer_contract == "reference":
+        rates = (cfg.wm_lr, cfg.actor_lr, cfg.critic_lr)
+        if not math.isclose(rates[0], rates[1]) or not math.isclose(
+            rates[0], rates[2]
+        ):
+            errors.append(
+                "reference optimizer_contract requires equal wm/actor/critic rates"
+            )
     if not 0 <= cfg.replay_burn_in < cfg.sequence_length:
         errors.append("replay_burn_in must satisfy 0 <= burn-in < sequence_length")
     if cfg.min_buffer_episodes > cfg.replay_buffer_size:
