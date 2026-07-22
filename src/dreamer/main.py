@@ -218,7 +218,7 @@ def resolve_resume_config(
     checkpoint: dict | None = None,
     allow_semantic_migration: bool = False,
 ) -> Config:
-    """Restore compatibility-sensitive architecture and training semantics."""
+    """Restore checkpoint architecture, optimizer, loss, discount, and replay semantics."""
     if allow_semantic_migration:
         return flat_cfg
 

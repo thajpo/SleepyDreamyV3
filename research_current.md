@@ -1,5 +1,10 @@
 # Research Protocol
 
+The active July CartPole investigation continues in
+`reports/cartpole_current_instability.md`. The chronological entries below are
+historical notes through June and describe the code and evidence available when
+each entry was written.
+
 One hypothesis per run: "Change X → expect Y" with one primary metric.
 Config layers: `src/dreamer/conf/config.yaml` (base) +
 `src/dreamer/conf/env/*.yaml` (environment overrides) + Hydra CLI overrides

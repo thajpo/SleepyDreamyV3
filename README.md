@@ -90,9 +90,10 @@ uv run --extra cpu dreamer-train \
 Resume into a new output directory while restoring model and optimizer state,
 the training step, return-normalization and continuation-prevalence state,
 best-evaluation state, the RSSM and continuation-head architectures, optimizer
-contract, base rates, and linear-warmup length, advantage and free-bits
-semantics, two-hot support, online-versus-slow value targeting, continuation
-balancing, replay-sequence semantics, and MLflow run identity:
+contract and LaProp equation, base rates, linear and actor-only warmup lengths,
+advantage, free-bits, and state-reconstruction semantics, two-hot support,
+online-versus-slow value targeting, continuation discount and balancing,
+replay-sequence semantics, and MLflow run identity:
 
 ```bash
 uv run --extra cpu dreamer-train \
@@ -103,9 +104,10 @@ uv run --extra cpu dreamer-train \
 Current checkpoints embed their runtime configuration. Historical checkpoints
 fall back to the adjacent `config.json`. If neither snapshot exists, resume
 infers the RSSM and continuation-head architectures from model weights and uses
-the historical legacy optimizer contract with no learning-rate ramp, batch
-advantage normalization, straight-through free bits, 255 symmetric bins over
-`[-20, 20]`, the slow-critic target, unbalanced continuation loss, and
+the historical legacy optimizer contract with uncorrected LaProp moments, no
+learning-rate or actor-only warmup, batch advantage normalization,
+straight-through free bits, half-mean vector-state reconstruction, 255 symmetric
+bins over `[-20, 20]`, the slow-critic target, unbalanced continuation loss, and
 episode-contained replay semantics. Set `allow_resume_semantic_migration=true`
 to intentionally use all current authored model, optimization, loss,
 value-support, target, and replay settings instead; authored architecture
@@ -197,8 +199,9 @@ points. Run any script with `--help` for its arguments.
 - `probe_cartpole_critic_supervision.py`, `probe_cartpole_q.py`,
   `probe_cartpole_on_policy.py`, `probe_cartpole_policy_improvement.py`, and
   `probe_cartpole_rollout_fidelity.py` isolate value, action-ordering, policy,
-  and matched-rollout errors. `probe_cartpole_actor_supervision.py` supplies the
-  related frozen-actor baseline.
+  and matched-rollout errors. `probe_slow_value_regularizer.py` compares slow-
+  value target contracts, while `probe_cartpole_actor_supervision.py` supplies
+  the related frozen-actor baseline.
 - `summarize_cartpole_replay_coverage.py` and
   `summarize_cartpole_gradient_alignment.py` reduce MLflow telemetry;
   `profile_cartpole_capacity.py` measures bounded concurrent-run resource use.
@@ -213,9 +216,9 @@ uv run --extra cpu python scripts/probe_cartpole_continuation.py --help
 
 Defaults below are for the composed CartPole training configuration. The flat
 `Config` defaults for the RSSM core, continuation-head depth, optimizer
-contract and warmup, critic targeting, and replay sequence mode intentionally
-preserve historical checkpoints and are not the authored defaults for new
-runs.
+contract and warmup, critic targeting, imagination-start weighting, state-loss
+aggregation, and replay sequence mode intentionally preserve historical
+checkpoints and are not the authored defaults for new runs.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -229,13 +232,15 @@ runs.
 | `train.replay_sequence_mode` | stream | Sample same-collector, gap-free streams that may cross episode resets; `episode` preserves historical contained-window sampling |
 | `train.optimizer_contract` | reference | Use equal-rate, shared-warmup optimization and let replay value loss shape observed features; `legacy` preserves split-rate detached updates |
 | `train.laprop_bias_correction` | true | Use reference bias-corrected LaProp moments; historical snapshots without this field retain the former uncorrected equation |
-| `train.optimizer_warmup_steps` | 1000 | Linearly ramp every optimizer's learning rate from zero; all modules still train from the first update |
-| `train.actor_warmup_steps` | 0 | Train and publish the actor immediately; resumed historical snapshots retain any authored actor-only warmup |
+| `train.optimizer_warmup_steps` | 1000 | Linearly ramp optimizer learning rates from zero without itself delaying updates |
+| `train.actor_warmup_steps` | 0 | Delay only actor updates and publication; the critic still trains, and resume retains any authored historical delay |
 | `train.critic_slow_target` | false | Use the online value for lambda returns and the actor baseline; keep the slow value as a regularizer |
+| `train.critic_ema_target` | mean_twohot | Decode and re-encode the slow value for regularization; `distribution` preserves historical full-logit matching |
 | `train.critic_real_return_scale` | 0.0 | Optional full-episode replay return-to-go critic loss scale |
 | `train.normalize_advantages` | false | Use only the running return-percentile scale; `true` additionally z-scores each imagined batch |
 | `train.balance_continuation` | false | Preserve natural continuation probabilities; `true` applies adaptive class-balanced supervision whose raw sigmoid is not a calibrated discount |
 | `train.continuation_balance_rate` | 0.01 | Terminal-prevalence EMA rate used only when continuation balancing is enabled |
+| `train.weight_imagination_starts` | true | Weight the full imagined loss trajectory by continuation at its observed replay start |
 | `train.state_loss_mode` | reference_sum | Sum vector-observation squared errors like reference DreamerV3; `legacy_half_mean` preserves historical checkpoint training semantics |
 | `train.free_bits_straight_through` | false | Opt into KL gradients below the one-nat free-bits threshold |
 | `train.b_start` / `train.b_end` / `train.num_bins` | -20 / 20 / 255 | Symmetric symlog two-hot support shared by reward and value heads |
@@ -285,7 +290,8 @@ src/dreamer/
 2. Trainer samples batches from the replay buffer
 3. World model learns to predict observations, rewards, and continuations
 4. Actor-critic trains on imagined trajectories (dream rollouts)
-5. Updated policy weights are synced back to the collector
+5. Updated policy weights are synced to each collector between episodes, so a
+   replay episode never mixes policy snapshots
 
 ## Reviewer Notes
 
@@ -313,10 +319,10 @@ Current limitations:
 - Full training is intentionally not run in hosted CI; CI verifies syntax,
   scoped reliability types, and fast tests only.
 - Current retained CartPole runs do not demonstrate stable solved performance.
-  Cross-reset stream replay fixes continuation-risk ordering but still collapses
-  from a best return of 500 to 205. The latest audit localizes the next bounded
-  canary to the coherent reference optimizer time scale and replay-value
-  representation gradient.
+  The corrected reference-optimizer canary ended at 272.5 without reaching 450
+  and failed its continuation and value boundaries. The next preregistered
+  canary changes only vector-state reconstruction from historical half-mean
+  aggregation to the reference summed-squared objective.
 - The README still needs a reproduced experiment report with config, seeds,
   runtime, return curve, checkpoint hash, and evaluation video/GIF.
 - Generated checkpoints, MLflow runs, and videos should stay out of normal Git

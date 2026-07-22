@@ -193,7 +193,7 @@ def default_config() -> Config:
 
 
 def config_from_snapshot(data: dict) -> Config:
-    """Construct a runtime config from a current or historical snapshot."""
+    """Construct a config, treating a missing LaProp mode as uncorrected."""
     normalized = dict(data)
     normalized.setdefault("laprop_bias_correction", False)
     return Config(**normalized)

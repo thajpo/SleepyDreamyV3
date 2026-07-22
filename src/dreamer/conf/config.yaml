@@ -130,7 +130,7 @@ train:
 
   # Training phases
   wm_ac_ratio: 1  # WM updates per AC update (e.g., 4 = train WM 4x more than AC)
-  actor_warmup_steps: 0
+  actor_warmup_steps: 0  # delay actor updates/publishing; critic still trains
 
   # Cosine LR decay (applies to all optimizers after the shared warmup)
   lr_cosine_decay: false

@@ -4655,3 +4655,20 @@ will stabilize the actor.
 - **Stop rule:** one seed only. Do not add seeds or combine normalized MLPs,
   posterior depth, reward-head depth, deterministic-state width, larger
   batches, or longer sequences unless the preregistered gates pass.
+
+### Reference state-aggregation mechanical gate result
+
+The implementation gate is complete at source `c228d2a`. Authored Hydra runs
+select `reference_sum`; current snapshots preserve their selected mode, and
+historical snapshots without the field infer `legacy_half_mean` unless semantic
+migration is explicit. The focused four-coordinate regression proves exactly
+eight times the legacy state loss and state-prediction gradient under
+`reference_sum`, while pixel, reward, continuation, dynamics, and representation
+losses remain unchanged.
+
+CPU validation passed with 205 fast tests, compile checks over `src`, `tests`,
+and `scripts`, the scoped Pyright gate with zero errors, and the supported
+one-update multiprocess dry run. The smoke run composed `reference_sum`, loaded
+two episodes, published model version 0 to its collector, and exited normally.
+No 3,500-update canary was started during this mechanical gate; the frozen
+seed-0 state-aggregation run above remains the next authorized experiment.

@@ -22,6 +22,9 @@ class LaProp(Optimizer):
     raw gradient. This means the first moment tracks a smoothed version of
     the gradient direction (unit-scale), not the raw gradient magnitude.
 
+    Set ``bias_correction=False`` only to reproduce historical checkpoints'
+    uncorrected second-moment normalization and momentum update.
+
     Used in DreamerV3 with β₁=0.9, β₂=0.999, ε=1e-20, AGC=0.3.
     """
 
