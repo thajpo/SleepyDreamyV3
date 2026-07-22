@@ -2608,6 +2608,71 @@ these differences are not canceled by a later z-score.
   sufficient cause and does not authorize combining the separate imagination-
   weighting discrepancy, optimizer changes, or architecture changes.
 
+#### Return-normalizer canary result
+
+The mechanical gate passes at source commit `26699b6`. Focused normalization,
+actor-loss, checkpoint, and configuration tests passed (`27`), the full fast
+suite passed (`136`), compile and the supported scoped type gate passed, and the
+one-update CPU process smoke exited normally with its collector stopped. The
+implementation retains checkpoint compatibility while new runs start the
+non-debiased percentile state at zero. It aggregates every valid post-burn-in
+return batch and applies the resulting current-batch scale to REINFORCE; the
+authored default now also matches reference `advnorm: none`.
+
+The frozen seed-0 run completed normally under
+`experiments/2026-07-22_090738_CartPole-v1/`, with manifest run ID
+`17406d7e69364583afec79bba34af908` and MLflow run ID
+`b07fa34cf414412fb2fe60a283b673ef`. It used 3,500 learner updates, 21,517
+environment steps, and 927.4 seconds on ROCm. Its manifest records clean source
+`26699b6`, `max_train_steps`, final/best/periodic checkpoints, and successful
+completion. The one-thread OpenMP/MKL/OpenBLAS cap preserved approximately
+`3.6`--`4.2` updates/second while sharing the host.
+
+The intended scale path is measurably different from the preceding final-start-
+only implementation:
+
+| Update | 500 | 1,000 | 1,500 | 2,000 | 2,500 | 3,000 | 3,500 |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| Corrected span | 4.74 | 7.89 | 14.22 | 14.79 | 19.08 | 26.22 | 16.56 |
+| Pre-fix span | 4.22 | 3.49 | 6.72 | 19.25 | 33.72 | 27.63 | 16.41 |
+
+The behavioral gate fails decisively. Evaluation leaves the floor at update
+1,400 (`215.70`), reaches `450.30` at 2,300, and immediately violates the
+post-solve floor with `195.25` at 2,400. It recovers to the run best `477.35`
+at 2,700, then falls through `292.55`, `262.65`, and `143.30` at updates
+2,900--3,100 before ending at `154.15`. The best-to-final gap is `323.20`.
+Notably, the deep late collapse begins while the span grows from `19.08` at
+2,500 to `26.22` at 3,000, which *reduces* rather than amplifies the normalized
+actor coefficient. The earlier correlation between a contracting span and
+collapse is therefore not causal by itself.
+
+The fixed-history evidence is retained under
+`experiments/2026-07-22_cartpole_return_normalizer_fixed_history_final_source/`.
+The final actor averages return `167.4` on source seeds 17--36 and supplies
+2,003 actionable rows from 3,348 states.
+
+| Final-policy histories | Target | Q/real balanced | Q/real corr. | Actor/Q | Actor/real balanced | Posterior x MSE | One-step prior x MSE |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Return 167.4 | Best 2,700 | 0.616 | 0.183 | 0.916 | 0.575 | 0.082 | 0.102 |
+| Return 167.4 | Final 3,500 | 0.592 | 0.088 | 0.959 | 0.537 | 0.161 | 0.030 |
+
+The literal boundary gate passes, but best-to-final movement is adverse: Q/real
+accuracy, Q/real correlation, actor/real accuracy, and current-posterior cart-
+position reconstruction all worsen, while actor/Q agreement rises. The final
+actor is more faithfully following a critic whose recovery-state ranking is
+less accurate than at the best checkpoint. Aggregate ranking remains above the
+previous canary's thresholds, so this is degradation rather than complete
+critic inversion; it still cannot support stable closed-loop control.
+
+This rejects return-normalizer mismatch as a sufficient cause while retaining
+the correction as source-conforming infrastructure. Seeds 1 and 2 are stopped.
+The next isolated source audit is imagination weighting: reference policy/value
+weights begin with the learned continuation of the replay start, whereas local
+weights begin at exactly one and only use continuations from imagined successor
+states. That difference gives terminal replay starts full actor/critic weight
+instead of suppressing them. It must be quantified and preregistered separately
+before any new run; no optimizer or architecture change is selected here.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
