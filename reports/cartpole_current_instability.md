@@ -2422,6 +2422,52 @@ audit focused on value-target construction and gradient ownership; a further
 training change requires a concrete divergence that can affect the much broader
 recovery distribution.
 
+#### Preregistered symmetric two-hot conformance canary
+
+The continued value-path audit returns to an early observation that was never
+corrected. CartPole overrides the global two-hot support from symmetric
+symlog-space endpoints `[-20, 20]` to asymmetric endpoints `[-5, 6]`. After
+`symexp`, those 255 bins span approximately `[-147.41, 402.43]` and their
+uniform mean is `+23.505`. Because both reward and value output layers are
+zero-initialized, the first zero-logit prediction is therefore `+23.505`, not
+the intended zero. This exact value appeared in the first logged imagined
+critic distributions of the initial three-seed investigation.
+
+Reference commit `e3f0224` instead uses symmetric `[-20, 20]` symlog endpoints
+and pairs negative and positive terms when computing the expectation. That
+pairwise summation is deliberate: a naive float32 reduction over the very wide
+physical bins suffers cancellation error even when probabilities are uniform.
+
+- **Hypothesis:** the positively biased cold reward/value distributions give
+  early imagination a fictitious large return and seed unstable critic/policy
+  optimization. Restoring the symmetric, cancellation-safe two-hot contract
+  will start learned reward and value at exactly zero and improve later action-
+  ordering stability.
+- **Causal variable:** centralize two-hot expectation decoding using the
+  reference's symmetric pairwise reduction and remove only CartPole's `[-5, 6]`
+  support override so new runs inherit `[-20, 20]`. Keep network depth,
+  optimizer rates and ownership, replay losses, online targets, truncation
+  bootstrap, actor objective, continuation head, data pacing, and every other
+  benchmark setting unchanged. Historical checkpoints remain loadable because
+  their config snapshots retain their authored endpoints.
+- **Mechanical gate:** zero logits over the new support must decode to exactly
+  zero for reward and value heads; the decoder must preserve ordinary weighted
+  expectations and gradients; all direct expectation sites must share it.
+  Focused tests, the full fast suite, compile/type gates, and a one-update
+  process smoke must pass.
+- **Frozen run:** repeat the same seed-0, 3,500-update command and fixed
+  20-episode evaluation cohort used by the preceding two canaries. Confirm the
+  resolved config uses endpoints `[-20, 20]` and the first logged dreamed reward
+  and value predictions no longer begin near `+23.505`.
+- **Behavioral gate:** reach mean return `450`; never fall below `300`
+  afterward; final at least `400`; best-to-final gap at most `100`.
+- **Boundary gate:** rerun the final-policy fixed-history comparison. Final
+  Q/real balanced accuracy must exceed the truncation canary's `0.293`, Q/real
+  correlation must be positive, and actor/Q agreement must remain above `0.8`.
+- **Stop rule:** one seed only. Failure rejects the cold two-hot bias as a
+  sufficient cause; it does not authorize stacking optimizer warmup, joint
+  ownership, value-head depth, or representation gradients.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
