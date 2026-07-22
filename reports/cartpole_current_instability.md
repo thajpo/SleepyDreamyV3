@@ -2884,6 +2884,38 @@ failed. Any later learning-rate or optimizer experiment requires a fresh
 contract calibrated to the corrected mean-loss path; it cannot be smuggled into
 this result as compensation.
 
+#### Preregistered continuation-representability probe
+
+The continuation-coverage and sequence-mean canaries leave a narrower question
+before any class-balancing intervention: does the frozen observation-conditioned
+latent expose physical failure well enough for the existing continuation-head
+architecture to classify it? Low original-head AUC could reflect either missing
+state information or online fitting dominated by live labels.
+
+- **Question:** can a freshly fitted copy of the authored one-hidden-layer
+  continuation MLP discriminate physical terminal rows from live rows when the
+  encoder/RSSM features are frozen and the fitting loss is balanced?
+- **Frozen source and data:** use the sequence-loss final checkpoint at update
+  3,500. Run its deterministic actor for 100 episodes on reset seeds 17--116.
+  Record the posterior-mode joined latent and raw physical state after every
+  real action, with the resulting `terminated` label. Split whole episodes
+  80/20, so neighboring transitions never cross train/test.
+- **Paired fits:** train (a) the same continuation MLP on frozen posterior
+  latents and (b) an equal-width MLP on true physical state as a control. Use
+  one fixed initialization seed, AdamW `1e-3`, 20 epochs, batch 256, and
+  `pos_weight = live_train / terminal_train`. Do not update the checkpoint or
+  tune the cutoff. Also score the checkpoint's original head on the identical
+  held-out rows.
+- **Gate:** the true-state control must reach held-out failure AUC at least
+  `0.95` and balanced accuracy at least `0.90`. If the fresh latent head reaches
+  AUC at least `0.90` and balanced accuracy at least `0.80`, terminal state is
+  representable and the next audit may focus on online imbalance/optimization.
+  If the control passes but latent fails, representation is the nearer
+  boundary. A failed control makes the probe inconclusive.
+- **Stop rule:** this is one read-only checkpoint, one episode cohort, split,
+  seed, and fit configuration. Do not train the end-to-end agent, alter loss
+  weighting, or iterate the classifier settings after observing the result.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
