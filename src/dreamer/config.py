@@ -88,6 +88,7 @@ class Config:
     # explicitly disables this for new training runs.
     critic_slow_target: bool = True
     critic_replay_scale: float = 0.3
+    # Optional full-episode replay return-to-go supervision.
     critic_real_return_scale: float = 0.0
     q_critic_scale: float = 0.0
     q_actor_temperature: float = 0.25

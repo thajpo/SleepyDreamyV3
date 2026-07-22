@@ -48,6 +48,7 @@ def resolve_device(device_arg: str) -> str:
 def infer_config_from_checkpoint(
     checkpoint_path: Path, config_name: str | None
 ) -> Config:
+    """Resolve a legacy preset, checkpoint-authored config, or Pong fallback."""
     if config_name in {"atari_pong", "atari100k_pong"}:
         return atari100k_pong_config()
     if config_name == "default":

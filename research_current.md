@@ -1,9 +1,11 @@
 # Research Protocol
 
 One hypothesis per run: "Change X → expect Y" with one primary metric.
-Config layers: `src/config.py` (base) + `env_configs/*.yaml` (env overrides) + CLI (one-off).
+Config layers: `src/dreamer/conf/config.yaml` (base) +
+`src/dreamer/conf/env/*.yaml` (environment overrides) + Hydra CLI overrides
+(one-off).
 Gate awareness: architecture/env changes = new model family; training dynamics = experimentation zone.
-Git commits for logic changes; run artifacts (`runs/`) carry outcomes.
+Git commits preserve logic changes; Hydra experiment directories carry outcomes.
 
 # Cartpole
 ### 12-30-25

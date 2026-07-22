@@ -1,5 +1,5 @@
 # DreamerV3 Default Configuration
-# Override with: uv run dreamer-train +env=cartpole_state_only
+# Override with: uv run dreamer-train env=cartpole_state_only
 # Sweep with: uv run dreamer-train --multirun train.actor_lr=1e-5,3e-5,1e-4
 
 defaults:
@@ -7,9 +7,10 @@ defaults:
   - env: cartpole_state_only  # default environment
   - override /hydra/launcher: basic
 
-# Optional checkpoint used to resume a run. This orchestration field is not
-# part of the flattened model/training Config snapshot.
+# Optional checkpoint and semantic-migration control. These orchestration
+# fields are not part of the flattened model/training Config snapshot.
 checkpoint_path: null
+# Preserve checkpoint continuation/value semantics unless migration is explicit.
 allow_resume_semantic_migration: false
 
 # General settings
@@ -21,7 +22,7 @@ general:
   dry_run: false  # Skip MLflow/checkpoints for smoke tests
   experiment_name: null  # MLflow experiment name (null = auto from env name)
   log_profile: lean  # lean, full
-  research_gradient_diagnostics: false
+  research_gradient_diagnostics: false  # read-only replay/WM gradient alignment
   seed: 0
 
 # Environment (overridden by env/*.yaml)
@@ -70,7 +71,7 @@ train:
   actor_lr: 4e-5
   critic_lr: 3e-5
   weight_decay: 0.0
-  critic_ema_decay: 0.98        # critic target network polyak decay
+  critic_ema_decay: 0.98        # slow-critic Polyak decay
   critic_ema_regularizer: 1.0   # scale of critic EMA regularization loss
   critic_slow_target: false     # reference uses online value for returns/baseline
   critic_replay_scale: 0.3      # replay critic loss scale (βrepval)
@@ -79,6 +80,7 @@ train:
   q_actor_temperature: 0.25
 
   # RL settings
+  # With contdisc=true, gamma must match 1 - 1 / horizon.
   gamma: 0.997  # paper: discount horizon 1/(1-γ)=333
   lam: 0.95
   horizon: 333

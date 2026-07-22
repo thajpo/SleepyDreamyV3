@@ -142,7 +142,8 @@ def dreamer_step(
         world_model: RSSM world model (h_prev/z_prev already zeroed).
         actor: Policy network.
         critic: Value network.
-        critic_ema: EMA copy of critic for stable targets.
+        critic_ema: Slow critic used for distributional regularization and,
+            when configured, historical lambda-return/baseline targets.
         batch: EnvData named tuple from replay buffer.
         metrics: Pre-initialized StepMetrics accumulator.
         all_tokens: Encoder output, shape (B, T, token_dim).
@@ -156,6 +157,8 @@ def dreamer_step(
         device: Torch device.
         use_pixels: Whether pixel observations are active.
         do_log_images: Whether to collect visualization data this step.
+        collect_gradient_diagnostics: Whether to measure read-only replay/WM
+            gradient alignment for this step.
 
     Returns:
         ForwardResult with accumulated losses and populated metrics.

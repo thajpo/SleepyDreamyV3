@@ -172,7 +172,8 @@ class WorldModelTrainer:
             weight_decay=config.weight_decay,
         )
 
-        # distinct critic target network for stability (DreamerV3)
+        # Slow critics regularize online critics; historical configs may also
+        # select them as lambda-return and policy-baseline targets.
         self.critic_ema = copy.deepcopy(self.critic)
         for param in self.critic_ema.parameters():
             param.requires_grad = False

@@ -13,9 +13,10 @@ class LaProp(Optimizer):
 
     The paper describes this as "RMSProp followed by momentum":
       1. Compute second moment via EMA: v_t = β₂ * v_{t-1} + (1-β₂) * g_t²
-      2. Normalize gradient: g_norm = g / sqrt(v_t + ε)
-      3. Apply momentum to normalized gradient: m_t = β₁ * m_{t-1} + (1-β₁) * g_norm
-      4. Update: θ -= lr * m_t
+      2. Bias-correct it: v_hat = v_t / (1-β₂ᵗ)
+      3. Normalize gradient: g_norm = g / (sqrt(v_hat) + ε)
+      4. Apply momentum: m_t = β₁ * m_{t-1} + (1-β₁) * g_norm
+      5. Bias-correct momentum and update: θ -= lr * m_t / (1-β₁ᵗ)
 
     Key insight: the momentum is applied to the NORMALIZED gradient, not the
     raw gradient. This means the first moment tracks a smoothed version of

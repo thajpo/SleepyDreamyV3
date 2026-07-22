@@ -10,7 +10,7 @@ Usage:
     uv run dreamer-train train.wm_lr=5e-4 models.d_hidden=128
 
     # Use environment-specific base config
-    uv run dreamer-train +env=cartpole
+    uv run dreamer-train env=cartpole_state_only
 """
 
 import os
@@ -216,7 +216,7 @@ def resolve_resume_config(
     checkpoint: dict | None = None,
     allow_semantic_migration: bool = False,
 ) -> Config:
-    """Restore checkpoint-defining semantics before constructing models."""
+    """Restore checkpoint continuation-head and critic-target semantics."""
     if allow_semantic_migration:
         return flat_cfg
 
@@ -257,7 +257,7 @@ def run_training(
     checkpoint_path: str | None = None,
     allow_resume_semantic_migration: bool = False,
 ):
-    """Run training with the given configuration."""
+    """Run training, preserving checkpoint model/target semantics by default."""
     checkpoint = None
     if checkpoint_path:
         checkpoint = torch.load(

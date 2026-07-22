@@ -40,7 +40,7 @@ def save_checkpoint(
     run_id=None,
     config_snapshot=None,
 ) -> str:
-    """Save training state atomically and return the checkpoint path."""
+    """Save training state and its optional config snapshot atomically."""
     if final and label is not None:
         raise ValueError("final and label are mutually exclusive")
     suffix = "final" if final else label or f"step_{train_step}"

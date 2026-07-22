@@ -86,8 +86,10 @@ uv run --extra cpu dreamer-train \
   train.replay_burn_in=1 train.eval_every=0
 ```
 
-Resume into a new output directory while restoring the checkpoint's trainer
-state, model architecture, value-target semantics, and MLflow run identity:
+Resume into a new output directory while restoring model and optimizer state,
+the training step, return-normalization state, best-evaluation state, the
+continuation-head architecture, value-target semantics, and MLflow run
+identity:
 
 ```bash
 uv run --extra cpu dreamer-train \
@@ -95,8 +97,12 @@ uv run --extra cpu dreamer-train \
   train.max_train_steps=20000
 ```
 
-Set `allow_resume_semantic_migration=true` to intentionally use the current
-continuation-head and critic-target settings instead of the checkpoint's.
+Current checkpoints embed their runtime configuration. Historical checkpoints
+fall back to the adjacent `config.json`, then to legacy linear-continuation-head
+and slow-critic-target semantics when those fields are absent. Set
+`allow_resume_semantic_migration=true` to intentionally use the current
+continuation-head and critic-target settings instead. Resume does not restore
+replay contents or random-number-generator state.
 
 ### Hyperparameter Sweeps
 
@@ -138,6 +144,9 @@ configuration. The manifest records the full Git revision and dirty state,
 runtime versions, configuration hash, progress, stop reason, and hashes for the
 best and final checkpoints. `checkpoint_best.pt` is selected by deterministic
 evaluation reward by default; `checkpoint_final.pt` is only the last state.
+Every periodic evaluation in a run reuses the same reset cohort, starting at
+seed `1_000_000 + general.seed`, so checkpoint comparisons are not confounded
+by changing evaluation episodes.
 
 ## Configuration
 
@@ -161,14 +170,24 @@ evaluation protocol. Legacy runs remain visible but are marked for review.
 
 ### Key Parameters
 
+Defaults below are for the composed CartPole training configuration. The flat
+`Config` defaults for continuation-head depth and critic targeting intentionally
+preserve legacy checkpoints and are not the authored defaults for new runs.
+
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `train.max_train_steps` | 30000 | Total training updates |
 | `train.batch_size` | 32 | Batch size |
 | `train.sequence_length` | 32 | Sequence length for training |
 | `train.eval_metric` | episode_reward | Metric used to preserve the best checkpoint |
+| `train.replay_ratio` | 1.0 | Replayed non-burn-in transitions per raw environment frame |
+| `train.critic_slow_target` | false | Use the online value for lambda returns and the actor baseline; keep the slow value as a regularizer |
+| `train.critic_real_return_scale` | 0.0 | Optional full-episode replay return-to-go critic loss scale |
+| `train.free_bits_straight_through` | false | Opt into KL gradients below the one-nat free-bits threshold |
 | `models.d_hidden` | 64 | Hidden dimension |
+| `models.continue_head_layers` | 1 | One RMSNorm/SiLU hidden layer in the continuation head; `0` selects the legacy linear head |
 | `general.use_pixels` | false | Use pixel observations |
+| `general.research_gradient_diagnostics` | false | Read-only replay/WM gradient-alignment telemetry on scalar-log updates |
 
 ## Project Structure
 
@@ -196,9 +215,11 @@ src/dreamer/
 
 - **Symlog encoding** for unbounded value predictions
 - **Twohot discrete distributions** for reward/value prediction
-- **Free bits** with straight-through gradients for KL regularization
+- **One-nat hard free bits** by default, with an opt-in straight-through mode
 - **Block-diagonal GRU** for efficient recurrent state updates
 - **EMA-based return normalization** for stable policy gradients
+- **Online value targets** for lambda returns and the policy baseline, with the
+  slow value retained as a distributional regularizer
 
 ### Training Loop
 
@@ -234,9 +255,9 @@ Current limitations:
 - Full training is intentionally not run in hosted CI; CI verifies syntax,
   scoped reliability types, and fast tests only.
 - Current retained CartPole runs do not provide a reproduced solved checkpoint.
-  The latest research notes localize the remaining problem to policy improvement:
-  learned latents contain useful control information, but the actor often
-  collapses to a constant action or remains random-like.
+  The latest research notes localize the remaining failure to imagined action-
+  value ordering on the harder closed-loop recovery distribution; the actor
+  faithfully follows that learned ordering.
 - The README still needs a reproduced experiment report with config, seeds,
   runtime, return curve, checkpoint hash, and evaluation video/GIF.
 - Generated checkpoints, MLflow runs, and videos should stay out of normal Git
