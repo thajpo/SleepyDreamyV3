@@ -4838,3 +4838,30 @@ that encoder/posterior capacity is the cause of late collapse.
   rather than width or optimizer tuning.
 - **Stop rule:** one seed only. Do not add seeds or proceed to Pong unless both
   frozen gates pass.
+
+### Coupled reference observation-posterior mechanical gate result
+
+The implementation gate is complete at source `e90a070`. Authored Hydra runs
+select `vector_encoder_mode=reference` and `posterior_head_layers=1`; both
+values are saved in config snapshots and restored on resume. Historical
+snapshots without either field retain the old vector encoder and direct
+posterior projection. Snapshot-less checkpoints infer the modes from module
+keys, while pixel-only historical encoders correctly infer a legacy inactive
+vector branch.
+
+Focused tests prove three complete `Linear -> RMSNorm(eps=1e-4) -> SiLU`
+vector transforms, one complete normalized posterior hidden transform, the
+unchanged legacy parameter keys, and nonzero gradients from posterior logits
+through every new posterior and encoder parameter to both the observation and
+deterministic state. At the frozen `d_hidden=128` width, this is not an
+uncontrolled parameter-capacity increase: encoder parameters rise from 33,664
+to 34,048, posterior parameters fall from 164,096 to 115,200 because of the
+128-unit bottleneck, and the combined encoder/world-model parameter count falls
+from 1,284,100 to 1,235,588.
+
+Validation passed with 213 fast tests, compile checks over `src`, `tests`, and
+`scripts`, zero errors in the repository's scoped Pyright gate, and a supported
+one-update multiprocess CPU smoke. The smoke composed both reference modes,
+collected two episodes, published model version zero, stopped its collector,
+and exited normally. The frozen seed-0 canary is the next experiment; no long
+run has yet tested the learning hypothesis.
