@@ -33,28 +33,64 @@ class RSSMWorldModel(nn.Module):
 
         # GatedRecurrentUnit | Uses n_blocks independent GRUs computed in parallel
         self.n_blocks = models_config.rnn.n_blocks
-        gru_d_in = self.d_hidden + env_config.n_actions
+        self.rssm_core = str(getattr(models_config, "rssm_core", "legacy"))
+        h_dim = self.d_hidden * self.n_blocks
+        stoch_dim = models_config.num_latents * num_classes
+        if self.rssm_core == "legacy":
+            gru_d_in = self.d_hidden + env_config.n_actions
 
-        # Create temporary blocks to initialize weights, then stack for batched computation
-        blocks = nn.ModuleList()
-        for _ in range(self.n_blocks):
-            blocks.append(GatedRecurrentUnit(d_in=gru_d_in, d_hidden=self.d_hidden))
+            # Preserve the parameter layout of historical checkpoints.
+            blocks = nn.ModuleList()
+            for _ in range(self.n_blocks):
+                blocks.append(
+                    GatedRecurrentUnit(d_in=gru_d_in, d_hidden=self.d_hidden)
+                )
 
-        # Stack input projection weights: (n_blocks, d_hidden, d_in)
-        self._W_ir = nn.Parameter(torch.stack([b.W_ir.weight for b in blocks]))
-        self._W_iz = nn.Parameter(torch.stack([b.W_iz.weight for b in blocks]))
-        self._W_in = nn.Parameter(torch.stack([b.W_in.weight for b in blocks]))
-        self._b_ir = nn.Parameter(torch.stack([b.W_ir.bias for b in blocks]))
-        self._b_iz = nn.Parameter(torch.stack([b.W_iz.bias for b in blocks]))
-        self._b_in = nn.Parameter(torch.stack([b.W_in.bias for b in blocks]))
-
-        # Stack hidden projection weights: (n_blocks, d_hidden, d_hidden)
-        self._W_hr = nn.Parameter(torch.stack([b.W_hr.weight for b in blocks]))
-        self._W_hz = nn.Parameter(torch.stack([b.W_hz.weight for b in blocks]))
-        self._W_hn = nn.Parameter(torch.stack([b.W_hn.weight for b in blocks]))
-        self._b_hr = nn.Parameter(torch.stack([b.W_hr.bias for b in blocks]))
-        self._b_hz = nn.Parameter(torch.stack([b.W_hz.bias for b in blocks]))
-        self._b_hn = nn.Parameter(torch.stack([b.W_hn.bias for b in blocks]))
+            self._W_ir = nn.Parameter(torch.stack([b.W_ir.weight for b in blocks]))
+            self._W_iz = nn.Parameter(torch.stack([b.W_iz.weight for b in blocks]))
+            self._W_in = nn.Parameter(torch.stack([b.W_in.weight for b in blocks]))
+            self._b_ir = nn.Parameter(torch.stack([b.W_ir.bias for b in blocks]))
+            self._b_iz = nn.Parameter(torch.stack([b.W_iz.bias for b in blocks]))
+            self._b_in = nn.Parameter(torch.stack([b.W_in.bias for b in blocks]))
+            self._W_hr = nn.Parameter(torch.stack([b.W_hr.weight for b in blocks]))
+            self._W_hz = nn.Parameter(torch.stack([b.W_hz.weight for b in blocks]))
+            self._W_hn = nn.Parameter(torch.stack([b.W_hn.weight for b in blocks]))
+            self._b_hr = nn.Parameter(torch.stack([b.W_hr.bias for b in blocks]))
+            self._b_hz = nn.Parameter(torch.stack([b.W_hz.bias for b in blocks]))
+            self._b_hn = nn.Parameter(torch.stack([b.W_hn.bias for b in blocks]))
+            self.z_embedding = nn.Linear(stoch_dim, self.d_hidden)
+        elif self.rssm_core == "reference":
+            # Reference _core: normalize each input independently, apply one
+            # normalized grouped hidden layer, then produce all three gates in
+            # one grouped projection.
+            self.dynin_deter = nn.Sequential(
+                nn.Linear(h_dim, self.d_hidden),
+                nn.RMSNorm(self.d_hidden),
+                nn.SiLU(),
+            )
+            self.z_embedding = nn.Sequential(
+                nn.Linear(stoch_dim, self.d_hidden),
+                nn.RMSNorm(self.d_hidden),
+                nn.SiLU(),
+            )
+            self.dynin_action = nn.Sequential(
+                nn.Linear(env_config.n_actions, self.d_hidden),
+                nn.RMSNorm(self.d_hidden),
+                nn.SiLU(),
+            )
+            self.dynhid = BlockLinear(
+                self.n_blocks,
+                4 * self.d_hidden,
+                self.d_hidden,
+            )
+            self.dynhid_norm = nn.RMSNorm(h_dim)
+            self.dyngru = BlockLinear(
+                self.n_blocks,
+                self.d_hidden,
+                3 * self.d_hidden,
+            )
+        else:
+            raise ValueError("rssm_core must be 'legacy' or 'reference'")
 
         # Outputs prior distribution \hat{z} from the sequence model
         n_gru_blocks = models_config.rnn.n_blocks
@@ -71,7 +107,6 @@ class RSSMWorldModel(nn.Module):
         # --- Posterior head: q(z_t | h_t, x_t) ---
         # Takes concat(h_t, encoder_tokens) and produces posterior logits.
         # This is the key architectural requirement from the paper.
-        h_dim = self.d_hidden * n_gru_blocks
         posterior_in_dim = h_dim + encoder_token_dim
         posterior_out_dim = self.n_latents * self.n_classes
         self.posterior_head = nn.Linear(posterior_in_dim, posterior_out_dim)
@@ -81,9 +116,6 @@ class RSSMWorldModel(nn.Module):
         self.register_buffer("h_prev", h_prev)
         z_prev = torch.zeros((batch_size, self.n_latents, self.n_classes))
         self.register_buffer("z_prev", z_prev)
-
-        # Linear layer to project categorical sample to embedding dimension
-        self.z_embedding = nn.Linear(self.n_latents * self.n_classes, self.d_hidden)
 
         # Takes 2D categorical samples and projects to d_hidden for GRU input
         h_z_dim = (self.d_hidden * n_gru_blocks) + (self.n_latents * self.n_classes)
@@ -127,11 +159,11 @@ class RSSMWorldModel(nn.Module):
 
     def step_dynamics(self, z_embed, action, h_prev):
         """
-        Steps the recurrent dynamics forward one step using batched GRU computation.
+        Step the configured recurrent dynamics core once.
 
-        All n_blocks GRUs are computed in parallel via einsum over stacked weights.
-        The input x = cat(z_embed, action) is identical for all blocks, while
-        h_prev differs per block.
+        The legacy mode preserves historical checkpoint equations. Reference
+        mode follows the grouped, normalized DreamerV3 core. Both modes compute
+        every recurrent block in parallel.
 
         Args:
             z_embed: The embedded latent state z_t. Shape: (B, d_hidden)
@@ -143,36 +175,40 @@ class RSSMWorldModel(nn.Module):
             prior_logits: The predicted logits for the next latent state.
         """
         B = z_embed.shape[0]
-        x = torch.cat((z_embed, action), dim=1)  # (B, d_in)
-        h_blocks = h_prev.view(
-            B, self.n_blocks, self.d_hidden
-        )  # (B, n_blocks, d_hidden)
+        h_blocks = h_prev.reshape(B, self.n_blocks, self.d_hidden)
+        if self.rssm_core == "legacy":
+            x = torch.cat((z_embed, action), dim=1)
+            ir = torch.einsum("bi,kji->bkj", x, self._W_ir) + self._b_ir
+            iz = torch.einsum("bi,kji->bkj", x, self._W_iz) + self._b_iz
+            in_ = torch.einsum("bi,kji->bkj", x, self._W_in) + self._b_in
+            hr = torch.einsum("bki,kji->bkj", h_blocks, self._W_hr) + self._b_hr
+            hz = torch.einsum("bki,kji->bkj", h_blocks, self._W_hz) + self._b_hz
+            hn = torch.einsum("bki,kji->bkj", h_blocks, self._W_hn) + self._b_hn
+            reset = torch.sigmoid(ir + hr)
+            candidate = torch.tanh(reset * (in_ + hn))
+            update = torch.sigmoid(iz + hz - 1.0)
+        else:
+            deter_input = self.dynin_deter(h_prev)
+            action_input = self.dynin_action(action)
+            shared_inputs = torch.cat(
+                (deter_input, z_embed, action_input), dim=-1
+            ).unsqueeze(1)
+            shared_inputs = shared_inputs.expand(-1, self.n_blocks, -1)
+            hidden_input = torch.cat((h_blocks, shared_inputs), dim=-1)
+            hidden = self.dynhid(hidden_input).reshape(B, -1)
+            hidden = F.silu(self.dynhid_norm(hidden))
+            gate_logits = self.dyngru(
+                hidden.reshape(B, self.n_blocks, self.d_hidden)
+            )
+            reset_logits, candidate_logits, update_logits = gate_logits.chunk(
+                3, dim=-1
+            )
+            reset = torch.sigmoid(reset_logits)
+            candidate = torch.tanh(reset * candidate_logits)
+            update = torch.sigmoid(update_logits - 1.0)
 
-        # Input projections: (B, d_in) @ (n_blocks, d_hidden, d_in).T -> (B, n_blocks, d_hidden)
-        ir = torch.einsum("bi,kji->bkj", x, self._W_ir) + self._b_ir
-        iz = torch.einsum("bi,kji->bkj", x, self._W_iz) + self._b_iz
-        in_ = torch.einsum("bi,kji->bkj", x, self._W_in) + self._b_in
-
-        # Hidden projections: (B, n_blocks, d_hidden) @ (n_blocks, d_hidden, d_hidden).T -> (B, n_blocks, d_hidden)
-        hr = torch.einsum("bki,kji->bkj", h_blocks, self._W_hr) + self._b_hr
-        hz = torch.einsum("bki,kji->bkj", h_blocks, self._W_hz) + self._b_hz
-        hn = torch.einsum("bki,kji->bkj", h_blocks, self._W_hn) + self._b_hn
-
-        # GRU equations with repo-matching modifications:
-        # 1. Reset gate: standard sigmoid
-        r = torch.sigmoid(ir + hr)
-        # 2. Candidate: reset gates the candidate directly (source convention)
-        #    tanh(reset * raw_candidate) rather than tanh(input + reset * hidden)
-        n = torch.tanh(r * (in_ + hn))
-        # 3. Update gate: bias of -1 makes sigmoid(x-1) ≈ 0.27 at init,
-        #    causing the GRU to default to RETAINING the old state.
-        #    This is the GRU analogue of the LSTM forget gate bias trick.
-        z = torch.sigmoid(iz + hz - 1.0)
-        # 4. Blend: update * candidate + (1-update) * old
-        #    With z≈0.27 at init: mostly keeps old state, small correction from candidate
-        h_new = z * n + (1 - z) * h_blocks
-
-        h = h_new.view(B, -1)  # (B, n_blocks * d_hidden)
+        h_new = update * candidate + (1.0 - update) * h_blocks
+        h = h_new.reshape(B, -1)
         # Preserve the observed-sequence graph. The trainer resets this carry at
         # each sampled sequence, so retaining it here gives losses at later rows
         # gradient paths through the earlier recurrent states (BPTT).
@@ -275,6 +311,27 @@ class RSSMWorldModel(nn.Module):
         self.z_prev = torch.zeros(
             batch_size, self.n_latents, self.n_classes, device=device
         )
+
+
+class BlockLinear(nn.Module):
+    """Independent linear projections over fixed feature groups."""
+
+    def __init__(self, groups: int, d_in: int, d_out: int):
+        super().__init__()
+        self.groups = int(groups)
+        self.d_in = int(d_in)
+        self.d_out = int(d_out)
+        layers = [nn.Linear(self.d_in, self.d_out) for _ in range(self.groups)]
+        self.weight = nn.Parameter(torch.stack([layer.weight for layer in layers]))
+        self.bias = nn.Parameter(torch.stack([layer.bias for layer in layers]))
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        if inputs.shape[-2:] != (self.groups, self.d_in):
+            raise ValueError(
+                "BlockLinear expected trailing shape "
+                f"({self.groups}, {self.d_in}), got {tuple(inputs.shape[-2:])}"
+            )
+        return torch.einsum("...ki,koi->...ko", inputs, self.weight) + self.bias
 
 
 class GatedRecurrentUnit(nn.Module):

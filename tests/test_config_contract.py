@@ -20,6 +20,7 @@ def test_hydra_yaml_defines_every_runtime_field():
     assert runtime_config.num_bins == 255
     assert runtime_config.b_start == -20
     assert runtime_config.b_end == 20
+    assert runtime_config.rssm_core == "reference"
     assert runtime_config.continue_head_layers == 1
     assert runtime_config.critic_slow_target is False
     validate_config(runtime_config)
@@ -31,6 +32,7 @@ def test_hydra_yaml_defines_every_runtime_field():
         (replace(Config(), replay_burn_in=64), "burn-in < sequence_length"),
         (replace(Config(), checkpoint_interval=0), "checkpoint_interval"),
         (replace(Config(), d_hidden=63), "divisible by 16"),
+        (replace(Config(), rssm_core="mystery"), "rssm_core"),
         (replace(Config(), continue_head_layers=2), "continue_head_layers"),
         (replace(Config(), actor_loss_mode="mystery"), "actor_loss_mode"),
         (
@@ -67,16 +69,23 @@ def test_resume_inherits_historical_checkpoint_semantics(tmp_path):
     checkpoint_path = run_dir / "checkpoints" / "checkpoint_final.pt"
     checkpoint_path.parent.mkdir(parents=True)
     snapshot = asdict(Config())
+    snapshot.pop("rssm_core")
     snapshot.pop("continue_head_layers")
     snapshot.pop("critic_slow_target")
     (run_dir / "config.json").write_text(json.dumps(snapshot))
 
     resumed = resolve_resume_config(
-        replace(Config(), continue_head_layers=1, critic_slow_target=False),
+        replace(
+            Config(),
+            rssm_core="reference",
+            continue_head_layers=1,
+            critic_slow_target=False,
+        ),
         checkpoint_path,
         checkpoint={"world_model": {"continue_predictor.weight": object()}},
     )
 
+    assert resumed.rssm_core == "legacy"
     assert resumed.continue_head_layers == 0
     assert resumed.critic_slow_target is True
 
@@ -91,6 +100,22 @@ def test_resume_requires_explicit_semantic_migration(tmp_path):
     )
 
     assert resumed is current
+
+
+def test_resume_infers_reference_rssm_core_without_config_snapshot(tmp_path):
+    resumed = resolve_resume_config(
+        Config(),
+        tmp_path / "checkpoint.pt",
+        checkpoint={
+            "world_model": {
+                "dynin_deter.0.weight": object(),
+                "continue_predictor.0.weight": object(),
+            }
+        },
+    )
+
+    assert resumed.rssm_core == "reference"
+    assert resumed.continue_head_layers == 1
 
 
 def test_trainer_requires_collector_queue_before_model_initialization(tmp_path):

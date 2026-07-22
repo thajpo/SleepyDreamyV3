@@ -1,10 +1,12 @@
 import torch
+import pytest
 
 from dreamer.config import Config
 from dreamer.models import initialize_world_model
 
 
-def test_observe_state_keeps_gradients_across_timesteps():
+@pytest.mark.parametrize("rssm_core", ["legacy", "reference"])
+def test_observe_state_keeps_gradients_across_timesteps(rssm_core):
     cfg = Config(
         d_hidden=16,
         num_latents=4,
@@ -12,6 +14,7 @@ def test_observe_state_keeps_gradients_across_timesteps():
         n_observations=4,
         n_actions=2,
         use_pixels=False,
+        rssm_core=rssm_core,
     )
     encoder, world_model = initialize_world_model("cpu", cfg, batch_size=1)
     world_model.init_state(batch_size=1)

@@ -176,6 +176,8 @@ def dictconfig_to_config(cfg: DictConfig) -> Config:
             d["d_hidden"] = models.d_hidden
         if "num_latents" in models:
             d["num_latents"] = models.num_latents
+        if "rssm_core" in models:
+            d["rssm_core"] = models.rssm_core
         if "continue_head_layers" in models:
             d["continue_head_layers"] = models.continue_head_layers
         if "encoder" in models:
@@ -216,7 +218,7 @@ def resolve_resume_config(
     checkpoint: dict | None = None,
     allow_semantic_migration: bool = False,
 ) -> Config:
-    """Restore checkpoint continuation-head and critic-target semantics."""
+    """Restore checkpoint model and target semantics."""
     if allow_semantic_migration:
         return flat_cfg
 
@@ -231,6 +233,7 @@ def resolve_resume_config(
     if checkpoint_config is not None:
         return replace(
             flat_cfg,
+            rssm_core=checkpoint_config.rssm_core,
             continue_head_layers=checkpoint_config.continue_head_layers,
             critic_slow_target=checkpoint_config.critic_slow_target,
             balance_continuation=checkpoint_config.balance_continuation,
@@ -238,6 +241,12 @@ def resolve_resume_config(
         )
 
     world_model_state = checkpoint.get("world_model", {})
+    if "dynin_deter.0.weight" in world_model_state:
+        rssm_core = "reference"
+    elif "_W_ir" in world_model_state:
+        rssm_core = "legacy"
+    else:
+        raise ValueError("checkpoint does not identify its RSSM core architecture")
     if "continue_predictor.weight" in world_model_state:
         continue_head_layers = 0
     elif "continue_predictor.0.weight" in world_model_state:
@@ -248,6 +257,7 @@ def resolve_resume_config(
         )
     return replace(
         flat_cfg,
+        rssm_core=rssm_core,
         continue_head_layers=continue_head_layers,
         critic_slow_target=True,
         balance_continuation=False,

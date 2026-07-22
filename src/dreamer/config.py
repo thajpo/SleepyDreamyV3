@@ -50,6 +50,9 @@ class Config:
     # ===== Model architecture =====
     d_hidden: int = 64
     num_latents: int = 32
+    # Legacy preserves historical checkpoint construction. Authored Hydra
+    # configs select the grouped, normalized reference recurrent core.
+    rssm_core: str = "legacy"  # legacy, reference
     # Zero preserves historical linear-head checkpoint construction. Authored
     # Hydra configs use the reference-style one-hidden-layer continuation MLP.
     continue_head_layers: int = 0
@@ -278,6 +281,8 @@ def validate_config(cfg: Config) -> None:
 
     if cfg.d_hidden < 16 or cfg.d_hidden % 16 != 0:
         errors.append("d_hidden must be at least 16 and divisible by 16")
+    if cfg.rssm_core not in {"legacy", "reference"}:
+        errors.append("rssm_core must be 'legacy' or 'reference'")
     if cfg.continue_head_layers not in {0, 1}:
         errors.append("continue_head_layers must be 0 or 1")
     if not 0 <= cfg.replay_burn_in < cfg.sequence_length:

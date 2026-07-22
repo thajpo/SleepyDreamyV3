@@ -43,6 +43,7 @@ environment:
 models:
   d_hidden: 64
   num_latents: 32
+  rssm_core: reference  # grouped normalized recurrent core from pinned DreamerV3
   continue_head_layers: 1  # reference conhead: one RMSNorm/SiLU hidden layer
   encoder:
     cnn:
