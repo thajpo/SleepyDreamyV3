@@ -4672,3 +4672,99 @@ one-update multiprocess dry run. The smoke run composed `reference_sum`, loaded
 two episodes, published model version 0 to its collector, and exited normally.
 No 3,500-update canary was started during this mechanical gate; the frozen
 seed-0 state-aggregation run above remains the next authorized experiment.
+
+### Reference state-aggregation canary result
+
+The preregistered seed-0 canary completed normally under
+`experiments/2026-07-22_cartpole_reference_state_sum_seed0_3500/` from clean
+source `f26f7c530461841a704dc17b15348caefcdc4216`. Its manifest run ID is
+`bfdfe890249a42448758a51135715e14` and its MLflow run ID is
+`82646ca7f51c448cb54e9b56da4079b7`. It consumed 3,500 learner updates and
+21,829 environment transitions in 957.7 seconds. The command changed only
+`train.state_loss_mode=reference_sum` relative to the corrected-reference-
+optimizer canary and retained the fixed seed, evaluation schedule, resource
+cap, and all other authored parameters.
+
+The complete deterministic 20-episode evaluation curve was:
+
+```text
+step:    100  200  300  400  500  600  700  800  900 1000 1100 1200
+return:  9.4 10.85 9.35 9.35 9.35 9.35 9.35 9.35  9.4 36.2 78.9 75.55
+
+step:   1300 1400 1500 1600 1700 1800 1900 2000 2100 2200 2300 2400
+return: 85.1 83.4 70.7 81.8 89.85 156.85 84.05 50.4 40.1 31.35 25.85 28.9
+
+step:   2500 2600 2700 2800 2900 3000 3100 3200 3300 3400 3500
+return: 79.1 118.7 149.4 174.45 198.25 248.05 475.65 498.55 500.0 399.95 289.85
+```
+
+Restoring reference state aggregation materially changes learning. The matched
+half-mean run remained near the floor through update 1,800 and never reached
+450; the sum-loss run left the floor by update 1,000 and reached 500 at update
+3,300. This is causal evidence that the eightfold state-gradient mismatch was
+a real implementation defect and that the corrected stack can learn a solved
+CartPole policy.
+
+It is not yet a reliable solution. After first crossing 450 at update 3,100,
+the run fell to 399.95 and then 289.85. It therefore violates the frozen
+no-post-solve-return-below-300 rule, the final-return-at-least-400 rule, and the
+best-to-final-gap-at-most-100 rule: the best/final gap is 210.15. This is an
+oscillatory rise-collapse-recovery-collapse trajectory, not a monotonic failure
+to acquire the task.
+
+The required 20-seed final-checkpoint continuation audit is retained under
+`experiments/2026-07-22_cartpole_reference_state_sum_continuation_probe/`.
+Seeds 17--36 produced mean return 294.65 across 5,893 transitions, with 20
+physical failures and no time-limit truncations.
+
+| Continuation readout | Final 3,500 |
+|---|---:|
+| Posterior expected failure ROC AUC | **0.617** |
+| Posterior mode failure ROC AUC | **0.600** |
+| Prior expected failure ROC AUC | **0.577** |
+| Posterior terminal / live effective discount | **0.9954 / 0.9956** |
+| Prior terminal / live effective discount | **0.9942 / 0.9946** |
+| Posterior-to-prior RMS, all / terminal rows | 0.00187 / 0.00178 |
+| Balanced accuracy at half task discount | 0.500 |
+
+The continuation gate fails decisively. Even after the actor has demonstrated
+solved behavior, the learned continuation channel is nearly constant and does
+not represent physical termination. State-loss scale alone does not repair
+failure-risk semantics.
+
+The five-seed, 64-sample online-critic policy-target audit is retained under
+`experiments/2026-07-22_cartpole_reference_state_sum_policy_q_probe/`. It
+followed 1,495 actor states and 746 trusted-actionable states. Returns were
+299.0 mean, 308 median, 259 minimum, and 333 maximum; none of the five episodes
+solved.
+
+| Policy/value readout | Final 3,500 |
+|---|---:|
+| Actor / trusted-real balanced accuracy | 0.613 |
+| One-step critic-bootstrap / trusted-real balanced accuracy | 0.591 |
+| Three-step full-Q / trusted-real balanced accuracy | 0.529 |
+| Policy target / trusted-real balanced accuracy, all actionable | 0.551 |
+| Actor / policy-target agreement, all actionable | 0.618 |
+| Mean absolute policy-target action delta | 0.509 |
+| Confident states / confident actionable states | 1,200 / **600** |
+| Confident actor / policy-target agreement | **0.717** |
+| Confident policy-target / trusted-real balanced accuracy | **0.566** |
+| One-step state MSE | 0.3345 |
+
+The state correction expands confident actionable target support from 53 rows
+in the matched half-mean run to 600, so the imagined action target is no longer
+merely under-separated. However, its confident trusted-real accuracy remains
+below the required 0.592 and actor/target agreement remains below 0.8. The
+target prefers action 0 on 1,302 of 1,495 states while the actor is roughly
+balanced, and the target/real action-margin correlation is effectively zero
+(`0.002`). Stronger observation reconstruction creates usable policy diversity
+without making the learned target reliably correspond to real counterfactual
+outcomes.
+
+This is a partial causal success and a frozen-gate failure. The legacy state
+aggregation is rejected for authored runs, but seeds 1 and 2 are not launched:
+one seed is enough to show that the isolated repair is not sufficient for
+stability. Per the preregistration, aggregation retries end here. The next
+bounded intervention is the coupled reference vector encoder/posterior
+architecture audit; optimizer, replay, warmup, target-smoothing, and further
+state-loss tuning remain frozen.

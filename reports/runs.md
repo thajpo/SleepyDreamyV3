@@ -2,11 +2,11 @@
 
 Generated non-destructively from run manifests and config snapshots. No checkpoint contents were loaded.
 
-- Indexed runs: 103
-- Indexed size: 7.8 GiB
-- Manifest / legacy: 65 / 38
-- Exact-comparison eligible: 47
-- Dispositions: {'incomplete': 12, 'keep': 51, 'review': 40}
+- Indexed runs: 104
+- Indexed size: 8.0 GiB
+- Manifest / legacy: 66 / 38
+- Exact-comparison eligible: 48
+- Dispositions: {'incomplete': 12, 'keep': 52, 'review': 40}
 
 A blank comparison key means the run lacks the provenance or protocol needed for an exact comparison. Legacy runs are retained for review.
 
@@ -62,6 +62,7 @@ A blank comparison key means the run lacks the provenance or protocol needed for
 | `experiments/2026-07-22_cartpole_episode_coherent_seed0_3500` | completed | keep | yes | 9 | 177.5 MiB |
 | `experiments/2026-07-22_cartpole_reference_optimizer_seed0_3500` | completed | keep | yes | 9 | 177.5 MiB |
 | `experiments/2026-07-22_cartpole_reference_rssm_core_seed0_3500` | completed | keep | yes | 9 | 177.5 MiB |
+| `experiments/2026-07-22_cartpole_reference_state_sum_seed0_3500` | completed | keep | yes | 9 | 177.5 MiB |
 | `experiments/2026-07-22_cartpole_replay_stream_seed0_3500` | completed | keep | yes | 9 | 177.5 MiB |
 | `experiments/2026-07-22_cartpole_sequence_loss_seed0_3500` | completed | keep | yes | 9 | 164.2 MiB |
 | `experiments/2026-07-22_cartpole_slow_mean_seed0_3500` | completed | keep | yes | 9 | 177.5 MiB |
