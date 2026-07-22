@@ -92,6 +92,7 @@ def imagine_dream_frames(
     n_actions: int,
     horizon: int,
     policy_mode: str,
+    actor_unimix: float = 0.01,
 ) -> list[np.ndarray]:
     """Generate imagined pixel frames from a latent starting state."""
     frames: list[np.ndarray] = []
@@ -120,7 +121,9 @@ def imagine_dream_frames(
                 frames.append(frame)
 
             action_logits = actor(h_z)
-            action_logits = unimix_logits(action_logits, unimix_ratio=0.01)
+            action_logits = unimix_logits(
+                action_logits, unimix_ratio=actor_unimix
+            )
             if policy_mode == "argmax":
                 action = action_logits.argmax(dim=-1)
             else:
@@ -301,6 +304,10 @@ def run_inspection(
                 )
 
                 action_logits = actor(actor_input)
+                action_logits = unimix_logits(
+                    action_logits,
+                    unimix_ratio=float(getattr(cfg, "actor_unimix", 0.01)),
+                )
                 action_probs = F.softmax(action_logits, dim=-1)
                 action_entropy = (
                     -(action_probs * torch.log(action_probs + 1e-8))
@@ -336,6 +343,7 @@ def run_inspection(
                         n_actions=cfg.n_actions,
                         horizon=int(dream_snippet_horizon),
                         policy_mode=policy_mode,
+                        actor_unimix=float(getattr(cfg, "actor_unimix", 0.01)),
                     )
                     if dream_frames:
                         dream_path = (

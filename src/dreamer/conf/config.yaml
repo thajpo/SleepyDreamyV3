@@ -95,6 +95,7 @@ train:
   horizon: 333
   contdisc: true
   num_dream_steps: 15
+  actor_unimix: 0.01       # uniform mixture for actor actions only
   actor_entropy_coef: 3e-4  # paper: η=3e-4
   normalize_advantages: false  # reference advnorm is none; use only return-percentile scale
   actor_loss_mode: reinforce  # reinforce, enumerate, qcritic, mpc_teacher

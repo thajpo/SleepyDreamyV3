@@ -43,6 +43,19 @@ def test_select_policy_action_rejects_unknown_mode():
         select_policy_action(torch.zeros(1, 2), policy_mode="greedy")
 
 
+def test_select_policy_action_uses_configured_unimix_for_sampling():
+    logits = torch.tensor([[100.0, -100.0]]).expand(2_000, -1)
+    actions = select_policy_action(
+        logits,
+        policy_mode="sample",
+        generator=torch.Generator().manual_seed(23),
+        actor_unimix=0.10,
+    )
+
+    alternative_fraction = (actions == 1).float().mean().item()
+    assert alternative_fraction == pytest.approx(0.05, abs=0.015)
+
+
 def test_select_posterior_latent_supports_mode_and_reproducible_sampling():
     logits = torch.tensor(
         [

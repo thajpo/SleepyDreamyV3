@@ -382,7 +382,8 @@ def run_recovery_value_probe(
                     source_actor(source_h_z).argmax(dim=-1).item()
                 )
                 actor_logits = unimix_logits(
-                    target_actor(target_h_z), unimix_ratio=0.01
+                    target_actor(target_h_z),
+                    unimix_ratio=float(getattr(target_cfg, "actor_unimix", 0.01)),
                 )
                 actor_probabilities = F.softmax(actor_logits, dim=-1).squeeze(0)
                 actor_action = int(actor_logits.argmax(dim=-1).item())
@@ -416,6 +417,9 @@ def run_recovery_value_probe(
                         generator=policy_generator,
                         terminal_reward_penalty=float(
                             getattr(target_cfg, "terminal_reward_penalty", 0.0)
+                        ),
+                        actor_unimix=float(
+                            getattr(target_cfg, "actor_unimix", 0.01)
                         ),
                     )
                     real_scores = []

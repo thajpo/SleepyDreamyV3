@@ -26,6 +26,9 @@ class StepMetrics:
     dreamed_rewards: list[torch.Tensor] = field(default_factory=list)
     dreamed_values: list[torch.Tensor] = field(default_factory=list)
     actor_entropy: list[torch.Tensor] = field(default_factory=list)
+    actor_min_action_probability: list[torch.Tensor] = field(default_factory=list)
+    actor_non_modal_probability: list[torch.Tensor] = field(default_factory=list)
+    actor_non_modal_sample_fraction: list[torch.Tensor] = field(default_factory=list)
     actor_enum_margin: list[torch.Tensor] = field(default_factory=list)
     actor_mpc_margin: list[torch.Tensor] = field(default_factory=list)
     actor_mpc_mask_frac: list[torch.Tensor] = field(default_factory=list)
@@ -283,6 +286,15 @@ def log_step_metrics(
             m["actor/entropy/mean"] = ae.mean().item()
             if is_full:
                 m["actor/entropy/std"] = ae.std().item()
+        if metrics.actor_min_action_probability:
+            values = torch.stack(metrics.actor_min_action_probability)
+            m["actor/support/min_action_probability_mean"] = values.mean().item()
+        if metrics.actor_non_modal_probability:
+            values = torch.stack(metrics.actor_non_modal_probability)
+            m["actor/support/non_modal_probability_mean"] = values.mean().item()
+        if metrics.actor_non_modal_sample_fraction:
+            values = torch.stack(metrics.actor_non_modal_sample_fraction)
+            m["actor/support/non_modal_sample_fraction"] = values.mean().item()
         if metrics.actor_enum_margin:
             margins = torch.stack(metrics.actor_enum_margin)
             m["actor/enum_q_margin/mean"] = margins.mean().item()

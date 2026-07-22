@@ -31,6 +31,7 @@ def test_hydra_yaml_defines_every_runtime_field():
     assert runtime_config.laprop_bias_correction is True
     assert runtime_config.optimizer_warmup_steps == 1000
     assert runtime_config.actor_warmup_steps == 0
+    assert runtime_config.actor_unimix == 0.01
     assert runtime_config.weight_imagination_starts is True
     assert runtime_config.state_loss_mode == "reference_sum"
     assert runtime_config.wm_lr == runtime_config.actor_lr
@@ -57,6 +58,8 @@ def test_hydra_yaml_defines_every_runtime_field():
             "optimizer_warmup_steps",
         ),
         (replace(Config(), actor_warmup_steps=-1), "actor_warmup_steps"),
+        (replace(Config(), actor_unimix=-0.01), "actor_unimix"),
+        (replace(Config(), actor_unimix=1.01), "actor_unimix"),
         (
             replace(
                 Config(),
@@ -116,6 +119,7 @@ def test_resume_inherits_historical_checkpoint_semantics(tmp_path):
     snapshot.pop("optimizer_warmup_steps")
     snapshot.pop("weight_imagination_starts")
     snapshot.pop("state_loss_mode")
+    snapshot.pop("actor_unimix")
     snapshot["actor_warmup_steps"] = 3000
     snapshot["gamma"] = 0.9
     snapshot["horizon"] = 10
@@ -152,6 +156,7 @@ def test_resume_inherits_historical_checkpoint_semantics(tmp_path):
     assert resumed.laprop_bias_correction is False
     assert resumed.optimizer_warmup_steps == 0
     assert resumed.actor_warmup_steps == 3000
+    assert resumed.actor_unimix == 0.01
     assert (resumed.gamma, resumed.horizon, resumed.contdisc) == (0.9, 10, True)
     assert resumed.weight_imagination_starts is False
     assert resumed.state_loss_mode == "legacy_half_mean"
@@ -178,6 +183,7 @@ def test_resume_restores_reference_optimizer_contract_and_rates(tmp_path):
         wm_lr=4e-5,
         actor_lr=4e-5,
         critic_lr=4e-5,
+        actor_unimix=0.10,
     )
     current = replace(
         Config(),
@@ -199,6 +205,7 @@ def test_resume_restores_reference_optimizer_contract_and_rates(tmp_path):
     assert resumed.optimizer_contract == "reference"
     assert resumed.laprop_bias_correction is True
     assert resumed.optimizer_warmup_steps == 1000
+    assert resumed.actor_unimix == 0.10
     assert (resumed.wm_lr, resumed.actor_lr, resumed.critic_lr) == (
         4e-5,
         4e-5,

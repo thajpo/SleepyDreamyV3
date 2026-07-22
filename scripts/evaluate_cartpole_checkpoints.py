@@ -40,9 +40,10 @@ def select_policy_action(
     *,
     policy_mode: str,
     generator: torch.Generator | None = None,
+    actor_unimix: float = 0.01,
 ) -> torch.Tensor:
     """Select a deterministic or reproducibly sampled categorical action."""
-    logits = unimix_logits(logits, unimix_ratio=0.01)
+    logits = unimix_logits(logits, unimix_ratio=actor_unimix)
     if policy_mode == "argmax":
         return logits.argmax(dim=-1)
     if policy_mode == "sample":
@@ -149,6 +150,7 @@ def evaluate_checkpoint(
                         actor(actor_input),
                         policy_mode=policy_mode,
                         generator=action_generator,
+                        actor_unimix=float(getattr(cfg, "actor_unimix", 0.01)),
                     )
                     previous_action = F.one_hot(
                         action, num_classes=cfg.n_actions

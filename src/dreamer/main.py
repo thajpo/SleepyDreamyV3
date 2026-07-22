@@ -267,6 +267,7 @@ def resolve_resume_config(
             ),
             replay_sequence_mode=checkpoint_config.replay_sequence_mode,
             actor_warmup_steps=checkpoint_config.actor_warmup_steps,
+            actor_unimix=checkpoint_config.actor_unimix,
         )
 
     world_model_state = checkpoint.get("world_model", {})
@@ -328,6 +329,7 @@ def resolve_resume_config(
         weight_imagination_starts=False,
         replay_sequence_mode="episode",
         actor_warmup_steps=0,
+        actor_unimix=0.01,
     )
 
 
@@ -366,6 +368,7 @@ def run_training(
     print(f"  d_hidden: {flat_cfg.d_hidden}")
     print(f"  batch_size: {flat_cfg.batch_size}")
     print(f"  actor_lr: {flat_cfg.actor_lr}")
+    print(f"  actor_unimix: {flat_cfg.actor_unimix}")
     print(f"  actor_entropy_coef: {flat_cfg.actor_entropy_coef}")
     print(f"  seed: {flat_cfg.seed}")
     print(f"  Output: {log_dir}")

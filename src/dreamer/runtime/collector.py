@@ -218,7 +218,10 @@ def collect_experiences(
 
                     actor_input = world_model.join_h_and_z(h, z_sample)
                     action_logits = actor(actor_input)
-                    action_logits = unimix_logits(action_logits, unimix_ratio=0.01)
+                    action_logits = unimix_logits(
+                        action_logits,
+                        unimix_ratio=float(getattr(config, "actor_unimix", 0.01)),
+                    )
                     action_dist = torch.distributions.Categorical(logits=action_logits)
                     action = action_dist.sample()
 

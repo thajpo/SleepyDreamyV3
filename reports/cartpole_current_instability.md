@@ -5238,3 +5238,53 @@ policy-dependent latent histories. Distinguishing those requires retained
 replay/imagination support data that the completed run does not contain. Per
 the stop rule, no training change is selected from this result alone; a
 recovery-support benchmark and multi-seed replication remain explicit TODOs.
+
+### Preregistered actor-action-support canary
+
+- **Question:** is the confidently wrong recovery value ordering maintained by
+  actor-generated imagination starving the critic of the alternative action?
+  This is a causal test of action support, not a claim that ten-percent unimix
+  is the correct DreamerV3 default.
+- **Causal variable:** increase only the actor categorical unimix from `0.01`
+  to `0.10`, consistently in real collection and actor-generated imagination.
+  Keep posterior and prior latent unimix at `0.01`, actor entropy coefficient
+  at `0.001`, deterministic argmax evaluation, replay sampling, losses,
+  architecture, optimizer, and all other training settings unchanged.
+- **Instrumentation:** retain mean minimum action probability, mean probability
+  assigned away from the modal action, and the realized fraction of imagined
+  action samples that differ from the modal action. These are training-policy
+  support measurements; they do not redefine evaluation success.
+- **Exact run contract:** one CartPole seed (`general.seed=0`), 3,500 updates,
+  `d_hidden=128`, batch 8, sequence length 16, burn-in 4, replay ratio 16,
+  replay buffer 512, minimum buffer 16, recent fraction 0.2, one collector,
+  stream replay, 15-step dreams, reference RSSM/observation posterior/
+  optimizer contract, equal `4e-5` learning rates, 1,000-step optimizer
+  warmup, no actor warmup, online return targets, decoded-mean slow-value
+  regularization, evaluation every 100 updates over 20 episodes, and
+  checkpoints every 500 updates. The source must be the clean commit that
+  contains this preregistration, the configurable actor unimix, telemetry, and
+  tests.
+- **Behavior readout:** compare the full deterministic acquisition curve with
+  the completed one-percent seed-0 baseline. Record first 475-return
+  evaluation, any subsequent evaluation below 300, final return, and best-to-
+  final gap. This single seed can select or reject a mechanism, but cannot
+  establish cross-seed stability.
+- **Mechanistic readout:** rerun the frozen update-2,000-history recovery-value
+  diagnostic against canary checkpoints 2,500 and final. On states where the
+  real branches prefer action 1, compare actor probability, posterior-critic
+  action-1 recall, and full policy-target action-1 recall with the baseline's
+  `0.0168` mean / `0.0137` median actor probability and zero recall. Require at
+  least 100 actionable states for a categorical checkpoint interpretation;
+  otherwise report the result as descriptive and include the branch-margin
+  distribution rather than treating low sample count as failure.
+- **Selection rule:** action support is selected as a proximal cause only if
+  the configured support is visible in telemetry and the frozen recovery
+  cohort shows a material value-ordering improvement (posterior-critic or full
+  policy-target action-1 recall at least `0.50`) without destroying behavioral
+  acquisition. If support rises but value ordering does not, stop changing
+  exploration and test replay/history support directly. If ordering improves
+  but behavior remains unstable, retain the boundary result and treat policy
+  stability as a separate unresolved problem.
+- **Stop rule:** one seed-0 run and its fixed-history diagnostic. Do not launch
+  seeds 1--4, tune the unimix ratio, change entropy, or start Pong from this
+  canary. Broad recovery coverage and multi-seed replication remain TODOs.

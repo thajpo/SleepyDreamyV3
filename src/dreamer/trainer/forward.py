@@ -336,6 +336,7 @@ def dreamer_step(
     )
     lam = config.lam
     actor_entropy_coef = config.actor_entropy_coef
+    actor_unimix = float(getattr(config, "actor_unimix", 0.01))
     critic_ema_coef = config.critic_ema_regularizer
     critic_replay_scale = config.critic_replay_scale
     critic_real_return_scale = float(getattr(config, "critic_real_return_scale", 0.0))
@@ -512,8 +513,30 @@ def dreamer_step(
                 world_model,
                 n_actions,
                 d_hidden,
+                actor_unimix=actor_unimix,
             )
             world_model.h_prev = h_prev_backup
+
+            action_probabilities = F.softmax(dreamed_actions_logits, dim=-1)
+            valid_action_probabilities = action_probabilities[:, sample_mask.bool()]
+            valid_action_samples = dreamed_actions_sampled[:, sample_mask.bool()]
+            modal_actions = valid_action_probabilities.argmax(dim=-1)
+            metrics.actor_min_action_probability.append(
+                valid_action_probabilities.min(dim=-1).values.mean().detach().cpu()
+            )
+            metrics.actor_non_modal_probability.append(
+                (1.0 - valid_action_probabilities.max(dim=-1).values)
+                .mean()
+                .detach()
+                .cpu()
+            )
+            metrics.actor_non_modal_sample_fraction.append(
+                (valid_action_samples != modal_actions)
+                .float()
+                .mean()
+                .detach()
+                .cpu()
+            )
 
             # Reward/continue predictions from post-action states [1:]
             dreamed_rewards_logits = world_model.reward_predictor(
@@ -637,6 +660,7 @@ def dreamer_step(
                     terminal_reward_penalty=terminal_reward_penalty,
                     objective=getattr(config, "actor_enum_objective", "value"),
                     sample_mask=sample_mask,
+                    actor_unimix=actor_unimix,
                 )
                 actor_loss = actor_loss * float(
                     getattr(config, "actor_enum_loss_scale", 1.0)
@@ -673,6 +697,7 @@ def dreamer_step(
                         config, "mpc_teacher_normalize_values", True
                     ),
                     sample_mask=sample_mask,
+                    actor_unimix=actor_unimix,
                 )
                 actor_loss = actor_loss * float(
                     getattr(config, "mpc_teacher_loss_scale", 1.0)

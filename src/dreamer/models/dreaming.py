@@ -25,6 +25,8 @@ def dream_sequence(
     world_model,
     n_actions,
     d_hidden,
+    *,
+    actor_unimix=0.01,
 ):
     """
     Generate a sequence of dreamed states and actions starting from an initial state.
@@ -70,8 +72,8 @@ def dream_sequence(
     for _ in range(num_dream_steps):
         action_logits = actor(dream_h_z.detach())
         action_logits = unimix_logits(
-            action_logits, unimix_ratio=0.01
-        )  # Actor unimix (1%)
+            action_logits, unimix_ratio=actor_unimix
+        )
         dreamed_actions_logits.append(action_logits)
 
         action_dist = dist.Categorical(logits=action_logits, validate_args=False)
@@ -128,6 +130,7 @@ def estimate_policy_lambda_action_values(
     *,
     generator=None,
     terminal_reward_penalty=0.0,
+    actor_unimix=0.01,
 ):
     """Estimate the actor's own lambda-return target for every first action.
 
@@ -184,7 +187,9 @@ def estimate_policy_lambda_action_values(
         if depth == 0:
             action_ids = first_actions
         else:
-            action_logits = unimix_logits(actor(h_z), unimix_ratio=0.01)
+            action_logits = unimix_logits(
+                actor(h_z), unimix_ratio=actor_unimix
+            )
             action_ids = sample_categorical(F.softmax(action_logits, dim=-1))
         action_onehot = F.one_hot(action_ids, num_classes=n_actions).to(dtype=dtype)
 
@@ -398,6 +403,7 @@ def compute_enumerated_actor_loss(
     terminal_reward_penalty=0.0,
     objective="value",
     sample_mask=None,
+    actor_unimix=0.01,
 ):
     """Train the actor toward model-enumerated action values for discrete control."""
     h_prev_backup = world_model.h_prev.clone()
@@ -418,7 +424,9 @@ def compute_enumerated_actor_loss(
         )
     finally:
         world_model.h_prev = h_prev_backup
-    policy_logits = unimix_logits(actor(initial_h_z.detach()), unimix_ratio=0.01)
+    policy_logits = unimix_logits(
+        actor(initial_h_z.detach()), unimix_ratio=actor_unimix
+    )
     log_probs = F.log_softmax(policy_logits, dim=-1)
     target_probs = F.softmax(q_values / max(float(temperature), 1e-6), dim=-1)
     action_dist = dist.Categorical(logits=policy_logits, validate_args=False)
@@ -463,6 +471,7 @@ def compute_mpc_teacher_actor_loss(
     margin_min=0.0,
     normalize_values=True,
     sample_mask=None,
+    actor_unimix=0.01,
 ):
     """Distill a short-horizon planner teacher into the actor.
 
@@ -490,7 +499,9 @@ def compute_mpc_teacher_actor_loss(
     finally:
         world_model.h_prev = h_prev_backup
 
-    policy_logits = unimix_logits(actor(initial_h_z.detach()), unimix_ratio=0.01)
+    policy_logits = unimix_logits(
+        actor(initial_h_z.detach()), unimix_ratio=actor_unimix
+    )
     action_dist = dist.Categorical(logits=policy_logits, validate_args=False)
     entropy_per_sample = action_dist.entropy()
 

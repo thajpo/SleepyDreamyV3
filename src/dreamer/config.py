@@ -116,6 +116,7 @@ class Config:
     horizon: int = 333
     contdisc: bool = True
     num_dream_steps: int = 15
+    actor_unimix: float = 0.01
     actor_entropy_coef: float = 3e-4
     normalize_advantages: bool = False
     actor_loss_mode: str = "reinforce"  # reinforce, enumerate, qcritic, mpc_teacher
@@ -202,6 +203,7 @@ def config_from_snapshot(data: dict) -> Config:
     """Construct a config, treating a missing LaProp mode as uncorrected."""
     normalized = dict(data)
     normalized.setdefault("laprop_bias_correction", False)
+    normalized.setdefault("actor_unimix", 0.01)
     return Config(**normalized)
 
 
@@ -355,6 +357,8 @@ def validate_config(cfg: Config) -> None:
             )
     if not 0.0 <= cfg.lam <= 1.0:
         errors.append("lam must be between 0 and 1")
+    if not 0.0 <= cfg.actor_unimix <= 1.0:
+        errors.append("actor_unimix must be between 0 and 1")
     if not 0.0 < cfg.continuation_balance_rate <= 1.0:
         errors.append("continuation_balance_rate must be in (0, 1]")
     if cfg.b_end <= cfg.b_start:
