@@ -3739,6 +3739,59 @@ to the earlier stream contract, whose best checkpoint demonstrates adequate
 model and optimizer capacity, and audit the training signal that later moves
 that same policy away from solved behavior.
 
+#### Preregistered episode-coherent collector canary
+
+The collection audit found a concrete recurrent-state contract violation.
+`collect_experiences()` polls the weight mailbox before every environment step.
+When an update arrives, it replaces the encoder, RSSM, and actor parameters but
+retains `h`, `action_onehot`, and `z_prev_embed` from the previous parameter
+snapshot. The next policy decision therefore combines a hidden state expressed
+by one RSSM with transition and policy functions from another. Raw replay rows
+remain valid environment transitions, but the behavior policy that generated
+them is neither the old policy nor the new policy.
+
+This is not hypothetical update traffic. The failed reference-optimizer run
+published 700 versions and loaded 470 of them across 740 completed episodes;
+the source permits any of those loads to occur mid-episode. The effect becomes
+especially relevant as CartPole episodes lengthen and will be more severe for
+Pong, where the recurrent state carries information absent from one frame.
+
+- **Hypothesis:** preserving one coherent `(parameters, recurrent carry)` pair
+  for each episode prevents artificial policy-state discontinuities and reduces
+  the solved-to-collapsed feedback loop in the stream canary.
+- **Causal change:** apply collector weight updates only immediately before an
+  episode reset, when recurrent state is rebuilt. Preserve one independent,
+  one-item mailbox per collector, but replace an unseen stale snapshot with the
+  newest published snapshot so a long episode does not force the next episode
+  to start from an obsolete version. Do not change sync frequency, stochastic
+  action/latent sampling, replay contents, training losses, architecture, or
+  optimizer settings.
+- **Mechanical gate:** unit-test latest-snapshot replacement and fan-out; prove
+  by process-smoke logs that loaded versions identify an episode boundary; run
+  focused/full tests, compile/type checks, and the multiprocess CPU smoke.
+- **Frozen run:** repeat seed 0 for 3,500 updates with the exact prior stream
+  configuration: reference RSSM/core and continuation head, `d_hidden=128`,
+  batch 8, sequence 16, burn-in 4, replay ratio 16, legacy optimizer contract,
+  rates `3e-4/3e-5/8e-5`, entropy `1e-3`, 20 deterministic evaluation episodes
+  every 100 updates, and the one-thread host cap.
+- **Behavioral gate:** reach mean return 450; never fall below 300 afterward;
+  final at least 400; best-to-final gap at most 100.
+- **Diagnostics:** always retain the full evaluation curve and collector version
+  logs. If behavior fails, compare the final continuation and on-policy
+  left-drift readouts before choosing another training change.
+- **Stop rule:** one seed only. Failure rejects recurrent snapshot coherence as
+  sufficient, while retaining it as a correctness fix; do not combine it with
+  the missing start-continuation weight or an architecture change.
+
+The mechanical implementation now swaps model snapshots only before reset and
+uses newest-wins replacement in each independent mailbox. A three-update,
+two-episode-minimum CPU process smoke published versions 0, 1, and 2 while the
+collector was active; versions 0 and 1 were replaced without blocking, and the
+collector loaded version 2 at the explicit boundary `episode=8`. The full fast
+suite passes (`188 passed`), as do compile and the project-scoped type checks.
+This establishes the collection contract but is not behavioral evidence; the
+frozen canary remains required.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation

@@ -77,8 +77,8 @@ def collect_experiences(
             "model_weights_loaded collector_id=%d source=checkpoint", collector_id
         )
 
-    def pull_latest_models() -> None:
-        """Apply the pending update from this collector's one-item mailbox."""
+    def pull_latest_models(episode_number: int) -> None:
+        """Apply one coherent model snapshot at an episode boundary."""
         nonlocal actor, encoder, world_model, use_random_actions
         try:
             latest_model_update = model_queue.get_nowait()
@@ -97,24 +97,29 @@ def collect_experiences(
 
         if use_random_actions:
             logger.info(
-                "model_weights_loaded collector_id=%d version=%s policy_mode=learned",
+                "model_weights_loaded collector_id=%d version=%s episode=%d "
+                "policy_mode=learned",
                 collector_id,
                 latest_model_update["version"],
+                episode_number,
             )
             use_random_actions = False
         else:
             logger.info(
-                "model_weights_loaded collector_id=%d version=%s",
+                "model_weights_loaded collector_id=%d version=%s episode=%d",
                 collector_id,
                 latest_model_update["version"],
+                episode_number,
             )
 
     episode_count = 0
 
     while not stop_event.is_set():
-        pull_latest_models()
-
         episode_count += 1
+        # Recurrent carry is parameter-dependent. Swap encoder/RSSM/actor
+        # snapshots only where the environment and carry are both reset, never
+        # in the middle of an episode.
+        pull_latest_models(episode_count)
         obs, info = env.reset(seed=base_seed + episode_count)
 
         (
@@ -155,8 +160,6 @@ def collect_experiences(
         env_steps_in_episode = 0
 
         while not stop_event.is_set():
-            pull_latest_models()
-
             if use_random_actions:
                 # Fast path: random action, no model inference
                 action_np = env.action_space.sample()

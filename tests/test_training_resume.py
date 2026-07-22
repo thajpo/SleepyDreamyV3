@@ -120,7 +120,10 @@ def test_initial_model_update_is_published_to_each_collector(tmp_path):
     # A one-update run may finish before both newly spawned collectors consume
     # their mailboxes. Publication is the deterministic integration boundary;
     # tests/test_model_broadcast.py verifies the contents of every mailbox.
-    assert "model_weights_published version=0 delivered=[0, 1] pending=[]" in output
+    assert (
+        "model_weights_published version=0 delivered=[0, 1] replaced=[] pending=[]"
+        in output
+    )
     assert "model_weights_published version=1" not in output
 
 

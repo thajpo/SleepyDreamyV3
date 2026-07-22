@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass
 from typing import NamedTuple, Optional
 import torch
 import torch.nn.functional as F
-from queue import Full
+from queue import Empty, Full
 import mlflow
 import numpy as np
 import os
@@ -924,7 +924,7 @@ class WorldModelTrainer:
         return getattr(model, "_orig_mod", model)
 
     def send_models_to_collectors(self, step: int) -> None:
-        """Publish one coherent weight snapshot to every collector mailbox."""
+        """Publish the newest coherent snapshot to every collector mailbox."""
         # Exclude h_prev/z_prev buffers as they have batch-size-dependent shapes
         wm = self._get_model(self.world_model)
         actor = self._get_model(self.actor)
@@ -951,21 +951,36 @@ class WorldModelTrainer:
         }
 
         sent = []
+        replaced = []
         pending = []
         for collector_id, model_queue in enumerate(self.model_queues):
             try:
                 model_queue.put_nowait(models_to_send)
                 sent.append(collector_id)
             except Full:
-                # A full one-item mailbox means this collector already has an
-                # unseen update. Do not block training behind a slow environment.
-                pending.append(collector_id)
+                # A collector only applies updates between episodes. Replace
+                # its unseen stale item so the next episode starts from the
+                # newest available snapshot without blocking the trainer.
+                try:
+                    model_queue.get_nowait()
+                except Empty:
+                    # The collector raced us and consumed the old item.
+                    pass
+                try:
+                    model_queue.put_nowait(models_to_send)
+                    replaced.append(collector_id)
+                except Full:
+                    # A multiprocessing queue can race between the nonblocking
+                    # calls. Keeping a bounded pending item remains safe; the
+                    # next publication will try replacement again.
+                    pending.append(collector_id)
 
         log = logger.warning if pending else logger.info
         log(
-            "model_weights_published version=%d delivered=%s pending=%s",
+            "model_weights_published version=%d delivered=%s replaced=%s pending=%s",
             step,
             sent,
+            replaced,
             pending,
         )
 
