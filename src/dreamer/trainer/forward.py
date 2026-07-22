@@ -297,7 +297,19 @@ def dreamer_step(
             device,
             use_pixels=use_pixels,
             sample_mask=sample_mask,
+            continue_loss_weights=batch.continue_weights[:, t_step],
         )
+        valid_rows = sample_mask.bool()
+        terminal_rows = valid_rows & is_terminal_t.bool()
+        live_rows = valid_rows & ~is_terminal_t.bool()
+        continue_probs = torch.sigmoid(continue_logits.detach().squeeze(-1))
+        if bool(terminal_rows.any().item()):
+            metrics.continue_terminal_weights.append(
+                batch.continue_weights[:, t_step][terminal_rows].detach()
+            )
+            metrics.continue_terminal_probs.append(continue_probs[terminal_rows])
+        if bool(live_rows.any().item()):
+            metrics.continue_live_probs.append(continue_probs[live_rows])
         if (
             prior_state_pred_scale > 0.0
             and not use_pixels

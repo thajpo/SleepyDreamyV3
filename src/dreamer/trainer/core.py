@@ -303,6 +303,7 @@ class WorldModelTrainer:
         batch_is_last = []
         batch_is_terminal = []
         batch_future_returns = []
+        batch_continue_weights = []
         batch_mask = []
 
         for (
@@ -313,6 +314,7 @@ class WorldModelTrainer:
             is_last,
             is_terminal,
             future_returns,
+            continue_weights,
             mask,
         ) in raw_batch:
             if self.use_pixels and pixels is not None:
@@ -330,6 +332,7 @@ class WorldModelTrainer:
             batch_is_terminal.append(torch.from_numpy(is_terminal))
             if future_returns is not None:
                 batch_future_returns.append(torch.from_numpy(future_returns))
+            batch_continue_weights.append(torch.from_numpy(continue_weights))
             batch_mask.append(torch.from_numpy(mask))
 
         if self.use_pixels and batch_pixels:
@@ -355,6 +358,7 @@ class WorldModelTrainer:
             is_last=torch.stack(batch_is_last).to(self.device),
             is_terminal=torch.stack(batch_is_terminal).to(self.device),
             future_returns=future_returns_out,
+            continue_weights=torch.stack(batch_continue_weights).to(self.device),
             mask=torch.stack(batch_mask).to(self.device),
             pixels=pixels_out,
             pixels_original=pixels_original_out,

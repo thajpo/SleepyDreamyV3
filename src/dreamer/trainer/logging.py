@@ -35,6 +35,9 @@ class StepMetrics:
     replay_state_masks: list[torch.Tensor] = field(default_factory=list)
     replay_posterior_states: list[torch.Tensor] = field(default_factory=list)
     replay_value_annotations: list[torch.Tensor] = field(default_factory=list)
+    continue_terminal_weights: list[torch.Tensor] = field(default_factory=list)
+    continue_terminal_probs: list[torch.Tensor] = field(default_factory=list)
+    continue_live_probs: list[torch.Tensor] = field(default_factory=list)
     replay_loss: Optional[torch.Tensor] = None
     replay_ema_reg: Optional[torch.Tensor] = None
     replay_mc_loss: Optional[torch.Tensor] = None
@@ -201,6 +204,18 @@ def log_step_metrics(
 
             m["wm/reward_head/loss"] = reward
             m["wm/continue_head/loss"] = cont
+            if metrics.continue_terminal_weights:
+                terminal_weights = torch.cat(metrics.continue_terminal_weights)
+                terminal_probs = torch.cat(metrics.continue_terminal_probs)
+                m["research/continue/terminal_weight"] = (
+                    terminal_weights.mean().item()
+                )
+                m["research/continue/terminal_probability"] = (
+                    terminal_probs.mean().item()
+                )
+            if metrics.continue_live_probs:
+                live_probs = torch.cat(metrics.continue_live_probs)
+                m["research/continue/live_probability"] = live_probs.mean().item()
             m["wm/rssm/kl_dynamics"] = dyn
             m["wm/rssm/kl_representation"] = rep
 

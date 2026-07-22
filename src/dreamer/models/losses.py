@@ -25,6 +25,7 @@ def compute_wm_loss(
     device,
     use_pixels=True,
     sample_mask=None,
+    continue_loss_weights=None,
 ):
     """
     Compute world model loss combining prediction, dynamics, and representation losses.
@@ -107,6 +108,8 @@ def compute_wm_loss(
     pred_loss_continue = F.binary_cross_entropy_with_logits(
         continue_logits, continue_target, reduction="none"
     ).squeeze(-1)  # (B,)
+    if continue_loss_weights is not None:
+        pred_loss_continue = pred_loss_continue * continue_loss_weights
 
     # Prediction loss is the sum of the individual losses
     l_pred = pred_loss_pixel + pred_loss_vector + reward_loss + pred_loss_continue

@@ -25,11 +25,49 @@ class EnvData(NamedTuple):
     is_last: torch.Tensor  # (B, T)
     is_terminal: torch.Tensor  # (B, T)
     future_returns: Optional[torch.Tensor]  # (B, T), when exact targets enabled
+    continue_weights: torch.Tensor  # (B, T), replay-window inclusion correction
     mask: torch.Tensor  # (B, T) — 1=real, 0=padded
     pixels: Optional[torch.Tensor] = None  # (B, T, C, H, W)
     pixels_original: Optional[torch.Tensor] = None  # (B, T, C, H, W)
 
 
+def continuation_inclusion_weights(
+    episode_length: int,
+    sequence_length: int,
+    start: int,
+) -> np.ndarray:
+    """Correct per-episode window-edge bias for continuation supervision.
+
+    Full windows include interior transitions more often than episode-edge
+    transitions. The returned inverse-inclusion weights make every transition's
+    aggregate weight equal when enumerating all valid windows, while preserving
+    mean weight one over the sampled rows. Short padded episodes have one window
+    and therefore need no correction.
+    """
+    if episode_length <= 0 or sequence_length <= 0:
+        raise ValueError("episode and sequence lengths must be positive")
+    if episode_length < sequence_length:
+        if start != 0:
+            raise ValueError("short padded episodes must start at zero")
+        return np.concatenate(
+            [
+                np.ones(episode_length, dtype=np.float32),
+                np.zeros(sequence_length - episode_length, dtype=np.float32),
+            ]
+        )
+
+    valid_starts = episode_length - sequence_length + 1
+    if not 0 <= start < valid_starts:
+        raise ValueError("subsequence start is outside the episode")
+    mean_multiplicity = sequence_length * valid_starts / episode_length
+    weights = np.empty(sequence_length, dtype=np.float32)
+    for offset in range(sequence_length):
+        index = start + offset
+        first_start = max(0, index - sequence_length + 1)
+        last_start = min(index, valid_starts - 1)
+        multiplicity = last_start - first_start + 1
+        weights[offset] = mean_multiplicity / multiplicity
+    return weights
 
 
 class EpisodeReplayBuffer:
@@ -200,6 +238,9 @@ class EpisodeReplayBuffer:
             # Sample random start point
             start = random.randint(0, ep_len - seq_len)
             mask = np.ones(seq_len, dtype=np.float32)  # All real steps
+            continue_weights = continuation_inclusion_weights(
+                ep_len, seq_len, start
+            )
             return (
                 pixels[start : start + seq_len] if pixels is not None else None,
                 states[start : start + seq_len],
@@ -212,6 +253,7 @@ class EpisodeReplayBuffer:
                     if future_returns is not None
                     else None
                 ),
+                continue_weights,
                 mask,
             )
         else:
@@ -246,6 +288,7 @@ class EpisodeReplayBuffer:
             mask = np.concatenate(
                 [np.ones(ep_len, dtype=np.float32), np.zeros(pad_len, dtype=np.float32)]
             )
+            continue_weights = continuation_inclusion_weights(ep_len, seq_len, 0)
 
             return (
                 pixels_out,
@@ -255,6 +298,7 @@ class EpisodeReplayBuffer:
                 np.concatenate([is_last, is_last_pad], axis=0),
                 np.concatenate([is_terminal, is_terminal_pad], axis=0),
                 future_returns_out,
+                continue_weights,
                 mask,
             )
 
@@ -314,7 +358,14 @@ class EpisodeReplayBuffer:
 
             return [self._sample_subsequence(self.buffer[i]) for i in indices]
 
-    def sample_tensors(self, batch_size, device, use_pixels=False, target_size=None, recent_fraction=0.2) -> EnvData:
+    def sample_tensors(
+        self,
+        batch_size,
+        device,
+        use_pixels=False,
+        target_size=None,
+        recent_fraction=0.2,
+    ) -> EnvData:
         """
         Samples a batch and returns an EnvData namedtuple with ready-to-use PyTorch tensors.
         Handles pixels resizing and symlog of state.
@@ -324,7 +375,7 @@ class EpisodeReplayBuffer:
         batch_pixels, batch_pixels_original = [], []
         batch_states, batch_actions, batch_rewards = [], [], []
         batch_is_last, batch_is_terminal = [], []
-        batch_future_returns, batch_mask = [], []
+        batch_future_returns, batch_continue_weights, batch_mask = [], [], []
 
         for (
             pixels,
@@ -334,6 +385,7 @@ class EpisodeReplayBuffer:
             is_last,
             is_terminal,
             future_returns,
+            continue_weights,
             mask,
         ) in raw_batch:
             if use_pixels and pixels is not None:
@@ -350,6 +402,7 @@ class EpisodeReplayBuffer:
             batch_is_terminal.append(torch.from_numpy(is_terminal))
             if future_returns is not None:
                 batch_future_returns.append(torch.from_numpy(future_returns))
+            batch_continue_weights.append(torch.from_numpy(continue_weights))
             batch_mask.append(torch.from_numpy(mask))
 
         if use_pixels and batch_pixels:
@@ -372,6 +425,7 @@ class EpisodeReplayBuffer:
             is_last=torch.stack(batch_is_last).to(device),
             is_terminal=torch.stack(batch_is_terminal).to(device),
             future_returns=future_returns_out,
+            continue_weights=torch.stack(batch_continue_weights).to(device),
             mask=torch.stack(batch_mask).to(device),
             pixels=pixels_out,
             pixels_original=pixels_original_out,

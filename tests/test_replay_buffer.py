@@ -5,7 +5,10 @@ import numpy as np
 import pytest
 import torch
 
-from dreamer.runtime.replay_buffer import EpisodeReplayBuffer
+from dreamer.runtime.replay_buffer import (
+    EpisodeReplayBuffer,
+    continuation_inclusion_weights,
+)
 
 
 def _episode(length: int, marker: float = 1.0):
@@ -36,7 +39,32 @@ def test_short_episode_is_padded_and_masked():
     assert torch.equal(batch.mask[0], torch.tensor([1, 1, 1, 0, 0]).float())
     assert torch.equal(batch.is_terminal[0, 3:], torch.ones(2, dtype=torch.bool))
     assert torch.equal(batch.future_returns[0, 3:], torch.zeros(2))
+    assert torch.equal(
+        batch.continue_weights[0], torch.tensor([1, 1, 1, 0, 0]).float()
+    )
     assert replay.total_env_steps == 3
+
+
+def test_continuation_weights_remove_window_edge_bias() -> None:
+    episode_length = 7
+    sequence_length = 3
+    valid_starts = episode_length - sequence_length + 1
+    aggregate = np.zeros(episode_length, dtype=np.float64)
+    sampled_weights = []
+
+    for start in range(valid_starts):
+        weights = continuation_inclusion_weights(
+            episode_length, sequence_length, start
+        )
+        aggregate[start : start + sequence_length] += weights
+        sampled_weights.extend(weights.tolist())
+
+    expected_multiplicity = sequence_length * valid_starts / episode_length
+    assert np.allclose(aggregate, expected_multiplicity)
+    assert np.mean(sampled_weights) == pytest.approx(1.0)
+    assert continuation_inclusion_weights(
+        episode_length, sequence_length, valid_starts - 1
+    )[-1] == pytest.approx(expected_multiplicity)
 
 
 def test_future_returns_start_after_each_post_transition_state():

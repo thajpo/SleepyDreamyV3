@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from dreamer.models.decoder import ObservationDecoder
@@ -126,6 +127,50 @@ def test_state_decoder_loss_uses_raw_target_symlog_once():
     )
 
     assert loss_dict["prediction_vector"].item() == 0.0
+
+
+def test_continue_importance_weights_only_change_continue_loss():
+    batch_size = 2
+    n_bins = 5
+    n_latents = 2
+    n_classes = 3
+    common = dict(
+        obs_reconstruction={"state": torch.zeros(batch_size, 1)},
+        obs_t={"state": torch.zeros(batch_size, 1)},
+        reward_dist=torch.zeros(batch_size, n_bins),
+        reward_t=torch.zeros(batch_size),
+        terminated_t=torch.tensor([True, False]),
+        continue_logits=torch.zeros(batch_size, 1),
+        posterior_logits=torch.zeros(batch_size, n_latents, n_classes),
+        prior_logits=torch.zeros(batch_size, n_latents, n_classes),
+        B=torch.linspace(-2.0, 2.0, n_bins),
+        config=SimpleNamespace(
+            beta_dyn=0.0,
+            beta_rep=0.0,
+            beta_pred=1.0,
+            contdisc=False,
+        ),
+        device=torch.device("cpu"),
+        use_pixels=False,
+        sample_mask=torch.ones(batch_size),
+    )
+
+    _plain_total, plain = compute_wm_loss(**common)
+    _weighted_total, weighted = compute_wm_loss(
+        **common,
+        continue_loss_weights=torch.tensor([3.0, 0.5]),
+    )
+
+    assert weighted["prediction_continue"].item() == pytest.approx(
+        plain["prediction_continue"].item() * 1.75
+    )
+    for key in (
+        "prediction_vector",
+        "prediction_reward",
+        "dynamics",
+        "representation",
+    ):
+        assert weighted[key].item() == pytest.approx(plain[key].item())
 
 
 def test_actor_advantage_normalization_centers_constant_returns():
