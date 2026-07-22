@@ -310,10 +310,15 @@ def run_on_policy_probe(
     critical_margin: float,
     terminal_window: int,
     policy_q_samples: int = 0,
+    critic_source: str = "configured",
 ) -> dict:
     """Run the deployed deterministic actor and score each visited state."""
-    cfg, actor, critic, _q_critic, encoder, world_model, checkpoint, _critic_key, _q_key = (
-        load_checkpoint_models(checkpoint_path, device)
+    cfg, actor, critic, _q_critic, encoder, world_model, checkpoint, critic_key, _q_key = (
+        load_checkpoint_models(
+            checkpoint_path,
+            device,
+            critic_source=critic_source,
+        )
     )
     train_step = checkpoint.get("step", checkpoint.get("train_step"))
 
@@ -819,6 +824,7 @@ def run_on_policy_probe(
             "policy_q_horizon": (
                 int(cfg.num_dream_steps) if policy_q_samples else None
             ),
+            "critic_key": critic_key,
             "mean_one_step_state_mse": float(
                 np.mean([float(row["mean_one_step_state_mse"]) for row in rows])
             ),
@@ -900,6 +906,12 @@ def main() -> None:
     parser.add_argument("--critical-margin", type=float, default=15.0)
     parser.add_argument("--terminal-window", type=int, default=10)
     parser.add_argument("--policy-q-samples", type=int, default=0)
+    parser.add_argument(
+        "--critic-source",
+        choices=("configured", "online", "slow"),
+        default="configured",
+        help="value head used for imagined action targets",
+    )
     args = parser.parse_args()
 
     if args.episodes <= 0:
@@ -913,6 +925,8 @@ def main() -> None:
     summaries = []
     for checkpoint in args.checkpoints:
         name = f"{checkpoint.parent.parent.name}_{checkpoint.stem}"
+        if args.critic_source != "configured":
+            name = f"{name}_{args.critic_source}"
         print(f"Probing {name} on {device}...")
         summary = run_on_policy_probe(
             checkpoint.resolve(),
@@ -926,6 +940,7 @@ def main() -> None:
             critical_margin=args.critical_margin,
             terminal_window=args.terminal_window,
             policy_q_samples=args.policy_q_samples,
+            critic_source=args.critic_source,
         )
         summaries.append(summary)
         print(json.dumps(summary, indent=2))

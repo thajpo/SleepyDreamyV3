@@ -74,6 +74,61 @@ def test_checkpoint_loader_selects_authored_critic_target(
 
 
 @pytest.mark.parametrize(
+    ("critic_source", "expected_key", "expected_bias"),
+    [("online", "critic", 1.0), ("slow", "critic_ema", 2.0)],
+)
+def test_checkpoint_loader_can_override_critic_source(
+    tmp_path, critic_source, expected_key, expected_bias
+):
+    cfg = replace(
+        Config(),
+        d_hidden=16,
+        num_latents=4,
+        rnn_n_blocks=1,
+        critic_slow_target=False,
+    )
+    actor = initialize_actor("cpu", cfg)
+    critic = initialize_critic("cpu", cfg)
+    critic_ema = initialize_critic("cpu", cfg)
+    q_critic = initialize_q_critic("cpu", cfg)
+    encoder, world_model = initialize_world_model("cpu", cfg, batch_size=1)
+    with torch.no_grad():
+        critic.mlp[-1].bias.fill_(1.0)
+        critic_ema.mlp[-1].bias.fill_(2.0)
+
+    run_dir = tmp_path / "run"
+    checkpoint_path = run_dir / "checkpoints" / "checkpoint_final.pt"
+    checkpoint_path.parent.mkdir(parents=True)
+    (run_dir / "config.json").write_text(json.dumps(asdict(cfg)))
+    torch.save(
+        {
+            "actor": actor.state_dict(),
+            "critic": critic.state_dict(),
+            "critic_ema": critic_ema.state_dict(),
+            "q_critic": q_critic.state_dict(),
+            "encoder": encoder.state_dict(),
+            "world_model": world_model.state_dict(),
+        },
+        checkpoint_path,
+    )
+
+    loaded = load_checkpoint_models(
+        checkpoint_path, "cpu", critic_source=critic_source
+    )
+
+    assert loaded[7] == expected_key
+    assert torch.all(loaded[2].mlp[-1].bias == expected_bias)
+
+
+def test_checkpoint_loader_rejects_unknown_critic_source(tmp_path):
+    checkpoint_path = tmp_path / "missing.pt"
+    with pytest.raises(ValueError, match="critic_source"):
+        load_checkpoint_models(
+            checkpoint_path, "cpu", critic_source="mystery"
+        )
+
+
+@pytest.mark.parametrize(
     ("state", "action"),
     [
         (np.array([0.0, 0.0, 0.03, 0.0], dtype=np.float32), 0),

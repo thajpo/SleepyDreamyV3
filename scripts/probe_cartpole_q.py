@@ -173,7 +173,16 @@ def predict_one_step(
     return pred_state.astype(np.float32), float(continue_prob)
 
 
-def load_checkpoint_models(checkpoint_path: Path, device: str):
+def load_checkpoint_models(
+    checkpoint_path: Path,
+    device: str,
+    *,
+    critic_source: str = "configured",
+):
+    if critic_source not in {"configured", "online", "slow"}:
+        raise ValueError(
+            "critic_source must be 'configured', 'online', or 'slow'"
+        )
     cfg = infer_config_from_checkpoint(checkpoint_path, config_name=None)
     if cfg.environment_name != "CartPole-v1" or cfg.use_pixels:
         raise ValueError(f"{checkpoint_path} is not a state-only CartPole checkpoint")
@@ -185,11 +194,18 @@ def load_checkpoint_models(checkpoint_path: Path, device: str):
 
     checkpoint = torch.load(checkpoint_path, map_location=device)
     actor.load_state_dict(checkpoint["actor"])
-    critic_key = (
-        "critic_ema"
-        if cfg.critic_slow_target and "critic_ema" in checkpoint
-        else "critic"
-    )
+    if critic_source == "configured":
+        critic_key = (
+            "critic_ema"
+            if cfg.critic_slow_target and "critic_ema" in checkpoint
+            else "critic"
+        )
+    elif critic_source == "online":
+        critic_key = "critic"
+    elif critic_source == "slow":
+        if "critic_ema" not in checkpoint:
+            raise ValueError(f"{checkpoint_path} has no slow critic")
+        critic_key = "critic_ema"
     critic.load_state_dict(checkpoint[critic_key])
     q_critic_key = None
     if "q_critic_ema" in checkpoint:

@@ -4375,6 +4375,36 @@ than immediate learned reward differences. The next audit must focus on why
 the critic is self-consistent but wrong on recovery histories; repeating
 continuation-head capacity or class-weight experiments is not authorized.
 
+### Preregistered online-versus-slow critic boundary audit
+
+The online critic supplies the authored policy-conditioned target; its Polyak
+copy is updated by only two percent of each online parameter change per learner
+step. Comparing them on identical actor trajectories distinguishes transient
+online value noise from a stable wrong value geometry without changing
+training.
+
+- **Frozen cohort:** for decoded-mean best update 1,200 and final update 3,500,
+  drive the checkpoint's deterministic actor on reset seeds 17--21. Evaluate
+  every state twice with common random numbers: once using `critic` and once
+  using `critic_ema` for the 15-step, 64-sample policy-conditioned lambda-return
+  target. Keep the actor, encoder/RSSM, reward/continuation heads, trusted
+  30-step real rollout, and all confidence rules identical.
+- **Primary readouts:** confident target/real balanced accuracy, confident
+  actor/target agreement, confident actionable support, target preference
+  histogram, action margin, and one-step critic-bootstrap ordering. The online
+  cells are paired replications of the earlier three-seed endpoint probe, not a
+  replacement for its recorded result.
+- **Interpretation:** slow target/real balanced accuracy at least `0.592` and at
+  least `0.10` above online, with 100 confident actionable rows, selects noisy
+  online value drift. Both critics below `0.592`, or a gap below `0.10`, selects
+  a stable target-grounding failure shared across the smoothing window. A slow
+  critic that improves ordering but loses actor agreement is descriptive
+  because the actor was not trained against that target.
+- **Stop rule:** four paired cells, five episodes each, and 64 samples only. Do
+  not switch training to the slow target or launch a new run from this result;
+  first compare it with the historical slow-target canaries and the pinned
+  reference's authored online-target semantics.
+
 Interrupted manifests correctly record `status: interrupted` and evaluation
 history, but incorrectly retain `progress.train_step: 0` and `env_steps: 0`.
 Fix this bookkeeping issue separately from the learning experiment so it does
