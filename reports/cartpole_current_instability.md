@@ -4405,6 +4405,77 @@ training.
   first compare it with the historical slow-target canaries and the pinned
   reference's authored online-target semantics.
 
+### Online-versus-slow critic boundary result
+
+The four paired cells completed under
+`experiments/2026-07-22_cartpole_slow_mean_online_slow_critic_probe/` from clean
+source `ba64af5`. Each online/slow pair follows the same actor for the same five
+reset seeds and uses common random numbers for 64 sampled returns per forced
+first action.
+
+| Checkpoint | Critic | Confident actionable | Actor/target | Target/real balanced | One-step bootstrap/real balanced | Mean abs target delta |
+|---|---|---:|---:|---:|---:|---:|
+| Best 1,200 | Online | 313 | 0.850 | **0.417** | 0.569 | 0.167 |
+| Best 1,200 | Slow EMA | 315 | 0.862 | **0.423** | 0.533 | 0.152 |
+| Final 3,500 | Online | 140 | **0.436** | **0.359** | **0.418** | 0.998 |
+| Final 3,500 | Slow EMA | 143 | **0.469** | **0.390** | **0.437** | 0.992 |
+
+All cells clear the 100-confident-actionable support floor. The slow critic
+improves final target/real balanced accuracy by only `0.031`, remains `0.202`
+below the `0.592` gate, and does not restore actor tracking. At the best
+checkpoint its target accuracy differs from online by only `0.006`. Target
+margins are also nearly identical within each checkpoint. The preregistered
+result is therefore a stable target-grounding failure shared across the Polyak
+smoothing window, not transient online-critic jitter.
+
+This agrees with the pinned reference's online-target semantics and rejects
+switching lambda returns back to the slow critic. It also changes the optimizer
+decision relative to the earlier fixed-history audit. That audit rejected late
+actor lag on good histories; this paired audit now shows that both temporal
+views of the critic are stably wrong on recovery histories under the legacy
+split-rate contract. The remaining source-conforming optimizer question is not
+whether the actor should chase a moving critic, but whether replay-value
+representation grounding can form a correct critic under coherent shared
+optimization after the newer signal corrections.
+
+### Preregistered corrected-stack optimizer integration canary
+
+The earlier reference-optimizer canary at source `90946cc` cannot answer this
+integration question: it predates episode-coherent collector updates,
+replay-start continuation weighting, and decoded-mean slow-value
+regularization. Those corrections change the behavior distribution, imagined
+loss weights, and every critic regularizer target. Repeating the optimizer
+contract now is an integration acceptance test, not a causal retry or a claim
+that the earlier negative result was invalid.
+
+- **Hypothesis:** with the corrected data and value signals, equal optimizer
+  time scales plus replay-value representation gradients prevent the online
+  and slow critics from converging together to the wrong recovery-state
+  geometry.
+- **Causal bundle:** from the decoded-mean seed-0 canary, change only the
+  authored optimizer contract: set world-model, actor, and critic rates to
+  `4e-5`; ramp them linearly from zero over 1,000 updates; and enable the
+  reference replay-value gradient into observed encoder/RSSM features through
+  the already-validated combined backward path. Preserve reference RSSM,
+  stream replay, episode-coherent collection, start weighting, decoded-mean
+  regularization, batch 8, sequence 16, burn-in 4, replay ratio 16, entropy
+  `1e-3`, and every environment/evaluation setting.
+- **Behavioral gate:** reach mean return `450`; never fall below `300`
+  afterward; final at least `400`; best-to-final gap at most `100`.
+- **Boundary readouts:** regardless of behavior, retain the full curve and run
+  the 20-seed continuation audit plus the five-seed, 64-sample online policy-
+  target probe on best and final. Final confident target/real balanced accuracy
+  must reach `0.592`, actor/target agreement `0.8`, and at least 100 confident
+  actionable rows to pass the value boundary. Continuation is diagnostic and
+  cannot rescue a failed behavior/value gate.
+- **Interpretation:** a pass shows that the corrected components work as an
+  integrated reference optimizer system but does not identify which optimizer
+  dimension caused it. A failure rejects this corrected-stack bundle as
+  sufficient and ends optimizer-contract retries; the next step must be a
+  model/target architecture decision rather than another learning-rate tweak.
+- **Stop rule:** one seed for 3,500 learner updates. No rate tuning or seeds 1
+  and 2 unless both behavioral and value-boundary gates pass.
+
 Interrupted manifests correctly record `status: interrupted` and evaluation
 history, but incorrectly retain `progress.train_step: 0` and `env_steps: 0`.
 Fix this bookkeeping issue separately from the learning experiment so it does
