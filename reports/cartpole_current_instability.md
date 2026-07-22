@@ -3969,6 +3969,78 @@ This evidence does not justify a sweep.
   correction as semantics infrastructure, record the negative result, and
   return to source/data-flow localization of the critic target.
 
+#### Imagination-start-weight canary result
+
+The mechanical correction and resume contract are retained at source commit
+`3c4079e`. Authored Hydra runs now multiply the whole actor/value imagination
+trajectory by the detached predicted continuation probability of its observed
+replay start; historical snapshots missing the field retain the old unit
+prefix. Focused config, resume, and loss tests passed (`39`), including exact
+half-scaling of every actor and critic term for a start logit of zero and proof
+that the factor is not a world-model gradient path. The full fast suite passed
+(`190`), compile and the supported scoped type check passed, and a one-update
+multiprocess CPU smoke completed normally. Ruff was not available in the
+project environment and was not installed.
+
+The frozen seed-0 run completed normally under
+`experiments/2026-07-22_cartpole_start_weight_seed0_3500/`, with manifest run
+ID `629f81be4b6f45a5ba61a3c0d4c633fe` and MLflow run ID
+`38300d351e584accaf38af4e659e44d4`. It used 3,500 learner updates, 21,539
+environment steps, and 1,034.9 seconds on ROCm. Its manifest records clean
+source `3c4079e`, `weight_imagination_starts=true`, successful completion, and
+separate best/final checkpoints. Observed mean terminal fraction was `0.0208`,
+mean live start continuation was `0.9783`, and mean terminal start continuation
+was `0.7326`; their prevalence-weighted mean factor is approximately `0.973`,
+confirming the preregistered prediction that aggregate loss mass changes by
+only about `2.7%`.
+
+The policy first reached `493.15` at update 1,500 and reached the run best
+`500.0` at updates 1,700 and 1,800. It then retained a long high-return region,
+but not the frozen stability contract:
+
+| Update | 1,500 | 1,700 | 2,000 | 2,300 | 2,400 | 2,500 | 3,000 | 3,100 | 3,500 |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Mean return | 493.15 | 500.0 | 455.8 | 432.85 | **285.65** | 400.15 | 449.5 | **203.25** | 357.75 |
+
+The first sub-300 evaluation at update 2,400 irreversibly fails the retention
+gate. Final return also misses `400`, and the best-to-final gap is `142.25`.
+Relative to the episode-coherent predecessor, the final is better (`357.75`
+versus `200.4`) but the first sub-300 excursion occurs earlier (2,400 versus
+3,000). This is not a uniform stability improvement and does not authorize
+replication seeds.
+
+The preregistered policy-target probe is retained under
+`experiments/2026-07-22_cartpole_start_weight_policy_q_probe/`:
+
+| Metric | Best, update 1,700 | Final, update 3,500 | Prior coherent final |
+|---|---:|---:|---:|
+| Three-seed mean return | 500.0 | 474.0 | 191.67 |
+| Statistically separated states | 832 | 569 | 264 |
+| Actor/target agreement there | **0.688** | 0.938 | 0.803 |
+| Separated actionable states | 113 | **23** | 146 |
+| Confident target/real balanced accuracy | 0.667 | 0.810 | 0.507 |
+| All-actionable target/real balanced accuracy | 0.601 | 0.658 | 0.577 |
+| Mean absolute target action margin | 0.415 | 0.770 | 3.022 |
+| One-step state MSE | 0.088 | 0.039 | 0.045 |
+
+The final checkpoint is directionally healthier than the predecessor: its
+target margin no longer explodes, its all-actionable ordering improves, and it
+solves two of the three diagnostic seeds. But the target-quality gate lacks
+support because only 23 final states are both statistically separated and
+simulator-actionable, not the required 100. The solved best checkpoint also
+fails the `0.8` actor/target agreement condition. The fixed three-seed probe
+cohort is substantially easier for the final policy than the 20-seed training
+evaluation (`474.0` versus `357.75`), so it cannot override the behavioral
+failure.
+
+This rejects the missing start factor as a sufficient cause while retaining it
+as a source-conforming correction. The result is consistent with its small
+causal reach: it can temper target margins and alter the trajectory, but it
+cannot prevent recurrent recovery failures. No seeds 1 or 2 are launched. The
+next step returns to the critic-target source/data-flow audit; a further
+training change requires a concrete divergence with broader reach than a
+roughly 2.7% loss reweighting.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
