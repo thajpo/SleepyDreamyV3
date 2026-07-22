@@ -13,6 +13,7 @@ import torch.nn.functional as F
 from ..models import (
     compute_wm_loss,
     compute_actor_critic_losses,
+    compute_reinforce_actor_loss,
     compute_q_actor_critic_losses,
     compute_enumerated_actor_loss,
     compute_mpc_teacher_actor_loss,
@@ -37,9 +38,55 @@ class ForwardResult:
     total_critic_loss: torch.Tensor
     metrics: StepMetrics
     replay_representation_loss: Optional[torch.Tensor] = None
-    # Return lambda_returns from the last AC step so the caller can
-    # update return-normalization EMA without reaching into internals.
-    last_lambda_returns: Optional[torch.Tensor] = None
+    return_scale: Optional[float] = None
+    ret_lo: Optional[float] = None
+    ret_hi: Optional[float] = None
+
+
+@dataclass
+class ReinforceActorBatch:
+    """Tensors needed to apply one shared return scale to an imagined batch."""
+
+    dreamed_values: torch.Tensor
+    lambda_returns: torch.Tensor
+    dreamed_continues: torch.Tensor
+    dreamed_actions_logits: torch.Tensor
+    dreamed_actions_sampled: torch.Tensor
+    sample_mask: torch.Tensor
+    actor_baseline_values: torch.Tensor
+
+
+def calculate_return_normalizer_update(
+    return_batches: list[tuple[torch.Tensor, torch.Tensor]],
+    ret_lo: float,
+    ret_hi: float,
+    *,
+    rate: float = 0.01,
+) -> Optional[tuple[float, float, float]]:
+    """Update DreamerV3's non-debiased percentile return normalizer.
+
+    ``return_batches`` contains ``(lambda_returns, start_mask)`` pairs for every
+    post-burn-in imagination start. Reference Dreamer computes percentiles over
+    the corresponding combined ``B * K * H`` tensor, not only the final start.
+    """
+    if not 0.0 <= rate <= 1.0:
+        raise ValueError("return-normalizer rate must be between 0 and 1")
+
+    valid_returns: list[torch.Tensor] = []
+    for lambda_returns, start_mask in return_batches:
+        valid = start_mask.detach().bool().reshape(-1)
+        if bool(valid.any().item()):
+            valid_returns.append(lambda_returns.detach()[:, valid].reshape(-1))
+    if not valid_returns:
+        return None
+
+    flat = torch.cat(valid_returns)
+    lo_batch = float(torch.quantile(flat, 0.05).item())
+    hi_batch = float(torch.quantile(flat, 0.95).item())
+    next_lo = (1.0 - rate) * float(ret_lo) + rate * lo_batch
+    next_hi = (1.0 - rate) * float(ret_hi) + rate * hi_batch
+    next_scale = max(1.0, next_hi - next_lo)
+    return next_scale, next_lo, next_hi
 
 
 def add_sequence_mean_auxiliary_loss(
@@ -150,6 +197,9 @@ def dreamer_step(
     use_pixels: bool,
     do_log_images: bool,
     collect_gradient_diagnostics: bool = False,
+    return_lo: float = 0.0,
+    return_hi: float = 0.0,
+    return_norm_rate: float = 0.01,
 ) -> ForwardResult:
     """One complete DreamerV3 forward pass over a batch.
 
@@ -202,7 +252,8 @@ def dreamer_step(
     total_wm_loss = None
     total_actor_loss = None
     total_critic_loss = None
-    last_lambda_returns = None
+    return_batches: list[tuple[torch.Tensor, torch.Tensor]] = []
+    reinforce_actor_batches: list[ReinforceActorBatch] = []
     replay_posterior_states_with_grad: list[torch.Tensor] = []
     replay_representation_loss = None
 
@@ -377,7 +428,7 @@ def dreamer_step(
                 lam,
                 n_dream_steps,
             )
-            last_lambda_returns = lambda_returns
+            return_batches.append((lambda_returns, sample_mask))
 
             if critic_replay_scale > 0.0:
                 metrics.replay_value_annotations.append(lambda_returns[0].detach())
@@ -403,6 +454,21 @@ def dreamer_step(
                 sample_mask=sample_mask,
                 actor_baseline_values=critic_target_values,
             )
+            if (
+                not skip_actor
+                and getattr(config, "actor_loss_mode", "reinforce") == "reinforce"
+            ):
+                reinforce_actor_batches.append(
+                    ReinforceActorBatch(
+                        dreamed_values=dreamed_values,
+                        lambda_returns=lambda_returns,
+                        dreamed_continues=dreamed_continues,
+                        dreamed_actions_logits=dreamed_actions_logits,
+                        dreamed_actions_sampled=dreamed_actions_sampled,
+                        sample_mask=sample_mask,
+                        actor_baseline_values=critic_target_values,
+                    )
+                )
             if (
                 not skip_actor
                 and getattr(config, "actor_loss_mode", "reinforce") == "enumerate"
@@ -569,6 +635,41 @@ def dreamer_step(
             total_actor_loss = total_actor_loss + actor_loss
             total_critic_loss = total_critic_loss + critic_loss
 
+    normalizer_update = calculate_return_normalizer_update(
+        return_batches,
+        return_lo,
+        return_hi,
+        rate=return_norm_rate,
+    )
+    next_return_scale = return_scale
+    next_ret_lo = return_lo
+    next_ret_hi = return_hi
+    if normalizer_update is not None:
+        next_return_scale, next_ret_lo, next_ret_hi = normalizer_update
+
+        # The reference updates its return normalizer from all imagination
+        # starts before evaluating the current policy loss. Critic losses do
+        # not depend on this scale, so only the default REINFORCE actor loss
+        # needs to be recomputed after the combined percentile is known.
+        if reinforce_actor_batches:
+            recomputed_actor_losses = []
+            for actor_batch in reinforce_actor_batches:
+                recomputed_actor_loss, _entropy = compute_reinforce_actor_loss(
+                    actor_batch.dreamed_values,
+                    actor_batch.lambda_returns,
+                    actor_batch.dreamed_continues,
+                    actor_batch.dreamed_actions_logits,
+                    actor_batch.dreamed_actions_sampled,
+                    next_return_scale,
+                    imagination_discount,
+                    actor_entropy_coef=actor_entropy_coef,
+                    normalize_advantages=config.normalize_advantages,
+                    sample_mask=actor_batch.sample_mask,
+                    actor_baseline_values=actor_batch.actor_baseline_values,
+                )
+                recomputed_actor_losses.append(recomputed_actor_loss)
+            total_actor_loss = torch.stack(recomputed_actor_losses).sum()
+
     # --- Replay critic grounding ---
     if (
         critic_replay_scale > 0.0
@@ -702,5 +803,7 @@ def dreamer_step(
         total_critic_loss=total_critic_loss,
         metrics=metrics,
         replay_representation_loss=replay_representation_loss,
-        last_lambda_returns=last_lambda_returns,
+        return_scale=next_return_scale,
+        ret_lo=next_ret_lo,
+        ret_hi=next_ret_hi,
     )

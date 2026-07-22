@@ -100,7 +100,7 @@ class Config:
     contdisc: bool = True
     num_dream_steps: int = 15
     actor_entropy_coef: float = 3e-4
-    normalize_advantages: bool = True
+    normalize_advantages: bool = False
     actor_loss_mode: str = "reinforce"  # reinforce, enumerate, qcritic, mpc_teacher
     actor_enum_horizon: int = 3
     actor_enum_temperature: float = 0.25

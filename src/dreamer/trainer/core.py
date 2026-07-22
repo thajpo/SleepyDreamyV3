@@ -111,9 +111,9 @@ class WorldModelTrainer:
         seed_everything(int(getattr(config, "seed", 0)) + 2000)
 
         # EMA For Actor Critic
-        self.S = 0.0
-        self.ret_lo = None
-        self.ret_hi = None
+        self.S = 1.0
+        self.ret_lo = 0.0
+        self.ret_hi = 0.0
         self.retnorm_rate = 0.01
 
         # Model Init
@@ -268,9 +268,9 @@ class WorldModelTrainer:
                 self.ret_hi,
             )
             self.train_step = chk["step"]
-            self.S = chk["return_scale"]
-            self.ret_lo = chk["ret_lo"]
-            self.ret_hi = chk["ret_hi"]
+            self.S = float(chk["return_scale"])
+            self.ret_lo = float(chk["ret_lo"] or 0.0)
+            self.ret_hi = float(chk["ret_hi"] or 0.0)
             self.best_eval_score = chk["best_eval_score"]
             self.best_eval_step = chk["best_eval_step"]
             checkpoint_metric = chk["best_eval_metric"]
@@ -485,15 +485,20 @@ class WorldModelTrainer:
                     bool(self.config.research_gradient_diagnostics)
                     and self.train_step % self.log_every == 0
                 ),
+                return_lo=self.ret_lo,
+                return_hi=self.ret_hi,
+                return_norm_rate=self.retnorm_rate,
             )
             total_wm_loss = result.total_wm_loss
             total_actor_loss = result.total_actor_loss
             total_critic_loss = result.total_critic_loss
             metrics = result.metrics
 
-            # Update return normalization EMA
-            if result.last_lambda_returns is not None:
-                self.update_return_scale(result.last_lambda_returns)
+            if result.return_scale is not None:
+                assert result.ret_lo is not None and result.ret_hi is not None
+                self.S = result.return_scale
+                self.ret_lo = result.ret_lo
+                self.ret_hi = result.ret_hi
 
             # Backprop
             assert (
@@ -763,22 +768,6 @@ class WorldModelTrainer:
         else:
             self._wm_ac_counter = 0
             return False
-
-    def update_return_scale(self, lambda_returns, decay=0.99):
-        """Update percentile-based return normalization EMA (DreamerV3 Appendix B)."""
-        flat = lambda_returns.detach().reshape(-1)
-        lo_batch = torch.quantile(flat, 0.05).item()
-        hi_batch = torch.quantile(flat, 0.95).item()
-
-        if self.ret_lo is None or self.ret_hi is None:
-            self.ret_lo = lo_batch
-            self.ret_hi = hi_batch
-        else:
-            rate = self.retnorm_rate
-            self.ret_lo = (1.0 - rate) * self.ret_lo + rate * lo_batch
-            self.ret_hi = (1.0 - rate) * self.ret_hi + rate * hi_batch
-
-        self.S = max(1.0, float(self.ret_hi - self.ret_lo))
 
     def get_cosine_schedule(self, max_val: float, min_val: float) -> float:
         """Cosine schedule from max_val to min_val over training."""

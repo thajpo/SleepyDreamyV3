@@ -10,6 +10,7 @@ from .initialization import (
 from .losses import (
     compute_wm_loss,
     compute_actor_critic_losses,
+    compute_reinforce_actor_loss,
     compute_q_actor_critic_losses,
 )
 from .dreaming import (

@@ -279,9 +279,53 @@ def compute_actor_critic_losses(
         critic_loss += critic_ema_coef * ema_reg_loss
     # -----------------------------------------------
 
-    # Actor Loss: Policy gradient with lambda returns as advantage. DreamerV3
-    # normalizes advantages; without centering, CartPole's mostly +1 imagined
-    # rewards can reinforce arbitrary early samples and collapse entropy.
+    actor_loss, entropy = compute_reinforce_actor_loss(
+        dreamed_values,
+        lambda_returns,
+        dreamed_continues,
+        dreamed_actions_logits,
+        dreamed_actions_sampled,
+        S,
+        gamma,
+        actor_entropy_coef=actor_entropy_coef,
+        normalize_advantages=normalize_advantages,
+        sample_mask=sample_mask,
+        actor_baseline_values=actor_baseline_values,
+    )
+
+    return actor_loss, critic_loss, entropy
+
+
+def compute_reinforce_actor_loss(
+    dreamed_values,
+    lambda_returns,
+    dreamed_continues,
+    dreamed_actions_logits,
+    dreamed_actions_sampled,
+    S,
+    gamma,
+    actor_entropy_coef=0.003,
+    normalize_advantages=True,
+    sample_mask=None,
+    actor_baseline_values=None,
+):
+    """Compute the discrete REINFORCE loss for one imagined start batch."""
+    H, Bsz = lambda_returns.shape[:2]
+    H_train = max(1, H)
+    continue_probs = torch.sigmoid(dreamed_continues).detach()
+    discount = gamma * continue_probs
+    weight_prefix = torch.ones(1, Bsz, device=discount.device, dtype=discount.dtype)
+    if H > 1:
+        weights = torch.cumprod(
+            torch.cat([weight_prefix, discount[:-1]], dim=0), dim=0
+        )
+    else:
+        weights = weight_prefix
+
+    # DreamerV3 divides returns by a running percentile span. The optional
+    # per-batch z-score is retained for historical configurations, but the
+    # source-conforming default leaves it disabled.
+    lambda_returns_train = lambda_returns[:H_train]
     baseline_values = (
         dreamed_values
         if actor_baseline_values is None
@@ -319,7 +363,7 @@ def compute_actor_critic_losses(
         actor_loss = per_step_actor.mean()
         entropy = entropy.mean()
 
-    return actor_loss, critic_loss, entropy
+    return actor_loss, entropy
 
 
 def compute_q_actor_critic_losses(
