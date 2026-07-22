@@ -4865,3 +4865,87 @@ one-update multiprocess CPU smoke. The smoke composed both reference modes,
 collected two episodes, published model version zero, stopped its collector,
 and exited normally. The frozen seed-0 canary is the next experiment; no long
 run has yet tested the learning hypothesis.
+
+### Coupled reference observation-posterior canary result
+
+The preregistered seed-0 canary completed normally under
+`experiments/2026-07-22_cartpole_reference_observation_posterior_seed0_3500/`
+from clean source `73bf922f322d1f4d04f19ae42784d407b512c086`.
+Its manifest run ID is `81458cd5f703460d823206da6b12bc92` and its MLflow
+run ID is `7f08978bc00f4ccd9423cc60c95b9f42`. It consumed 3,500 learner
+updates and 21,865 environment transitions in 1,039.9 seconds. Relative to the
+state-sum canary, only the coupled vector-encoder and posterior modes changed.
+
+The complete deterministic 20-episode evaluation curve was:
+
+```text
+step:    100  200  300  400  500  600  700  800  900 1000 1100 1200
+return:  9.4  9.4 9.35 9.35 9.35 9.35 9.35 9.35 9.35  9.4 79.2 85.6
+
+step:   1300 1400 1500 1600 1700 1800 1900 2000 2100 2200 2300 2400
+return: 94.15 148.9 115.4 103.05 134.95 161.0 400.2 159.4 500.0 500.0 496.25 500.0
+
+step:   2500 2600 2700 2800 2900 3000 3100 3200 3300 3400 3500
+return: 500.0 500.0 488.95 497.45 500.0 500.0 500.0 500.0 500.0 500.0 500.0
+```
+
+The run passes the frozen behavior-retention gate. It first crossed 450 at
+update 2,100, never fell below 488.95 afterward, finished at 500, and has a
+best-to-final gap of zero. This is materially different from the state-sum-
+only canary, which first crossed 450 at update 3,100 and fell to 289.85 by
+update 3,500. The coupled architecture is therefore associated with both much
+earlier acquisition and retention through another 1,400 learner updates in
+this seed.
+
+The acquisition trajectory remains highly unstable. Return changed from 400.2
+at update 1,900 to 159.4 at update 2,000 and 500 at update 2,100. None of the
+coarse logged scalar losses explains this swing directly: actor entropy stayed
+between approximately 0.39 and 0.47, world-model loss between 2.15 and 2.75,
+and critic loss between 3.62 and 5.56 over updates 1,900--2,100. Solved endpoint
+retention does not make this within-run oscillation unimportant.
+
+The frozen endpoint probes completed but were right-censored by perfect
+behavior. The 20-seed continuation probe under
+`experiments/2026-07-22_cartpole_reference_observation_posterior_continuation_probe/`
+scored 500 on all seeds: 10,000 transitions, 20 time-limit truncations, and no
+physical terminal transitions, so failure ROC AUC is undefined. Live posterior
+and prior effective discounts were 0.9960 and 0.9960 against the 0.997 target.
+The five-seed policy-target probe under
+`experiments/2026-07-22_cartpole_reference_observation_posterior_policy_q_probe/`
+also scored 500 on every episode. It found no trusted-actionable actor states,
+so target/real accuracy is undefined. On all 2,500 safe-corridor states the
+actor used each action exactly 1,250 times, agreed with 98.1% of 911 confident
+policy targets, and had one-step state MSE 0.00833, approximately 40 times lower
+than the state-sum-only final checkpoint's 0.3345.
+
+These censored probes neither pass nor fail the preregistered latent boundary
+thresholds. Per user direction, multi-seed replication and a synthetic or
+perturbed near-failure coverage benchmark are explicit TODOs rather than the
+active investigation. No further training sweep is selected here.
+
+### Preregistered fixed-history instability diagnostic
+
+- **Question:** what changed between the update-2,000 actor that scored 159.4
+  and the update-2,500 actor that scored 500, despite both belonging to one
+  uninterrupted run?
+- **Evidence and fixed distribution:** collect five deterministic trajectories
+  from `checkpoint_step_2000.pt` on seeds 17--21, then replay exactly those
+  histories through target checkpoints 2,000, 2,500, and final 3,500. Use the
+  existing fixed-history probe with real counterfactual rollout horizon 30,
+  model horizon 3, and 64 sampled policy-conditioned returns per forced first
+  action. This is read-only and starts no trainer or collector.
+- **Primary readouts:** on the identical physical states, compare actor/trusted-
+  real balanced accuracy, policy-target/trusted-real accuracy, actor/target
+  agreement, target action-margin magnitude, and current-posterior/one-step-
+  prior/one-step-posterior state reconstruction errors. Preserve absolute-cart-
+  position stratification so easier solved-policy state coverage cannot explain
+  a difference.
+- **Interpretation:** improved state errors select representation/dynamics
+  drift; stable state errors with improved target/real accuracy select critic
+  or imagined-return drift; stable targets with changed actor agreement select
+  actor drift. Several boundaries may move together because shared world-model
+  updates change both the actor input and imagined training distribution.
+- **Stop rule:** one fixed history set and the three existing checkpoints. Do
+  not launch seeds, retraining, optimizer changes, or a new benchmark from this
+  diagnostic alone. Use the result to preregister one instability-specific
+  causal test.
