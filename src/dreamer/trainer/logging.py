@@ -210,6 +210,16 @@ def log_step_metrics(
 
             m["wm/reward_head/loss"] = reward
             m["wm/continue_head/loss"] = cont
+            terminal_rows = sum(
+                tensor.numel() for tensor in metrics.continue_terminal_probs
+            )
+            live_rows = sum(tensor.numel() for tensor in metrics.continue_live_probs)
+            continuation_rows = terminal_rows + live_rows
+            if continuation_rows:
+                m["research/continue/batch_has_terminal"] = float(terminal_rows > 0)
+                m["research/continue/batch_sampled_terminal_fraction"] = (
+                    terminal_rows / continuation_rows
+                )
             if metrics.continue_terminal_weights:
                 terminal_weights = torch.cat(metrics.continue_terminal_weights)
                 terminal_probs = torch.cat(metrics.continue_terminal_probs)

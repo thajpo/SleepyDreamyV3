@@ -77,6 +77,7 @@ def test_cli_resume_restores_checkpoint_model_and_target_semantics(tmp_path):
             "models.rssm_core=legacy",
             "models.continue_head_layers=0",
             "train.critic_slow_target=true",
+            "train.replay_sequence_mode=episode",
         ],
     )
     assert original.returncode == 0, original.stdout + original.stderr
@@ -95,11 +96,13 @@ def test_cli_resume_restores_checkpoint_model_and_target_semantics(tmp_path):
     assert resumed_config["rssm_core"] == "legacy"
     assert resumed_config["continue_head_layers"] == 0
     assert resumed_config["critic_slow_target"] is True
+    assert resumed_config["replay_sequence_mode"] == "episode"
     assert "continue_predictor.weight" in resumed_checkpoint["world_model"]
     assert "_W_ir" in resumed_checkpoint["world_model"]
     assert resumed_checkpoint["config_snapshot"]["rssm_core"] == "legacy"
     assert resumed_checkpoint["config_snapshot"]["continue_head_layers"] == 0
     assert resumed_checkpoint["config_snapshot"]["critic_slow_target"] is True
+    assert resumed_checkpoint["config_snapshot"]["replay_sequence_mode"] == "episode"
 
 
 def test_initial_model_update_is_published_to_each_collector(tmp_path):

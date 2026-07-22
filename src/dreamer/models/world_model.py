@@ -244,7 +244,7 @@ class RSSMWorldModel(nn.Module):
         continue_logits = self.continue_predictor(h_z_joined)
         return obs_reconstruction, reward_logits, continue_logits, h_z_joined
 
-    def forward(self, tokens, action):
+    def forward(self, tokens, action, is_first=None):
         """
         Performs a full world model observe step for training.
 
@@ -257,11 +257,23 @@ class RSSMWorldModel(nn.Module):
         Args:
             tokens: Encoder token features for current observation. Shape: (B, token_dim)
             action: One-hot action. Shape: (B, n_actions)
+            is_first: Optional boolean reset mask for rows that begin an episode.
 
         Returns:
             obs_reconstruction, reward_logits, continue_logits, h_z_joined,
             z_sample, prior_logits, posterior_logits
         """
+        # A sampled stream may cross an episode reset. Reset only the affected
+        # batch rows so BPTT remains intact within each episode and cannot leak
+        # across environment boundaries.
+        if is_first is not None:
+            reset = is_first.bool()
+            if reset.ndim != 1 or reset.shape[0] != self.h_prev.shape[0]:
+                raise ValueError("is_first must have shape (batch_size,)")
+            keep = (~reset).to(self.h_prev.dtype).unsqueeze(-1)
+            self.h_prev = self.h_prev * keep
+            self.z_prev = self.z_prev * keep.unsqueeze(-1)
+
         # 1. Step GRU using PREVIOUS z and action
         z_prev_flat = self.z_prev.view(self.z_prev.size(0), -1)
         z_prev_embed = self.z_embedding(z_prev_flat)

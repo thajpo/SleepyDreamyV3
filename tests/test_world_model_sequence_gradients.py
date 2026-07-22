@@ -63,3 +63,40 @@ def test_observe_returns_raw_posterior_logits_for_single_unimix_in_loss():
 
     returned_posterior_logits = output[6]
     assert torch.equal(returned_posterior_logits, captured["raw"])
+
+
+def test_is_first_resets_selected_rows_and_blocks_cross_episode_gradients():
+    cfg = Config(
+        d_hidden=16,
+        num_latents=4,
+        rnn_n_blocks=1,
+        n_observations=4,
+        n_actions=2,
+        use_pixels=False,
+        rssm_core="reference",
+    )
+    encoder, world_model = initialize_world_model("cpu", cfg, batch_size=2)
+    first_tokens = encoder(torch.randn(2, cfg.n_observations))
+    first_output = world_model(
+        first_tokens,
+        torch.tensor([[1.0, 0.0], [1.0, 0.0]]),
+    )
+    first_h = world_model.h_prev
+    first_z = first_output[4]
+    first_h.retain_grad()
+    first_z.retain_grad()
+
+    second_tokens = encoder(torch.randn(2, cfg.n_observations))
+    second_output = world_model(
+        second_tokens,
+        torch.tensor([[0.0, 1.0], [0.0, 1.0]]),
+        is_first=torch.tensor([True, False]),
+    )
+    second_output[3].sum().backward()
+
+    assert first_h.grad is not None
+    assert first_z.grad is not None
+    assert first_h.grad[0].norm().item() == pytest.approx(0.0)
+    assert first_z.grad[0].norm().item() == pytest.approx(0.0)
+    assert first_h.grad[1].norm().item() > 0.0
+    assert first_z.grad[1].norm().item() > 0.0

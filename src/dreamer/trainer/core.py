@@ -194,6 +194,7 @@ class WorldModelTrainer:
             gamma=config.gamma,
             compute_future_returns=config.critic_real_return_scale > 0.0,
             throttle_collection=True,
+            sequence_mode=config.replay_sequence_mode,
         )
 
         self.batch_size = config.batch_size  # needed by get_data_from_buffer
@@ -305,6 +306,7 @@ class WorldModelTrainer:
         batch_states = []
         batch_actions = []
         batch_rewards = []
+        batch_is_first = []
         batch_is_last = []
         batch_is_terminal = []
         batch_future_returns = []
@@ -321,6 +323,7 @@ class WorldModelTrainer:
             future_returns,
             continue_weights,
             mask,
+            is_first,
         ) in raw_batch:
             if self.use_pixels and pixels is not None:
                 target_size = self.config.encoder_cnn_target_size
@@ -333,6 +336,7 @@ class WorldModelTrainer:
             batch_states.append(torch.from_numpy(states))
             batch_actions.append(torch.from_numpy(actions))
             batch_rewards.append(torch.from_numpy(rewards))
+            batch_is_first.append(torch.from_numpy(is_first))
             batch_is_last.append(torch.from_numpy(is_last))
             batch_is_terminal.append(torch.from_numpy(is_terminal))
             if future_returns is not None:
@@ -360,6 +364,7 @@ class WorldModelTrainer:
             states=states_out,
             actions=torch.stack(batch_actions).to(self.device),
             rewards=torch.stack(batch_rewards).to(self.device),
+            is_first=torch.stack(batch_is_first).to(self.device),
             is_last=torch.stack(batch_is_last).to(self.device),
             is_terminal=torch.stack(batch_is_terminal).to(self.device),
             future_returns=future_returns_out,

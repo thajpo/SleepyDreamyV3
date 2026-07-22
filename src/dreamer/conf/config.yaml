@@ -148,6 +148,7 @@ train:
   min_buffer_episodes: 64
   steps_per_weight_sync: 5
   replay_burn_in: 8
+  replay_sequence_mode: stream  # reference-style windows may cross episode resets
 
   # Replay ratio gating (DreamerV3 paper)
   replay_ratio: 1.0  # replayed non-burn-in transitions per raw env frame

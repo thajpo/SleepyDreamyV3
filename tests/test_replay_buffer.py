@@ -37,6 +37,9 @@ def test_short_episode_is_padded_and_masked():
 
     assert batch.states.shape == (1, 5, 2)
     assert torch.equal(batch.mask[0], torch.tensor([1, 1, 1, 0, 0]).float())
+    assert torch.equal(
+        batch.is_first[0], torch.tensor([True, False, False, False, False])
+    )
     assert torch.equal(batch.is_terminal[0, 3:], torch.ones(2, dtype=torch.bool))
     assert torch.equal(batch.future_returns[0, 3:], torch.zeros(2))
     assert torch.equal(
@@ -153,6 +156,81 @@ def test_future_returns_are_not_stored_when_disabled():
 
     assert batch.future_returns is None
     assert replay.buffer[0][7] is None
+
+
+def test_stream_enumerates_every_start_and_repeats_interior_terminal(monkeypatch):
+    replay = EpisodeReplayBuffer(
+        data_queue=None,
+        max_episodes=10,
+        min_episodes=1,
+        sequence_length=3,
+        sequence_mode="stream",
+    )
+    first = list(_episode(4, marker=10.0))
+    first[5][-1] = True
+    second = list(_episode(4, marker=20.0))
+    replay.add_episode((*first, 0, 1))
+    replay.add_episode((*second, 0, 2))
+
+    candidates = replay._stream_start_candidates()
+    assert sum(candidate[2] for candidate in candidates) == 6
+
+    terminal_appearances = 0
+    for candidate in candidates:
+        for offset in range(candidate[2]):
+            monkeypatch.setattr(
+                "dreamer.runtime.replay_buffer.random.randint",
+                lambda _lo, _hi, value=offset: value,
+            )
+            terminal_appearances += int(
+                replay._sample_stream_subsequence(candidate)[5].sum()
+            )
+    assert terminal_appearances == replay.sequence_length
+
+
+def test_stream_crosses_reset_with_aligned_fields_and_unit_weights(monkeypatch):
+    replay = EpisodeReplayBuffer(
+        data_queue=None,
+        max_episodes=10,
+        min_episodes=1,
+        sequence_length=4,
+        sequence_mode="stream",
+        compute_future_returns=True,
+        gamma=0.5,
+    )
+    first = list(_episode(3, marker=10.0))
+    second = list(_episode(4, marker=20.0))
+    replay.add_episode((*first, 7, 3))
+    replay.add_episode((*second, 7, 4))
+    candidate = replay._stream_start_candidates()[0]
+    monkeypatch.setattr(
+        "dreamer.runtime.replay_buffer.random.randint", lambda *_args: 1
+    )
+
+    sample = replay._sample_stream_subsequence(candidate)
+
+    assert np.array_equal(sample[1][:, 0], np.array([10, 10, 20, 20]))
+    assert np.array_equal(sample[3], np.array([1, 2, 0, 1], dtype=np.float32))
+    assert np.array_equal(sample[6], np.array([2, 0, 2.75, 3.5], dtype=np.float32))
+    assert np.array_equal(sample[7], np.ones(4, dtype=np.float32))
+    assert np.array_equal(sample[8], np.ones(4, dtype=np.float32))
+    assert np.array_equal(sample[9], np.array([True, False, True, False]))
+
+
+def test_stream_never_crosses_collectors_or_episode_id_gaps():
+    replay = EpisodeReplayBuffer(
+        data_queue=None,
+        max_episodes=10,
+        min_episodes=1,
+        sequence_length=3,
+        sequence_mode="stream",
+    )
+    replay.add_episode((*_episode(2, marker=1.0), 0, 1))
+    replay.add_episode((*_episode(2, marker=2.0), 1, 1))
+    replay.add_episode((*_episode(2, marker=3.0), 0, 3))
+
+    assert replay._stream_start_candidates() == []
+    assert not replay.is_ready
 
 
 def test_background_collection_allows_one_episode_of_budget_debt():

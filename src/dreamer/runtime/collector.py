@@ -275,6 +275,8 @@ def collect_experiences(
                 is_last_np,
                 is_terminal_np,
                 episode_length,
+                collector_id,
+                episode_count,
             )
             while not stop_event.is_set():
                 try:

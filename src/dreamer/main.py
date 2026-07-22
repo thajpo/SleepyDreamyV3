@@ -238,6 +238,7 @@ def resolve_resume_config(
             critic_slow_target=checkpoint_config.critic_slow_target,
             balance_continuation=checkpoint_config.balance_continuation,
             continuation_balance_rate=checkpoint_config.continuation_balance_rate,
+            replay_sequence_mode=checkpoint_config.replay_sequence_mode,
         )
 
     world_model_state = checkpoint.get("world_model", {})
@@ -261,6 +262,7 @@ def resolve_resume_config(
         continue_head_layers=continue_head_layers,
         critic_slow_target=True,
         balance_continuation=False,
+        replay_sequence_mode="episode",
     )
 
 

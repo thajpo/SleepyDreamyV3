@@ -22,6 +22,7 @@ def test_hydra_yaml_defines_every_runtime_field():
     assert runtime_config.b_end == 20
     assert runtime_config.rssm_core == "reference"
     assert runtime_config.continue_head_layers == 1
+    assert runtime_config.replay_sequence_mode == "stream"
     assert runtime_config.critic_slow_target is False
     validate_config(runtime_config)
 
@@ -34,6 +35,10 @@ def test_hydra_yaml_defines_every_runtime_field():
         (replace(Config(), d_hidden=63), "divisible by 16"),
         (replace(Config(), rssm_core="mystery"), "rssm_core"),
         (replace(Config(), continue_head_layers=2), "continue_head_layers"),
+        (
+            replace(Config(), replay_sequence_mode="mystery"),
+            "replay_sequence_mode",
+        ),
         (replace(Config(), actor_loss_mode="mystery"), "actor_loss_mode"),
         (
             replace(Config(), gamma=0.95, horizon=333, contdisc=True),
@@ -72,6 +77,7 @@ def test_resume_inherits_historical_checkpoint_semantics(tmp_path):
     snapshot.pop("rssm_core")
     snapshot.pop("continue_head_layers")
     snapshot.pop("critic_slow_target")
+    snapshot.pop("replay_sequence_mode")
     (run_dir / "config.json").write_text(json.dumps(snapshot))
 
     resumed = resolve_resume_config(
@@ -80,6 +86,7 @@ def test_resume_inherits_historical_checkpoint_semantics(tmp_path):
             rssm_core="reference",
             continue_head_layers=1,
             critic_slow_target=False,
+            replay_sequence_mode="stream",
         ),
         checkpoint_path,
         checkpoint={"world_model": {"continue_predictor.weight": object()}},
@@ -88,6 +95,7 @@ def test_resume_inherits_historical_checkpoint_semantics(tmp_path):
     assert resumed.rssm_core == "legacy"
     assert resumed.continue_head_layers == 0
     assert resumed.critic_slow_target is True
+    assert resumed.replay_sequence_mode == "episode"
 
 
 def test_resume_requires_explicit_semantic_migration(tmp_path):

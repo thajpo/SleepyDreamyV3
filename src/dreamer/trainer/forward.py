@@ -379,7 +379,7 @@ def dreamer_step(
             posterior_z_sample,
             prior_logits,
             posterior_logits,
-        ) = world_model(tokens_t, action_t)
+        ) = world_model(tokens_t, action_t, is_first=batch.is_first[:, t_step])
 
         # World model loss
         wm_loss, wm_loss_dict = compute_wm_loss(

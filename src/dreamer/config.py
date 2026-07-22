@@ -162,6 +162,9 @@ class Config:
     min_buffer_episodes: int = 64
     steps_per_weight_sync: int = 5
     replay_burn_in: int = 8
+    # Episode preserves historical replay snapshots. Authored Hydra runs use
+    # reference-style per-collector streams that can cross reset boundaries.
+    replay_sequence_mode: str = "episode"  # episode, stream
 
     # ===== Training: replay ratio gating =====
     replay_ratio: float = 1.0
@@ -289,6 +292,8 @@ def validate_config(cfg: Config) -> None:
         errors.append("replay_burn_in must satisfy 0 <= burn-in < sequence_length")
     if cfg.min_buffer_episodes > cfg.replay_buffer_size:
         errors.append("min_buffer_episodes cannot exceed replay_buffer_size")
+    if cfg.replay_sequence_mode not in {"episode", "stream"}:
+        errors.append("replay_sequence_mode must be 'episode' or 'stream'")
     if cfg.replay_ratio <= 0:
         errors.append("replay_ratio must be > 0")
     if not 0.0 <= cfg.recent_fraction <= 1.0:

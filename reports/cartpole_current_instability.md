@@ -3229,6 +3229,38 @@ the natural class prior. This is variance reduction, not class rebalancing.
   a sufficient stability fix and does not authorize combining it with balanced
   BCE, logit correction, optimizer changes, or larger batches.
 
+#### Cross-reset replay-stream mechanical result
+
+The implementation gate passes before launch. Canonical Hydra-authored runs now
+select `stream`, while the dataclass and historical/missing snapshot fallback
+remain `episode`; resume restores the checkpoint's authored replay semantics.
+Collector payloads carry collector and episode IDs. Replay groups only
+consecutive episodes from the same collector, samples uniformly over every
+valid stream start (including starts whose sequence crosses a reset), emits
+unit continuation weights, and marks the sampled first row plus each real reset
+with `is_first`. The observe path zeros deterministic and stochastic carries
+only for marked batch rows, retaining within-episode BPTT and blocking gradient
+flow across resets. Existing `is_last` pair masks independently prevent replay
+critic targets from crossing those boundaries.
+
+Synthetic enumeration confirms six valid length-3 starts in an eight-row
+two-episode stream and exactly three appearances of an interior terminal. Tests
+also cover aligned observation/action/reward/terminal/future-return fields,
+unit stream weights, recent/uniform selection compatibility, no cross-collector
+or episode-ID-gap composition, episode-mode padding/importance behavior, and
+row-selective recurrent gradient blocking. Focused runtime/config/resume tests
+passed (`48`), the full fast suite passed (`162`), compile and the supported
+scoped type gate passed, and a one-update canonical stream-mode CPU process
+smoke completed with its collector stopped.
+
+A bounded sampler microprofile used the canary capacity of 512 stored episodes,
+episode length 176, `B=8`, `T=16`, and 1,000 batch draws. Episode mode required
+`0.053 ms` per batch and produced 40 terminal-bearing batches; stream mode
+required `0.142 ms` per batch and produced 521 terminal-bearing batches. The
+additional `0.089 ms` of replay bookkeeping is negligible beside model
+forward/backward, while the observed terminal exposure matches the predicted
+roughly tenfold increase in terminal-bearing updates.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
