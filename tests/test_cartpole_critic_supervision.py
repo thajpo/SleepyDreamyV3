@@ -3,6 +3,7 @@ import pytest
 import torch
 
 from scripts.probe_cartpole_critic_supervision import (
+    ReferenceValueHead,
     episode_split,
     trusted_remaining_return,
 )
@@ -40,3 +41,12 @@ def test_trusted_remaining_return_is_finite_and_positive():
         env.close()
 
     assert 1.0 < value <= 50.0
+
+
+def test_reference_value_head_has_three_normalized_hidden_layers():
+    head = ReferenceValueHead(d_in=7, d_hidden=16, d_out=5)
+
+    assert sum(isinstance(layer, torch.nn.RMSNorm) for layer in head.mlp) == 3
+    assert head(torch.randn(4, 7)).shape == (4, 5)
+    assert torch.count_nonzero(head.mlp[-1].weight) == 0
+    assert torch.count_nonzero(head.mlp[-1].bias) == 0

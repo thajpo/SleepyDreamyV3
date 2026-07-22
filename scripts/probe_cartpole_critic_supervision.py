@@ -25,6 +25,32 @@ from dreamer.models import (
 from dreamer.models.encoder import ThreeLayerMLP
 
 
+class ReferenceValueHead(nn.Module):
+    """Official-style value MLP: three RMSNorm/SiLU hidden layers."""
+
+    def __init__(self, d_in: int, d_hidden: int, d_out: int):
+        super().__init__()
+        layers: list[nn.Module] = []
+        width = d_in
+        for _ in range(3):
+            layers.extend(
+                (
+                    nn.Linear(width, d_hidden),
+                    nn.RMSNorm(d_hidden),
+                    nn.SiLU(),
+                )
+            )
+            width = d_hidden
+        output = nn.Linear(width, d_out)
+        nn.init.zeros_(output.weight)
+        nn.init.zeros_(output.bias)
+        layers.append(output)
+        self.mlp = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.mlp(x)
+
+
 def heuristic_action(state: np.ndarray) -> int:
     x, x_dot, theta, theta_dot = [float(v) for v in state]
     score = 0.8 * x + 1.0 * x_dot + 6.0 * theta + 1.0 * theta_dot
@@ -198,6 +224,20 @@ def initialize_state_critic(cfg, device: str) -> nn.Module:
     return critic
 
 
+def initialize_reference_critic(cfg, device: str, *, true_state: bool) -> nn.Module:
+    num_classes = cfg.d_hidden // 16
+    d_in = (
+        cfg.n_observations
+        if true_state
+        else (cfg.d_hidden * cfg.rnn_n_blocks) + (cfg.num_latents * num_classes)
+    )
+    return ReferenceValueHead(
+        d_in=d_in,
+        d_hidden=cfg.d_hidden,
+        d_out=cfg.num_bins,
+    ).to(device)
+
+
 def pearson(predicted: torch.Tensor, target: torch.Tensor) -> float | None:
     pred = predicted.detach().float().cpu().numpy()
     true = target.detach().float().cpu().numpy()
@@ -270,6 +310,11 @@ def main() -> None:
     )
     parser.add_argument("--test-fraction", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=17)
+    parser.add_argument(
+        "--compare-reference-head",
+        action="store_true",
+        help="also fit the official three-layer RMSNorm/SiLU value head",
+    )
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -319,6 +364,40 @@ def main() -> None:
         args.lr,
     )
 
+    reference_latent_result = None
+    reference_state_result = None
+    if args.compare_reference_head:
+        torch.manual_seed(args.seed)
+        reference_latent_critic = initialize_reference_critic(
+            cfg, device, true_state=False
+        )
+        reference_latent_result = train_critic(
+            reference_latent_critic,
+            latents,
+            targets,
+            bins,
+            train_indices,
+            test_indices,
+            args.epochs,
+            args.batch_size,
+            args.lr,
+        )
+        torch.manual_seed(args.seed)
+        reference_state_critic = initialize_reference_critic(
+            cfg, device, true_state=True
+        )
+        reference_state_result = train_critic(
+            reference_state_critic,
+            states,
+            targets,
+            bins,
+            train_indices,
+            test_indices,
+            args.epochs,
+            args.batch_size,
+            args.lr,
+        )
+
     summary = {
         "checkpoint": str(args.checkpoint.resolve()),
         "device": device,
@@ -333,6 +412,8 @@ def main() -> None:
         "target_mean": float(targets.mean().cpu()),
         "posterior_latent_critic": latent_result,
         "true_state_critic": state_result,
+        "reference_posterior_latent_critic": reference_latent_result,
+        "reference_true_state_critic": reference_state_result,
     }
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "summary.json").write_text(json.dumps(summary, indent=2))
