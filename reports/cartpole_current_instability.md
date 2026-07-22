@@ -3039,6 +3039,64 @@ used for discounting; it cannot treat balanced classification accuracy alone as
 calibration evidence. The behavior failure stops this seed and does not
 authorize the Q probe or a broad sweep.
 
+#### Preregistered reference-RSSM-core canary
+
+The next source/history audit found a concrete architecture regression in the
+recurrent dynamics path. Pinned reference commit `e3f0224` preprocesses the
+deterministic state, flattened stochastic state, and action independently with
+`Linear -> RMSNorm -> SiLU`; concatenates those features with each recurrent
+block's deterministic state; applies one grouped hidden projection followed by
+`RMSNorm -> SiLU`; and then uses one grouped projection for reset, candidate,
+and update gates. The current local `step_dynamics` instead sends one linear
+stochastic embedding plus the raw action through a conventional split-input
+GRU. It omits deterministic/action preprocessing and the normalized grouped
+hidden layer.
+
+This discrepancy has explicit repository history. Commit `a559e55` attempted
+to restore the three input preprocessors on 2026-02-28. It was removed from the
+working file so a pre-change 15k Pong checkpoint could resume, as recorded in
+`research_current.md`, and commit `9058140` then made that compatible file the
+new source while nominally adding posterior unimix. No indexed exact-comparison
+run evaluates the new recurrent architecture. The old patch was also only a
+partial port: it retained separate conventional GRU input/hidden projections
+and omitted the reference grouped hidden normalization. The intervention will
+therefore implement the pinned equation rather than cherry-pick that patch.
+
+- **Hypothesis:** the unnormalized legacy recurrent core makes the learned
+  transition representation unnecessarily sensitive to changing on-policy
+  state/action scales and contributes to the observed recovery-state model and
+  value drift. The reference grouped core will improve late CartPole behavior
+  stability.
+- **Causal variable:** replace only the recurrent `_core` calculation for new
+  authored runs with the pinned reference sequence: three independent
+  `Linear -> RMSNorm -> SiLU` inputs, grouped hidden projection,
+  `RMSNorm -> SiLU`, grouped three-gate projection, and the existing
+  `sigmoid(reset)`, `tanh(reset * candidate)`, `sigmoid(update - 1)` update.
+  Preserve stochastic size, deterministic size, block count, prior/posterior
+  heads, encoder/decoder, losses, optimizers, rates, replay, and benchmark
+  settings. Keep a legacy core mode for historical checkpoint construction;
+  resume must restore the checkpoint's mode unless semantic migration is
+  explicit.
+- **Mechanical gate:** equation-level tests must compare the grouped PyTorch
+  result with an explicit per-block calculation, establish output/gradient
+  shapes and recurrent gradient flow across multiple observed rows, prove that
+  authored Hydra selects the reference mode, and prove that historical
+  snapshots/checkpoints retain the legacy parameter layout. Focused/full tests,
+  compile/type gates, and a one-update process smoke must pass.
+- **Frozen run:** repeat seed 0 for 3,500 updates under the exact unbalanced
+  sequence-mean configuration and fixed 20-episode evaluation cohort, changing
+  only the RSSM core. Retain the one-thread host resource cap.
+- **Behavioral gate:** reach mean return `450`; never fall below `300`
+  afterward; final at least `400`; best-to-final gap at most `100`.
+- **Diagnostics:** regardless of behavior, run the deterministic final
+  continuation audit on seeds 17--36. Only if behavior passes, run the
+  final-policy fixed-history Q comparison, requiring Q/real accuracy at least
+  `0.592`, correlation at least `0.088`, and actor/Q agreement above `0.8`.
+- **Stop rule:** one seed only. Failure rejects reference-core conformance as a
+  sufficient stability fix and does not authorize stacking posterior/encoder
+  normalization, joint optimization, learning-rate warmup, or continuation
+  weighting.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
