@@ -114,6 +114,8 @@ class Config:
     mpc_teacher_margin_min: float = 0.0
     mpc_teacher_normalize_values: bool = True
     terminal_reward_penalty: float = 0.0
+    balance_continuation: bool = False
+    continuation_balance_rate: float = 0.01
 
     # ===== Training: loss coefficients =====
     beta_dyn: float = 1.0
@@ -297,6 +299,8 @@ def validate_config(cfg: Config) -> None:
             )
     if not 0.0 <= cfg.lam <= 1.0:
         errors.append("lam must be between 0 and 1")
+    if not 0.0 < cfg.continuation_balance_rate <= 1.0:
+        errors.append("continuation_balance_rate must be in (0, 1]")
     if cfg.b_end <= cfg.b_start:
         errors.append("b_end must be greater than b_start")
     if cfg.num_bins < 2:

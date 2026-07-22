@@ -112,7 +112,20 @@ def test_checkpoint_round_trip_restores_models_and_run_state(tmp_path):
         "best_eval_step": 12,
         "best_eval_metric": "episode_reward",
         "run_id": "manifest-test",
+        "continuation_terminal_ema": 0.5,
     }
+
+
+def test_checkpoint_round_trip_restores_continuation_prevalence(tmp_path):
+    path = _save(
+        tmp_path,
+        _components(),
+        continuation_terminal_ema=0.0125,
+    )
+
+    state = _load(path, _components())
+
+    assert state["continuation_terminal_ema"] == pytest.approx(0.0125)
 
 
 def test_checkpoint_carries_portable_config_snapshot(tmp_path):

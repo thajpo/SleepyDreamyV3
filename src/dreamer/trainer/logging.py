@@ -38,6 +38,10 @@ class StepMetrics:
     continue_terminal_weights: list[torch.Tensor] = field(default_factory=list)
     continue_terminal_probs: list[torch.Tensor] = field(default_factory=list)
     continue_live_probs: list[torch.Tensor] = field(default_factory=list)
+    continue_balance_batch_fraction: Optional[float] = None
+    continue_balance_ema: Optional[float] = None
+    continue_balance_terminal_scale: Optional[float] = None
+    continue_balance_live_scale: Optional[float] = None
     replay_loss: Optional[torch.Tensor] = None
     replay_ema_reg: Optional[torch.Tensor] = None
     replay_mc_loss: Optional[torch.Tensor] = None
@@ -218,6 +222,22 @@ def log_step_metrics(
             if metrics.continue_live_probs:
                 live_probs = torch.cat(metrics.continue_live_probs)
                 m["research/continue/live_probability"] = live_probs.mean().item()
+            if metrics.continue_balance_ema is not None:
+                assert metrics.continue_balance_batch_fraction is not None
+                assert metrics.continue_balance_terminal_scale is not None
+                assert metrics.continue_balance_live_scale is not None
+                m["research/continue/batch_terminal_fraction"] = float(
+                    metrics.continue_balance_batch_fraction
+                )
+                m["research/continue/terminal_fraction_ema"] = float(
+                    metrics.continue_balance_ema
+                )
+                m["research/continue/terminal_class_scale"] = float(
+                    metrics.continue_balance_terminal_scale
+                )
+                m["research/continue/live_class_scale"] = float(
+                    metrics.continue_balance_live_scale
+                )
             m["wm/rssm/kl_dynamics"] = dyn
             m["wm/rssm/kl_representation"] = rep
 

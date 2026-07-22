@@ -115,6 +115,7 @@ class WorldModelTrainer:
         self.ret_lo = 0.0
         self.ret_hi = 0.0
         self.retnorm_rate = 0.01
+        self.continuation_terminal_ema = 0.5
 
         # Model Init
         self.actor = initialize_actor(self.device, config)
@@ -266,11 +267,15 @@ class WorldModelTrainer:
                 self.S,
                 self.ret_lo,
                 self.ret_hi,
+                self.continuation_terminal_ema,
             )
             self.train_step = chk["step"]
             self.S = float(chk["return_scale"])
             self.ret_lo = float(chk["ret_lo"] or 0.0)
             self.ret_hi = float(chk["ret_hi"] or 0.0)
+            self.continuation_terminal_ema = float(
+                chk["continuation_terminal_ema"]
+            )
             self.best_eval_score = chk["best_eval_score"]
             self.best_eval_step = chk["best_eval_step"]
             checkpoint_metric = chk["best_eval_metric"]
@@ -492,6 +497,7 @@ class WorldModelTrainer:
                 return_lo=self.ret_lo,
                 return_hi=self.ret_hi,
                 return_norm_rate=self.retnorm_rate,
+                continuation_terminal_ema=self.continuation_terminal_ema,
             )
             total_wm_loss = result.total_wm_loss
             total_actor_loss = result.total_actor_loss
@@ -503,6 +509,8 @@ class WorldModelTrainer:
                 self.S = result.return_scale
                 self.ret_lo = result.ret_lo
                 self.ret_hi = result.ret_hi
+            if result.continuation_terminal_ema is not None:
+                self.continuation_terminal_ema = result.continuation_terminal_ema
 
             # Backprop
             assert (
@@ -762,6 +770,7 @@ class WorldModelTrainer:
             best_eval_metric=self.best_eval_metric,
             run_id=self.run_manifest_id,
             config_snapshot=asdict(self.config),
+            continuation_terminal_ema=self.continuation_terminal_ema,
         )
 
     def should_skip_ac_update(self) -> bool:

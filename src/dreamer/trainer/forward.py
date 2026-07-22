@@ -41,6 +41,7 @@ class ForwardResult:
     return_scale: Optional[float] = None
     ret_lo: Optional[float] = None
     ret_hi: Optional[float] = None
+    continuation_terminal_ema: Optional[float] = None
 
 
 @dataclass
@@ -132,6 +133,55 @@ def normalize_sequence_losses(
         total_actor_loss / imagination_starts,
         total_critic_loss / imagination_starts,
         normalized_representation_loss,
+    )
+
+
+def calculate_continuation_balance(
+    is_terminal: torch.Tensor,
+    mask: torch.Tensor,
+    inclusion_weights: torch.Tensor,
+    terminal_fraction_ema: float,
+    *,
+    enabled: bool,
+    rate: float,
+    minimum_fraction: float = 0.001,
+) -> tuple[torch.Tensor, float, float, float, float]:
+    """Update terminal prevalence and return scale-preserving BCE weights."""
+    if not 0.0 <= terminal_fraction_ema <= 1.0:
+        raise ValueError("terminal_fraction_ema must be between zero and one")
+    if not 0.0 < rate <= 1.0:
+        raise ValueError("continuation balance rate must be in (0, 1]")
+    if not 0.0 < minimum_fraction < 0.5:
+        raise ValueError("minimum_fraction must be in (0, 0.5)")
+
+    effective_weights = mask.float() * inclusion_weights
+    total_mass = effective_weights.sum()
+    terminal_mass = (effective_weights * is_terminal.float()).sum()
+    batch_fraction = float((terminal_mass / total_mass.clamp_min(1e-8)).item())
+    if not enabled:
+        return inclusion_weights, terminal_fraction_ema, batch_fraction, 1.0, 1.0
+
+    next_ema = (
+        (1.0 - rate) * float(terminal_fraction_ema) + rate * batch_fraction
+    )
+    bounded = min(1.0 - minimum_fraction, max(minimum_fraction, next_ema))
+    terminal_scale = 0.5 / bounded
+    live_scale = 0.5 / (1.0 - bounded)
+    class_weights = torch.where(
+        is_terminal.bool(),
+        torch.as_tensor(
+            terminal_scale, device=mask.device, dtype=inclusion_weights.dtype
+        ),
+        torch.as_tensor(
+            live_scale, device=mask.device, dtype=inclusion_weights.dtype
+        ),
+    )
+    return (
+        inclusion_weights * class_weights,
+        next_ema,
+        batch_fraction,
+        terminal_scale,
+        live_scale,
     )
 
 
@@ -228,6 +278,7 @@ def dreamer_step(
     return_lo: float = 0.0,
     return_hi: float = 0.0,
     return_norm_rate: float = 0.01,
+    continuation_terminal_ema: float = 0.5,
 ) -> ForwardResult:
     """One complete DreamerV3 forward pass over a batch.
 
@@ -285,6 +336,26 @@ def dreamer_step(
     replay_posterior_states_with_grad: list[torch.Tensor] = []
     replay_representation_loss = None
 
+    (
+        continuation_loss_weights,
+        next_continuation_terminal_ema,
+        batch_terminal_fraction,
+        terminal_class_scale,
+        live_class_scale,
+    ) = calculate_continuation_balance(
+        batch.is_terminal,
+        batch.mask,
+        batch.continue_weights,
+        continuation_terminal_ema,
+        enabled=bool(getattr(config, "balance_continuation", False)),
+        rate=float(getattr(config, "continuation_balance_rate", 0.01)),
+    )
+    if bool(getattr(config, "balance_continuation", False)):
+        metrics.continue_balance_batch_fraction = batch_terminal_fraction
+        metrics.continue_balance_ema = next_continuation_terminal_ema
+        metrics.continue_balance_terminal_scale = terminal_class_scale
+        metrics.continue_balance_live_scale = live_class_scale
+
     # --- RSSM rollout + per-timestep dreaming ---
     for t_step in range(T):
         if use_pixels and batch.pixels is not None:
@@ -325,7 +396,7 @@ def dreamer_step(
             device,
             use_pixels=use_pixels,
             sample_mask=sample_mask,
-            continue_loss_weights=batch.continue_weights[:, t_step],
+            continue_loss_weights=continuation_loss_weights[:, t_step],
         )
         valid_rows = sample_mask.bool()
         terminal_rows = valid_rows & is_terminal_t.bool()
@@ -859,4 +930,5 @@ def dreamer_step(
         return_scale=next_return_scale,
         ret_lo=next_ret_lo,
         ret_hi=next_ret_hi,
+        continuation_terminal_ema=next_continuation_terminal_ema,
     )

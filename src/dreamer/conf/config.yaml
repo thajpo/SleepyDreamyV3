@@ -101,6 +101,8 @@ train:
   mpc_teacher_margin_min: 0.0
   mpc_teacher_normalize_values: true
   terminal_reward_penalty: 0.0
+  balance_continuation: false
+  continuation_balance_rate: 0.01
 
   # Loss coefficients (DreamerV3 paper: βpred=1, βdyn=1, βrep=0.1)
   beta_dyn: 1.0
