@@ -2320,6 +2320,62 @@ source difference alone does not justify another online run.
   canary; it does not authorize actor, reward-head, optimizer, ramp, or replay-
   gradient changes.
 
+The paired comparison completed from clean probe commit `43a6ed6`; summaries
+are under `experiments/2026-07-22_cartpole_value_head_comparison/`. Both target
+policies used the same 4,096 states from 184 episodes and the same 897-state
+held-out episode split.
+
+| Target | Head | Latent test corr. | Latent test MAE | True-state test corr. | True-state test MAE |
+|---|---|---:|---:|---:|---:|
+| Always action 0 | Local | 0.957 | 0.502 | 0.944 | 0.689 |
+| Always action 0 | Reference | 0.947 | 0.481 | 0.978 | 0.327 |
+| Always action 1 | Local | 0.908 | 0.567 | 0.947 | 0.629 |
+| Always action 1 | Reference | 0.913 | 0.541 | 0.966 | 0.372 |
+
+The primary gate fails: the worse latent correlation improves by only `0.004`,
+not `0.10`, while action-0 correlation decreases. The reference head is much
+better on true physical state and slightly lowers latent MAE, so it remains a
+reasonable replication cleanup; it does not remove the deployed latent-value
+representability bottleneck measured here. No value-head training canary is
+authorized.
+
+#### Preregistered truncation-bootstrap correction
+
+Continuing the replay-target audit exposed a concrete semantic bug. Collector
+rows correctly preserve `is_last = terminated or truncated` separately from
+`is_terminal = terminated`. The replay lambda-return path then multiplies
+these flags into one continuation before constructing targets. Consequently a
+time-limit transition receives `reward` only, while the reference recurrence
+uses `reward + discount * bootstrap`; both correctly omit the bootstrap for a
+true physical terminal. This distinction matters specifically after CartPole
+starts reaching its 500-step time limit, although only sampled windows that
+contain the episode boundary receive the incorrect target.
+
+- **Hypothesis:** terminalizing CartPole's successful time-limit transitions
+  injects a solved-policy-specific low-value target into replay and contributes
+  to training away from solved behavior. Preserving the reference truncation
+  bootstrap will improve post-solve stability and final-policy action ordering.
+- **Causal variable:** change only replay lambda-return construction to accept
+  separate `is_last` and `is_terminal` tensors. Use `is_terminal` for the live
+  discount and `is_last` for the lambda recursion, exactly matching reference
+  commit `e3f0224`. Keep imagined returns, continuation training, pair masks,
+  online critic targets, model architecture, replay scale, optimizer settings,
+  and all benchmark hyperparameters unchanged.
+- **Mechanical gate:** focused recurrence tests must show that truncation
+  targets `reward + discount * bootstrap`, true termination targets `reward`,
+  ordinary lambda recursion is unchanged, and padded/cross-episode rows remain
+  masked. Full fast validation and a one-update process smoke must pass.
+- **Frozen run:** repeat the online-target seed-0 3,500-update command and fixed
+  20-episode evaluation cohort from the preceding canary.
+- **Behavioral gate:** reach mean return `450`; never fall below `300`
+  afterward; final at least `400`; best-to-final gap at most `100`.
+- **Boundary gate:** rerun the final-policy fixed-history comparison. Final
+  Q/real balanced accuracy must exceed the current `0.433`, Q/real correlation
+  must remain positive, and actor/Q agreement must remain above `0.8`.
+- **Stop rule:** one seed only. Failure rejects the truncation bootstrap as a
+  sufficient cause and does not authorize stacking value-head, optimizer-ramp,
+  or representation-gradient changes.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
