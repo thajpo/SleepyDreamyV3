@@ -4143,6 +4143,72 @@ states. This authorizes one isolated semantic correction.
   sufficient stability cause; do not combine value-head depth or a new replay
   intervention in the same run.
 
+#### Decoded-mean slow-regularizer canary result
+
+The correction is retained at source commit `81dc6ed`. It adds resume-safe
+`critic_ema_target` semantics, uses one shared detached target builder for
+imagined and replay value regularization, and preserves historical
+`distribution` behavior while authored Hydra runs select `mean_twohot`.
+Focused tests passed (`40`), the full fast suite passed (`195`), compile and
+the supported scoped type check passed, and the one-update multiprocess CPU
+smoke completed normally with the new mode resolved in its config.
+
+The frozen seed-0 run completed normally under
+`experiments/2026-07-22_cartpole_slow_mean_seed0_3500/`, with manifest run ID
+`882d31a600d34af2839a6a5fcfc750fb` and MLflow run ID
+`6cd5da56de444ee7aced1a6f1c814d50`. It used 3,500 learner updates, 21,450
+environment steps, and 1,012.1 seconds on ROCm. The manifest records clean
+source `81dc6ed`, `critic_ema_target=mean_twohot`, normal collector shutdown,
+and distinct best/final checkpoints.
+
+Behavior fails before the stability question: the policy never reaches the
+`475` solve threshold. It peaks at only `409.4` at update 1,200 and ends at
+`179.7`:
+
+| Update | 900 | 1,000 | 1,200 | 1,400 | 1,900 | 2,400 | 2,900 | 3,100 | 3,500 |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Mean return | 318.35 | 399.55 | **409.4** | 286.45 | 255.0 | 219.4 | 167.65 | 347.25 | **179.7** |
+
+The policy-target probe under
+`experiments/2026-07-22_cartpole_slow_mean_policy_q_probe/` also fails:
+
+| Metric | Best, update 1,200 | Final, update 3,500 |
+|---|---:|---:|
+| Three-seed mean return | 391.67 | 183.67 |
+| Statistically separated states | 466 | 106 |
+| Actor/target agreement there | 0.845 | **0.443** |
+| Separated actionable states | 164 | **84** |
+| Confident target/real balanced accuracy | **0.455** | **0.407** |
+| All-actionable target/real balanced accuracy | 0.513 | **0.443** |
+| Mean absolute target action margin | 0.177 | 0.985 |
+| One-step state MSE | 0.119 | 0.158 |
+
+Best and final target ordering are below chance or near chance; final also
+falls below the actor/target transfer threshold and the 100-state support
+floor. The failure is therefore coupled target-quality and actor-transfer
+degradation, not a stable critic whose policy head alone fails to fit.
+
+A post-run fixed-history mechanism check under
+`experiments/2026-07-22_cartpole_slow_mean_regularizer_probe/` confirms the
+intended code path operated but did not make the slow distribution itself
+point-like. Slow-target entropy is `2.123` at best and `1.736` at final, while
+the re-encoded reference targets have entropy `0.466` and `0.486`. At final,
+the hypothetical full-distribution and decoded-mean targets still have total
+variation `0.476` and gradient cosine `0.466`. Thus the intervention continued
+to deliver the materially different reference gradient throughout training;
+the negative result is not explained by the two contracts becoming equivalent.
+
+This rejects decoded-mean slow regularization as a sufficient stability fix
+and stops seeds 1 and 2. The source correction remains necessary for a faithful
+replication, but this isolated run deliberately preserved the historical split
+learning rates and legacy optimizer ownership. It therefore does not establish
+that the complete reference optimizer-plus-regularizer contract fails; nor
+does it authorize stacking that contract without a new, explicit integration
+hypothesis. The next audit should examine critic-target change rate versus
+actor update rate and joint optimizer ownership, because the stronger critic
+anchor exposes final actor/target agreement `0.443` under the current
+actor/critic rate ratio `3e-5/8e-5`.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
