@@ -3272,6 +3272,287 @@ additional `0.089 ms` of replay bookkeeping is negligible beside model
 forward/backward, while the observed terminal exposure matches the predicted
 roughly tenfold increase in terminal-bearing updates.
 
+#### Cross-reset replay-stream canary result
+
+The frozen seed-0 run completed normally under
+`experiments/2026-07-22_cartpole_replay_stream_seed0_3500/`, with manifest run
+ID `5a63760c4a3b413d97374d35b3f64cb4` and MLflow run ID
+`c5615d0e62bb4f469d62de1c27cdda96`. It used 3,500 learner updates, 21,816
+environment steps, and 1,024.2 seconds on ROCm. The manifest records clean
+source `4cb5671`, `max_train_steps`, final/best/periodic checkpoints, and
+successful collector shutdown under the one-thread host resource cap.
+
+The stream run first solves at update 1,100, reaches 500 at updates 1,400,
+1,500, and 1,600, and then remains variable. Its complete 100-update evaluation
+sequence is:
+
+```text
+9.35, 9.35, 9.35, 9.40, 39.15, 110.40, 302.15, 360.25, 363.60,
+349.30, 496.60, 321.50, 334.85, 500.00, 500.00, 500.00, 350.35,
+227.60, 365.05, 376.00, 381.85, 415.50, 373.00, 488.85, 446.30,
+406.70, 373.25, 462.00, 470.40, 196.05, 478.85, 203.65, 397.15,
+310.25, 205.00
+```
+
+The behavioral gate fails. Return falls below 300 after first solve at updates
+1,800, 3,000, 3,200, and 3,500. Best return is `500` at update 1,400 and final
+return is `205`, so final is below 400 and the best-to-final gap is `295`.
+Compared with the episode-contained reference-core canary, stream replay solves
+100 updates earlier but has a lower final return (`205` versus `313`) and a
+larger best-to-final gap (`295` versus `187`). The conditional Q probe is not
+run because the behavior gate failed.
+
+The deterministic continuation audit is retained under
+`experiments/2026-07-22_cartpole_replay_stream_continuation_probe/`. Seeds
+17--36 average return `195.75` with no truncations, yielding 3,915 rows and 20
+physical terminals. Cross-reset replay fixes risk *ordering*: posterior failure
+AUC rises from the episode canary's `0.291` to `0.998`, terminal continuation
+falls from `0.804` to `0.772`, live continuation rises from `0.787` to `0.972`,
+and the distance profile changes monotonically from `0.772` at failure to
+`0.980` at distance ten or greater. Prior failure AUC is `0.995`, and
+posterior-to-prior transport RMS remains small at `0.00535`.
+
+The preregistered continuation gate nevertheless fails. Terminal continuation
+remains above `0.5`; terminal recall at half-discount is zero and balanced
+accuracy is `0.500`. The intervention therefore did what its sampling analysis
+predicted---every logged diagnostic batch contained terminal supervision and
+the final head learned an almost perfect danger ranking---but variance reduction
+alone did not create enough logit margin for a calibrated physical termination
+decision. Cross-reset stream replay is retained as a reference-conformance and
+variance fix, not as a sufficient CartPole stability fix. No broad seed sweep
+is authorized by this result.
+
+#### Preregistered stream best/final boundary probe
+
+The stream canary now supplies a solved checkpoint and a collapsed checkpoint
+from one controlled trajectory. Before changing training again, compare those
+checkpoints on an identical environment-state history to identify which learned
+boundary moved.
+
+- **Question:** between the best checkpoint at update 1,400 and final checkpoint
+  at update 3,500, does real action-value knowledge degrade, or does the actor
+  stop expressing knowledge that the model/value path retains?
+- **Frozen data and measurement:** use 512 states from the same seed-17 random-
+  action CartPole history for both checkpoints. Compare each action with a
+  trusted 30-step real-simulator rollout. Measure the authored three-step
+  model/critic action value, actor preference, one-step state prediction, and
+  the hybrid learned-one-step/real-remainder control. No model is updated.
+- **Primary readout:** report Q/real accuracy and delta correlation, actor/real
+  accuracy, and actor/Q agreement on non-tied Q rows. Report one-step state MSE
+  and hybrid-state/real accuracy as model controls.
+- **Interpretation rule:** if final Q/real and hybrid controls hold or improve
+  while actor/Q agreement falls below `0.8` or by at least `0.1`, localize the
+  changed boundary to actor transfer. If final Q/real accuracy or correlation
+  falls by at least `0.1` together with a degraded model control, localize it to
+  model/value knowledge. If both move materially, classify the collapse as
+  coupled rather than selecting an actor-only or model-only fix.
+- **Stop rule:** two read-only checkpoints only. Record the result before any
+  optimizer, loss, architecture, or training-run proposal.
+
+#### Stream best/final boundary-probe result
+
+The read-only probe is retained under
+`experiments/2026-07-22_cartpole_replay_stream_boundary_probe/`. Both
+checkpoints saw the identical 512-state seed-17 random-action history, including
+104 states where the two trusted 30-step real rollouts had a strict preference.
+
+| Checkpoint | Q/real accuracy | Q/real correlation | Actor/real accuracy | Actor/Q actionable | One-step MSE | Hybrid/real margined |
+|---|---:|---:|---:|---:|---:|---:|
+| Best, update 1,400 | 0.769 | 0.499 | 0.875 | 0.894 | 0.0412 | 0.746 |
+| Final, update 3,500 | 0.856 | 0.694 | 0.875 | 0.981 | 0.0186 | 0.932 |
+
+The collapsed final checkpoint is better on every model/value control and does
+not lose actor transfer on these states. Its three-step survival-only ordering
+also improves from `0.625` accuracy and `0.490` correlation to `0.846` and
+`0.793`. This rejects both preregistered simple mechanisms: fixed-history
+model/value knowledge did not degrade, and the actor did not stop following its
+learned Q preference there.
+
+The remaining discrepancy is distributional. The fixed history represents
+ordinary random-policy states, while each deployed policy induces a different
+long-horizon state distribution. A checkpoint can improve on the former yet
+visit a narrower or more dangerous subset under its own actor, where small
+systematic errors compound. The next diagnostic must therefore compare
+best/final on-policy critical and near-terminal decisions rather than propose a
+global optimizer or loss change from the fixed-state result.
+
+#### Preregistered stream on-policy distribution probe
+
+- **Question:** which on-policy state/decision statistic changes when the same
+  training trajectory moves from solved best behavior to collapsed final
+  behavior despite improving on a fixed random-state history?
+- **Frozen cohort:** run deterministic actors from the best and final
+  checkpoints on reset seeds 17--36. At every visited state, compare both first
+  actions with a trusted 30-step real-simulator rollout and compute the same
+  three-step learned Q and one-step model controls. No weights are updated.
+- **Primary readout:** mean/min/max return; actor/real accuracy overall, at
+  trusted margin at least 15, and within ten steps of episode end; avoidable
+  immediate failures; actionable errors per episode; actor/Q agreement; and
+  one-step state MSE. Compare action/state distributions from the retained row
+  files if aggregate accuracy does not explain the return gap.
+- **Interpretation rule:** lower final critical or terminal-window accuracy
+  selects an on-policy policy-error boundary. Stable accuracies with more final
+  visits to high-regret or near-failure states selects state-distribution drift.
+  Simultaneous degradation in on-policy learned-Q/real accuracy selects a
+  coupled model/value distribution-shift boundary. Do not infer causality from
+  raw return alone.
+- **Stop rule:** these two read-only checkpoints only; document the result before
+  proposing another training intervention.
+
+#### Stream on-policy distribution-probe result
+
+The read-only result is retained under
+`experiments/2026-07-22_cartpole_replay_stream_on_policy_probe/`. The best
+checkpoint solves all 20 seeds at the 500-step time limit (10,000 states); the
+final checkpoint physically fails on all 20 at mean return `195.75` (3,915
+states, range 166--243).
+
+| Metric | Best, update 1,400 | Final, update 3,500 |
+|---|---:|---:|
+| Actor/real accuracy | 0.517 | 0.476 |
+| Actor/real balanced accuracy | 0.572 | 0.619 |
+| Critical-margin accuracy | 0.311 | 0.684 |
+| Terminal-window accuracy | 0.508 | 0.424 |
+| Episodes with terminal-window error | 6 / 20 | 20 / 20 |
+| Three-step Q/real accuracy | 0.430 | 0.632 |
+| Three-step Q/real balanced accuracy | 0.623 | 0.576 |
+| Actor/three-step-Q agreement | 0.892 | 0.778 |
+| One-step state MSE | 0.0834 | 0.0337 |
+
+The aggregate accuracies do not support a global model collapse. Final
+one-step prediction is substantially better, raw Q/real accuracy improves, and
+critical-margin actor accuracy improves. Instead, the state rows show a sharp
+deployment-distribution change. Every final episode ends at the negative cart
+position limit: the last pre-action positions are approximately `-2.38` to
+`-2.40`, with pole angle near `-0.11`. Final states have median absolute cart
+velocity `0.529` versus `0.158` at best, median absolute pole angle `0.0445`
+versus `0.0032`, and 90th-percentile absolute position `1.81` versus `0.98`.
+The final trusted preference is action 1 on 2,055 of 2,168 actionable states,
+while the actor executes slightly more action 0 than action 1 overall
+(`2,051` versus `1,864`). Its actionable error rate rises from `0.407` more
+than 100 steps before failure to roughly `0.53--0.58` over the final 100 steps.
+
+Thus the final policy enters a coherent left-drift regime and fails to produce
+the sustained rightward correction needed to leave it. This is not an
+unavoidable one-step trap: there are no states where the chosen action fails
+immediately and the alternative survives, because errors accumulate before the
+last state. The best actor stays near upright and reaches time-limit truncation;
+its apparent near-end errors are not physical terminal errors.
+
+The changed boundary is coupled state-distribution/actor transfer. Learned
+one-step dynamics and action-value ranking improve globally, but actor/Q
+agreement drops by `0.114` on the induced final distribution and below the
+preregistered `0.8` threshold. This does not yet prove that the actor disagrees
+with its *authored* policy-conditioned lambda-return target: the three-step Q
+diagnostic maximizes future branches. Before a training proposal, the next
+audit must inspect the actor's exact REINFORCE target and gradient on these
+left-drift states, or use the existing policy-conditioned Q estimator on a
+bounded retained cohort.
+
+#### Preregistered stream policy-target tracking probe
+
+- **Question:** does the best-to-final loss of actor/planner agreement also
+  occur against the exact sampled target used by the authored REINFORCE loss?
+- **Frozen cohort:** run the best and final deterministic actors on only reset
+  seeds 17--19. At every visited state, estimate both forced first actions with
+  64 Monte Carlo rollouts using the checkpoint's own 15-step horizon, sampled
+  categorical priors, subsequent 1%-unimixed actor actions, learned reward and
+  continuation, online critic bootstrap, and lambda `0.95`. No weights change.
+- **Primary readout:** among states whose policy-Q difference exceeds 1.96
+  combined standard errors, report actor agreement, sample count, and policy-Q/
+  trusted-real balanced accuracy on actionable states. Retain the corresponding
+  best/final return and state counts.
+- **Interpretation rule:** best agreement at least `0.8` followed by final below
+  `0.8` selects moving-target actor lag. Agreement at least `0.8` for both but
+  worse final policy-Q/real accuracy selects a target-quality failure. Both
+  below `0.8` selects a systemic policy-optimization mismatch. Fewer than 100
+  separated states in either checkpoint is inconclusive.
+- **Stop rule:** three episodes per checkpoint and 64 samples only. Do not tune
+  the estimator or launch training before recording the result.
+
+#### Stream policy-target tracking result
+
+The read-only result is retained under
+`experiments/2026-07-22_cartpole_replay_stream_policy_q_probe/`. The best
+checkpoint solves all three episodes (1,500 states); final averages `192.33`
+over 577 states. The 64-sample, 15-step policy-conditioned estimator gives:
+
+| Checkpoint | Confident states | Actor/policy-Q confident | All actor/policy-Q | Policy-Q/real balanced | Mean abs policy-Q delta |
+|---|---:|---:|---:|---:|---:|
+| Best, update 1,400 | 392 | 0.954 | 0.812 | 0.563 | 0.107 |
+| Final, update 3,500 | 69 | 0.884 | 0.673 | 0.586 | 1.529 |
+
+The best checkpoint passes the tracking gate with ample support. The final
+checkpoint has only 69 differences larger than 1.96 combined standard errors,
+so the preregistered minimum of 100 makes its categorical result inconclusive.
+It does not provide evidence for a simple actor sign/index bug: on the final
+states where its own sampled target clearly separates, the actor still agrees
+`88.4%` of the time. However, agreement over all actionable rows drops, only 40
+confident final rows have a trusted real preference, and their balanced
+policy-Q/real accuracy is `0.400`.
+
+The target geometry changes sharply. Final mean absolute policy-Q difference is
+about fourteen times the best value, yet far fewer rows exceed their Monte
+Carlo uncertainty. This is consistent with a higher-variance, less coherent
+imagined target on the induced left-drift distribution. It does not establish
+whether the variance comes primarily from stochastic latent transition,
+continuation, reward, or critic bootstrap, and the stop rule forbids increasing
+samples after seeing the result.
+
+This evidence makes the already-audited optimizer/time-scale mismatch relevant
+again. Pinned reference `e3f0224` uses one optimizer over world model, policy,
+and value at learning rate `4e-5`, with a 1,000-update linear learning-rate
+ramp. The frozen canary instead uses separate rates `3e-4`, `3e-5`, and `8e-5`
+without a ramp: the representation/transition target can move ten times faster
+than the actor parameters. The next step is a source-level audit and a coherent
+reference optimizer contract, not an after-the-fact increase to diagnostic
+samples.
+
+#### Preregistered reference optimizer-contract canary
+
+The source audit against pinned reference `e3f0224` confirms four coupled
+optimizer semantics: one parameter-local LaProp transform, one `4e-5` learning
+rate, a linear 0-to-`4e-5` ramp over the first 1,000 updates, and replay-value
+gradients enabled into the observed encoder/RSSM representation. Local LaProp
+and per-tensor AGC keep no optimizer-global statistics, so three disjoint
+optimizer containers are numerically equivalent to one container when their
+rates/schedules match and shared representation losses are backpropagated
+together. Retaining the containers avoids a checkpoint-format migration; it is
+an implementation detail, not a semantic relaxation.
+
+- **Hypothesis:** the local `3e-4` world-model rate moves imagined latent and
+  continuation targets too quickly for the `3e-5` actor, while detached replay
+  value loss cannot shape those features. The coherent reference contract will
+  reduce late target variance and prevent the learned policy from entering the
+  systematic left-drift regime.
+- **Causal bundle:** add an authored `reference` optimizer contract that uses
+  `4e-5` for world model, actor, and critic; linearly ramps all three from zero
+  over updates 0--1,000; and applies the scale-0.3 replay-value loss to both its
+  critic head and observed encoder/RSSM features in one combined backward pass.
+  All modules still train from update zero---this is not the removed actor-
+  freeze warmup. Preserve a `legacy` contract for historical snapshots and
+  resume. Do not change architecture, replay, losses, actor objective, entropy,
+  batch/sequence sizes, train ratio, or benchmark budget.
+- **Mechanical gate:** prove reference rates at updates 0, 500, 1,000, and later;
+  legacy constant/cosine behavior unchanged; replay value reaches encoder/RSSM
+  only in reference mode; combined backward has the same per-parameter update as
+  one joint LaProp optimizer; and snapshots/resume preserve their contract.
+  Focused/full tests, compile/type gates, and a multiprocess CPU smoke must pass.
+- **Frozen run:** repeat seed 0 for 3,500 updates from the completed reference-
+  core, stream-replay configuration and fixed 20-episode evaluation cohort,
+  changing only optimizer contract. Use reference rate `4e-5`, ramp 1,000, and
+  the one-thread host resource cap.
+- **Behavioral gate:** reach mean return `450`; never fall below `300`
+  afterward; final at least `400`; best-to-final gap at most `100`.
+- **Diagnostics:** regardless of behavior, run the deterministic final
+  continuation audit. Only if behavior passes, run the fixed-history Q boundary
+  probe with the existing floors (`0.592` accuracy, `0.088` correlation, and
+  actor/Q agreement above `0.8`). If late degradation persists, repeat the
+  bounded left-drift and exact policy-target readouts before selecting a cause.
+- **Stop rule:** one seed only. Failure rejects this coherent optimizer contract
+  as sufficient and does not authorize stacking actor-head depth, balanced
+  continuation, larger replay batches, or diagnostic resampling.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
