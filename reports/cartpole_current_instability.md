@@ -3160,6 +3160,75 @@ terminal learning while preserving—or explicitly recovering—the real
 continuation probability. Because the behavior gate failed, the conditional Q
 probe is not run and no broad seed sweep is authorized.
 
+#### Preregistered cross-reset replay-stream canary
+
+The next replay audit distinguishes unbiased expectation from usable gradient
+variance. The existing episode-window inclusion correction is mathematically
+unbiased, but a physical terminal can occur only in the single local window
+whose end is the episode end. For batch size `8`, sequence length `16`, and
+episode length `L`, the probability that an update contains any terminal is
+`1 - (1 - 1 / (L - 15))^8`. Its rare terminal row is then multiplied by about
+`16 * (L - 15) / L` to recover the correct expected class mass.
+
+The completed reference-core run ended with rolling training episode length
+`176.32`. At `L=176`, only `4.86%` of local updates are expected to contain a
+terminal, the terminal weight is `14.64`, and the estimator's terminal-gradient
+variance is `14.63` times that of a unit-weight stream estimator. The run's
+logged snapshots agree: only 4 of 60 diagnostic batches at or after update
+2,000 contained a terminal, and observed terminal weights reached `14.14`.
+At `L=300`, the local terminal-bearing probability falls to `2.77%`.
+
+Pinned reference commit `e3f0224` instead appends every environment step to a
+per-worker stream and registers one replay item at every valid sequence start.
+Sequences remain contiguous within a worker but may cross episode boundaries;
+`is_first` resets the recurrent carry inside the sampled sequence. An interior
+terminal therefore appears at each of the `T` possible sequence offsets. With
+`B=8`, `T=16`, and `L=176`, the approximate probability of at least one
+terminal becomes `1 - (1 - 1 / 176)^128 = 51.78%`, using unit row weights and
+the natural class prior. This is variance reduction, not class rebalancing.
+
+- **Hypothesis:** rare, high-magnitude terminal gradient spikes let the natural
+  continuation head repeatedly forget CartPole's failure boundary. Sampling
+  reference-style cross-reset streams will preserve the same expected natural
+  BCE while exposing terminal rows in many more updates, retaining calibrated
+  failure discrimination and reducing post-solve behavior collapse.
+- **Causal variable:** add an authored `stream` replay-sequence mode. Retain
+  complete episode transport, but identify each collector's ordered episode
+  stream and sample every valid length-`T` start across consecutive episodes
+  from that collector. Mark the first sampled row and each crossed episode
+  boundary with `is_first`; zero that batch row's RSSM deterministic and
+  stochastic carry before its observe step. Stream rows use unit continuation
+  inclusion weights. Preserve the current per-episode sampler as `episode`
+  mode for historical configuration/resume semantics. Do not change natural
+  continuation targets, loss weights, batch size, sequence length, replay
+  ratio, recent fraction, architecture, optimizer, rates, or actor/critic
+  equations.
+- **Mechanical gate:** exact synthetic enumeration must show one stream window
+  per valid start and `T` appearances for an interior terminal; sequences may
+  cross consecutive episodes from one collector but never collectors or a gap
+  in episode IDs. State/action/reward/terminal/future-return fields must remain
+  aligned. `is_first` must reset both recurrent carries and block gradients
+  across the boundary while retaining within-episode BPTT. Episode mode and
+  historical config loading must remain unchanged. Focused/full tests,
+  compile/type gates, and a one-update multiprocess CPU smoke must pass.
+- **Frozen run:** repeat seed 0 for 3,500 updates from the completed reference-
+  RSSM-core configuration and fixed 20-episode evaluation cohort, changing
+  only replay sequence mode from `episode` to `stream`. Retain the one-thread
+  host resource cap.
+- **Behavioral gate:** reach mean return `450`; never fall below `300`
+  afterward; final at least `400`; best-to-final gap at most `100`.
+- **Continuation gate:** on deterministic seeds 17--36, final posterior
+  terminal continuation probability must be below `0.5`, terminal recall must
+  exceed `0.5`, terminal/live balanced accuracy must exceed `0.7`, and live
+  mean continuation must remain above `0.9` so the score is usable as a
+  discount rather than merely a balanced classifier.
+- **Boundary gate:** only if behavior passes, final fixed-history Q/real
+  accuracy and correlation must not regress below `0.592` and `0.088`, and
+  actor/Q agreement must remain above `0.8`.
+- **Stop rule:** one seed only. Failure rejects cross-reset replay exposure as
+  a sufficient stability fix and does not authorize combining it with balanced
+  BCE, logit correction, optimizer changes, or larger batches.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
