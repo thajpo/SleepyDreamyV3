@@ -4302,6 +4302,33 @@ replay sampling, and posterior/prior state construction constrain the policy to
 data-supported histories. Any intervention must distinguish a genuine local
 implementation mismatch from ordinary model exploitation before training.
 
+### Preregistered decoded-mean continuation-boundary audit
+
+CartPole emits reward one on every live transition, so imagined action
+preference is dominated by predicted continuation and bootstrapped value. The
+fixed-history result shows that final weights remain useful on the best-policy
+trajectory but fail on their own induced trajectory. Before attributing that
+failure to generic model exploitation, isolate whether survival prediction is
+the first broken model boundary.
+
+- **Frozen cohort:** compare decoded-mean best update 1,200 and final update
+  3,500 on deterministic actor episodes for reset seeds 17--36. At every state,
+  record the physical terminal label, distance to terminal, posterior-mode
+  continuation, and 64 posterior/prior categorical samples. Do not alter policy
+  extraction, weights, horizon, or thresholds.
+- **Primary readouts:** mean return; posterior and prior effective discount on
+  terminal versus live rows; physical-failure ROC AUC and balanced accuracy;
+  distance-to-terminal strata; posterior/prior transport RMS; and latent KL or
+  posterior-mode support where available.
+- **Interpretation:** posterior failure AUC at least `0.8` with prior below
+  `0.6` selects posterior-to-prior transport. Both below `0.6` selects a learned
+  continuation/supervision failure. Both at least `0.8` rejects continuation as
+  the first broken target component and shifts attention to reward/value. Values
+  between the thresholds are weak and do not select an intervention.
+- **Stop rule:** these two checkpoint views, 20 episodes, and 64 samples only.
+  Do not train or rebalance continuation after seeing the result; compare it
+  with the already-recorded actor/target and one-step-state boundaries first.
+
 Interrupted manifests correctly record `status: interrupted` and evaluation
 history, but incorrectly retain `progress.train_step: 0` and `env_steps: 0`.
 Fix this bookkeeping issue separately from the learning experiment so it does
