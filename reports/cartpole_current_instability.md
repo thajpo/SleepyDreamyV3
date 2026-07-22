@@ -2558,6 +2558,56 @@ scope, which directly control policy-improvement step scale while leaving the
 now-improved distributional support intact. No optimizer or architecture
 change is selected from this result alone.
 
+#### Preregistered return-normalizer conformance canary
+
+The next source audit found that the frozen canary already disables the local
+per-imagination advantage z-score, so its actor update is directly controlled
+by the running return-percentile span. That span contracts from `33.72` at
+update 2,500 to `27.63` at 3,000 and `16.41` at 3,500. The policy first reaches
+`500` during this interval and subsequently collapses; holding the raw modeled
+advantage fixed, the contraction makes its final policy-gradient coefficient
+about `1.78` times the update-3,000 coefficient. This is correlation, not yet a
+causal conclusion.
+
+There are three concrete differences from reference commit `e3f0224` in the
+same normalizer component. Reference `imag_loss` computes one return tensor for
+all `B * K` replay starts, updates its 5th/95th-percentile EMA from that complete
+tensor, and immediately uses the updated span in the current policy loss. Its
+`debias: false` state begins at `(lo, hi) = (0, 0)`, so the first observation is
+incorporated at the authored rate `0.01`. Local training instead updates after
+the forward pass from only the final valid replay start, uses the stale scale
+for the current actor loss, and special-cases the first observation by assigning
+its percentiles in full. The local `normalize_advantages=false` override means
+these differences are not canceled by a later z-score.
+
+- **Hypothesis:** the partial, first-batch-debiased, one-update-stale return
+  normalizer makes the actor's effective step scale track one replay position
+  too aggressively and contributes to post-solve oscillation. Restoring the
+  reference normalizer state and update scope will reduce best-to-final collapse.
+- **Causal variable:** initialize return percentiles at zero, always apply the
+  rate-`0.01` EMA without first-update debiasing, aggregate lambda returns from
+  every valid post-burn-in imagination start, and use that updated span for the
+  current REINFORCE actor loss. Keep `normalize_advantages=false`, actor/critic
+  objectives and learning rates, imagination weights, online value targets,
+  symmetric two-hot support, replay pacing and sampling, and every architecture
+  setting unchanged.
+- **Mechanical gate:** unit tests must prove zero-state first-update behavior,
+  aggregation across multiple replay starts, and current-batch actor scaling.
+  Checkpoint save/resume must retain the new scalar state; focused/full tests,
+  compile/type checks, and a one-update process smoke must pass.
+- **Frozen run:** repeat seed 0 for 3,500 learner updates with the exact symmetric
+  two-hot retry-2 overrides and fixed 20-episode evaluation cohort. Retain the
+  one-thread OpenMP/MKL/OpenBLAS cap while the unrelated VLA job shares the host.
+- **Behavioral gate:** reach mean return `450`; never fall below `300`
+  afterward; final at least `400`; best-to-final gap at most `100`.
+- **Boundary gate:** rerun the final-policy fixed-history comparison. Final
+  Q/real balanced accuracy must exceed `0.559`, Q/real correlation must exceed
+  `0.009`, actor/real balanced accuracy must exceed `0.506`, and actor/Q
+  agreement must remain above `0.8`.
+- **Stop rule:** one seed only. Failure rejects return-normalizer mismatch as a
+  sufficient cause and does not authorize combining the separate imagination-
+  weighting discrepancy, optimizer changes, or architecture changes.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
