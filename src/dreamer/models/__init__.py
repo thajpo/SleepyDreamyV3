@@ -12,6 +12,8 @@ from .losses import (
     compute_actor_critic_losses,
     compute_reinforce_actor_loss,
     compute_q_actor_critic_losses,
+    slow_value_regularizer_loss,
+    slow_value_regularizer_targets,
 )
 from .dreaming import (
     dream_sequence,

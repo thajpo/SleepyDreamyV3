@@ -25,6 +25,7 @@ from ..models import (
     twohot_encode,
     twohot_expectation,
     unimix_logits,
+    slow_value_regularizer_loss,
 )
 from .logging import StepMetrics, collect_viz_data
 
@@ -256,7 +257,7 @@ def select_critic_target_values(
     """Select a detached value target for returns and the policy baseline.
 
     Reference DreamerV3 uses the online value prediction for these targets by
-    default and retains the slow value model as a distributional regularizer.
+    default and retains the slow value model as a separate regularizer.
     The explicit switch preserves the semantics of historical local runs that
     instead used the slow model for both roles.
     """
@@ -591,6 +592,9 @@ def dreamer_step(
                 sample_mask=sample_mask,
                 actor_baseline_values=critic_target_values,
                 start_continue_logits=start_continue_logits,
+                critic_ema_target=getattr(
+                    config, "critic_ema_target", "distribution"
+                ),
             )
             if (
                 not skip_actor
@@ -852,9 +856,11 @@ def dreamer_step(
         with torch.no_grad():
             replay_logits_ema = critic_ema(replay_posterior[:, :-1].detach())
         ema_logits_flat = replay_logits_ema.reshape(-1, replay_logits_ema.size(-1))
-        ema_probs = F.softmax(ema_logits_flat, dim=-1)
-        per_step_ema = -torch.sum(
-            ema_probs * F.log_softmax(logits_flat, dim=-1), dim=-1
+        per_step_ema = slow_value_regularizer_loss(
+            logits_flat,
+            ema_logits_flat,
+            bins,
+            target_mode=getattr(config, "critic_ema_target", "distribution"),
         )
         metrics.replay_ema_reg = (per_step_ema * mask_flat).sum() / (
             mask_flat.sum() + 1e-8
@@ -888,9 +894,13 @@ def dreamer_step(
             live_target_loss = (live_per_step_ce * mask_flat).sum() / (
                 mask_flat.sum() + 1e-8
             )
-            live_per_step_ema = -torch.sum(
-                ema_probs * F.log_softmax(live_logits_flat, dim=-1),
-                dim=-1,
+            live_per_step_ema = slow_value_regularizer_loss(
+                live_logits_flat,
+                ema_logits_flat,
+                bins,
+                target_mode=getattr(
+                    config, "critic_ema_target", "distribution"
+                ),
             )
             live_slow_regularizer = (
                 live_per_step_ema * mask_flat

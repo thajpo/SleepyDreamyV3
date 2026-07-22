@@ -91,6 +91,9 @@ class Config:
     weight_decay: float = 0.0
     critic_ema_decay: float = 0.98
     critic_ema_regularizer: float = 1.0
+    # Distribution preserves historical full-logit matching. Authored Hydra
+    # runs re-encode the slow critic's decoded scalar like reference DreamerV3.
+    critic_ema_target: str = "distribution"  # distribution, mean_twohot
     # True preserves runs authored before the reference slow-target audit. Hydra
     # explicitly disables this for new training runs.
     critic_slow_target: bool = True
@@ -297,6 +300,8 @@ def validate_config(cfg: Config) -> None:
         errors.append("continue_head_layers must be 0 or 1")
     if cfg.optimizer_contract not in {"legacy", "reference"}:
         errors.append("optimizer_contract must be 'legacy' or 'reference'")
+    if cfg.critic_ema_target not in {"distribution", "mean_twohot"}:
+        errors.append("critic_ema_target must be 'distribution' or 'mean_twohot'")
     if cfg.optimizer_warmup_steps < 0:
         errors.append("optimizer_warmup_steps must be >= 0")
     if cfg.optimizer_contract == "reference":

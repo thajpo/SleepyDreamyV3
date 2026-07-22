@@ -4041,6 +4041,108 @@ next step returns to the critic-target source/data-flow audit; a further
 training change requires a concrete divergence with broader reach than a
 roughly 2.7% loss reweighting.
 
+#### Preregistered slow-value-regularizer semantic audit
+
+The next source audit finds such a divergence. In pinned reference
+`agent.py`, both imagined and replay value objectives call
+`value.loss(stop_gradient(slowvalue.pred()))`. The reference two-hot output's
+`pred()` decodes the slow distribution to one scalar expectation, and its
+`loss()` then re-encodes that scalar as a one- or two-bin target. Local code
+instead uses cross-entropy against `softmax(critic_ema_logits)`, copying the
+slow critic's complete probability distribution. These targets have the same
+decoded mean but generally different entropy and gradients. Local comments
+that describe a “distributional regularizer” obscured the mismatch.
+
+This path has broad causal reach. Its coefficient is `1.0` beside every
+imagined critic target and it is applied again inside the scale-`0.3` replay
+value objective. A broad slow distribution can therefore teach the online
+critic to preserve stale probability mass across many value bins, while the
+reference teaches only the slow model's scalar value using the same sharp
+two-hot observation model as the primary return target. This is directly
+upstream of the overconfident, incorrectly ordered critic bootstrap found in
+recovery states.
+
+- **Question:** on trained CartPole latents, do the local full-distribution and
+  reference decoded-mean/two-hot slow targets produce materially different
+  regularizer gradients, or are they numerically interchangeable in practice?
+- **Frozen cohort:** collect 4,096 post-transition states from one environment
+  action stream generated independently of either checkpoint, with environment
+  seed `17` and NumPy action seed `17`. Observe that identical true-state/action
+  history through each checkpoint's posterior-mode RSSM. Measure the episode-
+  coherent canary and start-weight canary at both best and final checkpoints.
+- **Metrics:** slow-target total variation and entropy; cosine similarity and
+  norm ratio between logit gradients `p_online - p_slow` (local) and
+  `p_online - twohot(E_slow)` (reference); fraction with negative cosine; and
+  each target's cross-entropy against the online critic. Preserve per-
+  checkpoint results rather than pooling away best/final movement.
+- **Decision gate:** authorize an isolated semantic correction only if mean
+  target total variation is at least `0.25` and mean gradient cosine is below
+  `0.8` in at least one final checkpoint. Otherwise reject this mismatch as
+  numerically inert and continue the audit without a training run.
+- **Stop rule:** this is read-only checkpoint analysis. Do not alter training
+  or launch a canary until the measurements and source interpretation are
+  recorded.
+
+#### Slow-value-regularizer audit result and canary preregistration
+
+The read-only probe is retained under
+`experiments/2026-07-22_cartpole_slow_regularizer_probe/`. It used one fixed
+4,096-state random-action history for all four checkpoints; every result has
+history SHA-256 `765a551e4fd6a5a9398ff0a96de378e0d4d26b08c1d5e1d36801f00fe70449ac`,
+confirming identical true states and actions. The results decisively pass the
+predeclared causal-reach gate:
+
+| Run/checkpoint | Target TV | Slow/ref entropy | Local/ref grad norm | Grad cosine | Negative cosine |
+|---|---:|---:|---:|---:|---:|
+| Coherent best 1,700 | 0.612 | 1.938 / 0.524 | 0.091 / 0.691 | 0.562 | 24.9% |
+| Coherent final 3,500 | 0.512 | 1.834 / 0.565 | 0.058 / 0.532 | 0.577 | 17.7% |
+| Start-weight best 1,700 | 0.618 | 2.117 / 0.531 | 0.101 / 0.676 | 0.538 | 8.1% |
+| Start-weight final 3,500 | 0.494 | 1.807 / 0.567 | 0.075 / 0.538 | 0.664 | 3.7% |
+
+Both finals exceed target total variation `0.25` and fall below gradient cosine
+`0.8`. The reference gradient is also about seven to nine times larger in norm
+than the local gradient. The difference is therefore not only target entropy:
+local full-distribution matching often supplies a much weaker update and, on
+the collapsed coherent final, points in the opposite half-space on 17.7% of
+states. This authorizes one isolated semantic correction.
+
+#### Preregistered decoded-mean slow-regularizer canary
+
+- **Hypothesis:** copying the slow critic's broad distribution weakens or
+  misdirects the value regularizer, allowing the online critic's expected
+  action margins to drift and inflate. Matching the reference's decoded slow
+  scalar through a fresh two-hot target will provide a stronger, semantically
+  aligned anchor and improve recovery-state target stability.
+- **Single causal variable:** for both imagined and replay value regularizers,
+  replace only `softmax(slow_logits)` as the cross-entropy target with
+  `twohot(twohot_expectation(slow_logits))`. Keep the slow model update rate,
+  coefficient, primary lambda-return target, online target selection, start
+  continuation weights, architecture, replay, optimizers, and all run settings
+  fixed. Add an explicit authored target-mode field; historical snapshots that
+  lack it retain full-distribution matching unless semantic migration is
+  requested.
+- **Mechanical gate:** tests must prove the decoded-mean target equals an
+  ordinary two-hot scalar target, differs from a broad same-mean distribution,
+  is detached, and is used by both imagination and replay paths. Focused/full
+  tests, compile, supported type checks, and a multiprocess CPU smoke must pass.
+- **Frozen run:** repeat the start-weight seed-0 canary exactly for 3,500
+  updates and the same fixed evaluation cohort, changing only the slow-target
+  mode. Preserve clean source, the one-thread host cap, and all checkpoint/
+  manifest semantics.
+- **Behavior gate:** reach mean evaluation at least `475`; after the first such
+  evaluation, never fall below `300`; finish at least `400`; and keep the
+  best-to-final gap at most `100`.
+- **Boundary gate:** repeat the reset-seed `17`--`19`, 64-sample, 15-step
+  policy-target probe on best and final. Final actor/target agreement must be at
+  least `0.8`, all-actionable target/real balanced accuracy at least `0.60`,
+  and at least 100 states must be both statistically separated and simulator-
+  actionable. Fewer than 100 makes the boundary result underpowered rather than
+  a pass.
+- **Stop rule:** one seed only. Replicate no additional seed unless both gates
+  pass. Failure retains the source correction but rejects this mismatch as a
+  sufficient stability cause; do not combine value-head depth or a new replay
+  intervention in the same run.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation

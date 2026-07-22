@@ -3,7 +3,7 @@
 import torch
 import torch.nn.functional as F
 
-from .math_utils import symlog, twohot_encode, unimix_logits
+from .math_utils import symlog, twohot_encode, twohot_expectation, unimix_logits
 
 
 def _free_bits_straight_through(raw_kl, free_bits):
@@ -205,6 +205,7 @@ def compute_actor_critic_losses(
     sample_mask=None,
     actor_baseline_values=None,
     start_continue_logits=None,
+    critic_ema_target="distribution",
 ):
     """
     Compute actor and critic losses for policy gradient training.
@@ -229,6 +230,9 @@ def compute_actor_critic_losses(
         start_continue_logits: Optional continuation logits for the observed
             replay starts. When provided, their detached probabilities weight
             the entire imagined loss trajectory, matching DreamerV3.
+        critic_ema_target: Slow-value regularizer target contract. Historical
+            runs copy the full distribution; reference semantics decode the
+            slow scalar and re-encode it as ``mean_twohot``.
 
     Returns:
         Tuple of (actor_loss, critic_loss, entropy)
@@ -275,18 +279,15 @@ def compute_actor_critic_losses(
     else:
         critic_loss = per_step_ce.mean()
 
-    # --- Critic EMA Regularizer (Distributional) ---
+    # --- Slow critic regularizer ---
     if dreamed_values_logits_ema is not None:
         ema_logits_train = dreamed_values_logits_ema[:H_train]
         ema_logits_flat = ema_logits_train.view(-1, num_bins).detach()
-
-        # Target distribution from EMA critic
-        ema_probs = F.softmax(ema_logits_flat, dim=-1)
-
-        # Cross-entropy: -sum(P_ema * log(P_current))
-        # Note: P_ema is fixed target (detached), P_current has gradients
-        per_step_ema = -torch.sum(
-            ema_probs * F.log_softmax(dreamed_values_logits_flat, dim=-1), dim=-1
+        per_step_ema = slow_value_regularizer_loss(
+            dreamed_values_logits_flat,
+            ema_logits_flat,
+            B,
+            target_mode=critic_ema_target,
         ).view(H_train, Bsz)
         per_step_ema = per_step_ema * weights[:H_train]
         if sample_mask is not None:
@@ -314,6 +315,37 @@ def compute_actor_critic_losses(
     )
 
     return actor_loss, critic_loss, entropy
+
+
+def slow_value_regularizer_targets(
+    slow_logits: torch.Tensor,
+    bins: torch.Tensor,
+    *,
+    target_mode: str,
+) -> torch.Tensor:
+    """Build the detached slow-value target under either semantic contract."""
+    detached_logits = slow_logits.detach()
+    if target_mode == "distribution":
+        return F.softmax(detached_logits, dim=-1)
+    if target_mode == "mean_twohot":
+        slow_values = twohot_expectation(detached_logits, bins)
+        flat_targets = twohot_encode(slow_values.reshape(-1), bins)
+        return flat_targets.view_as(detached_logits)
+    raise ValueError(f"unsupported critic EMA target mode: {target_mode!r}")
+
+
+def slow_value_regularizer_loss(
+    online_logits: torch.Tensor,
+    slow_logits: torch.Tensor,
+    bins: torch.Tensor,
+    *,
+    target_mode: str,
+) -> torch.Tensor:
+    """Return per-example cross-entropy for the selected slow-value target."""
+    targets = slow_value_regularizer_targets(
+        slow_logits, bins, target_mode=target_mode
+    )
+    return -torch.sum(targets * F.log_softmax(online_logits, dim=-1), dim=-1)
 
 
 def compute_reinforce_actor_loss(

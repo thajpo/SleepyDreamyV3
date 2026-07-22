@@ -4,7 +4,12 @@ import pytest
 import torch
 
 from dreamer.models.decoder import ObservationDecoder
-from dreamer.models.losses import compute_actor_critic_losses, compute_wm_loss
+from dreamer.models.losses import (
+    compute_actor_critic_losses,
+    compute_wm_loss,
+    slow_value_regularizer_loss,
+    slow_value_regularizer_targets,
+)
 from dreamer.models.math_utils import symlog
 
 
@@ -316,6 +321,40 @@ def test_start_continuation_weight_is_not_a_world_model_gradient_path():
     assert value_logits.grad is not None
     assert action_logits.grad is not None
     assert start_continue_logits.grad is None
+
+
+def test_reference_slow_value_target_reencodes_decoded_mean_and_detaches():
+    bins = torch.tensor([-1.0, 0.0, 1.0])
+    slow_logits = torch.tensor([[3.0, 0.0, 3.0]], requires_grad=True)
+
+    distribution = slow_value_regularizer_targets(
+        slow_logits, bins, target_mode="distribution"
+    )
+    mean_twohot = slow_value_regularizer_targets(
+        slow_logits, bins, target_mode="mean_twohot"
+    )
+
+    assert distribution[0, 1].item() < 0.1
+    assert torch.equal(mean_twohot, torch.tensor([[0.0, 1.0, 0.0]]))
+    assert distribution.requires_grad is False
+    assert mean_twohot.requires_grad is False
+
+
+def test_slow_value_regularizer_loss_selects_target_contract():
+    bins = torch.tensor([-1.0, 0.0, 1.0])
+    online_logits = torch.tensor([[0.0, 3.0, 0.0]], requires_grad=True)
+    slow_logits = torch.tensor([[3.0, 0.0, 3.0]])
+
+    distribution_loss = slow_value_regularizer_loss(
+        online_logits, slow_logits, bins, target_mode="distribution"
+    )
+    mean_twohot_loss = slow_value_regularizer_loss(
+        online_logits, slow_logits, bins, target_mode="mean_twohot"
+    )
+
+    assert distribution_loss.item() > mean_twohot_loss.item()
+    mean_twohot_loss.sum().backward()
+    assert online_logits.grad is not None
 
 
 def test_observation_decoder_skips_state_head_when_n_observations_zero():
