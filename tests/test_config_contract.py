@@ -18,6 +18,8 @@ def test_hydra_yaml_defines_every_runtime_field():
     assert runtime_config.environment_name == "CartPole-v1"
     assert runtime_config.log_profile == "lean"
     assert runtime_config.num_bins == 255
+    assert runtime_config.b_start == -20
+    assert runtime_config.b_end == 20
     assert runtime_config.continue_head_layers == 1
     assert runtime_config.critic_slow_target is False
     validate_config(runtime_config)

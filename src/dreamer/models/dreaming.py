@@ -4,7 +4,7 @@ import torch
 import torch.nn.functional as F
 import torch.distributions as dist
 
-from .math_utils import unimix_logits
+from .math_utils import twohot_expectation, unimix_logits
 
 
 def learned_continue_discount(gamma: float, contdisc: bool) -> float:
@@ -202,7 +202,7 @@ def estimate_policy_lambda_action_values(
         dreamed_states.append(h_z)
 
         reward_logits = world_model.reward_predictor(h_z)
-        rewards = torch.sum(F.softmax(reward_logits, dim=-1) * bins, dim=-1)
+        rewards = twohot_expectation(reward_logits, bins)
         continue_logits = world_model.continue_predictor(h_z).squeeze(-1)
         if terminal_reward_penalty:
             rewards = rewards - float(terminal_reward_penalty) * (
@@ -216,7 +216,7 @@ def estimate_policy_lambda_action_values(
 
     states = torch.stack(dreamed_states)
     value_logits = critic(states)
-    values = torch.sum(F.softmax(value_logits, dim=-1) * bins, dim=-1)
+    values = twohot_expectation(value_logits, bins)
     lambda_returns = calculate_lambda_returns(
         torch.stack(dreamed_rewards),
         values,
@@ -320,7 +320,7 @@ def enumerate_first_action_values(
             rewards = continue_probs
         else:
             reward_logits = world_model.reward_predictor(h_z_flat)
-            rewards = torch.sum(F.softmax(reward_logits, dim=-1) * bins, dim=-1)
+            rewards = twohot_expectation(reward_logits, bins)
             if terminal_reward_penalty:
                 rewards = rewards - float(terminal_reward_penalty) * (
                     1.0 - continue_probs
@@ -371,9 +371,7 @@ def enumerate_first_action_values(
         values = torch.zeros(batch_size, branch_count, device=device, dtype=dtype)
     else:
         value_logits = critic(final_h_z)
-        values = torch.sum(F.softmax(value_logits, dim=-1) * bins, dim=-1).view(
-            batch_size, branch_count
-        )
+        values = twohot_expectation(value_logits, bins).view(batch_size, branch_count)
     path_values = returns + discounts * values
 
     q_values = []

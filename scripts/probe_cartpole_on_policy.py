@@ -15,7 +15,12 @@ import torch
 import torch.nn.functional as F
 
 from dreamer.inspect import resolve_device
-from dreamer.models import learned_continue_discount, symlog, symexp
+from dreamer.models import (
+    learned_continue_discount,
+    symlog,
+    symexp,
+    symexp_twohot_bins,
+)
 from dreamer.models.dreaming import (
     enumerate_first_action_values,
     estimate_policy_lambda_action_values,
@@ -322,14 +327,12 @@ def run_on_policy_probe(
     )
     rows: list[dict] = []
     h_prev_backup = world_model.h_prev.clone()
-    bins = symexp(
-        torch.linspace(
-            cfg.b_start,
-            cfg.b_end,
-            steps=int(getattr(cfg, "num_bins", 255)),
-            device=device,
-            dtype=torch.float32,
-        )
+    bins = symexp_twohot_bins(
+        cfg.b_start,
+        cfg.b_end,
+        int(getattr(cfg, "num_bins", 255)),
+        device=device,
+        dtype=torch.float32,
     )
     imagination_discount = learned_continue_discount(
         cfg.gamma, bool(getattr(cfg, "contdisc", True))

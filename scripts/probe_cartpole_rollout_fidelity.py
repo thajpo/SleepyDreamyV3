@@ -13,7 +13,12 @@ import torch
 import torch.nn.functional as F
 
 from dreamer.inspect import resolve_device
-from dreamer.models import learned_continue_discount, symexp
+from dreamer.models import (
+    learned_continue_discount,
+    symexp,
+    symexp_twohot_bins,
+    twohot_expectation,
+)
 from dreamer.models.math_utils import unimix_logits
 
 if __package__:
@@ -174,9 +179,7 @@ def collect_real_episodes(
 
             latent_tensor = torch.stack(latents)
             value_logits = critic(latent_tensor)
-            posterior_values = torch.sum(
-                F.softmax(value_logits, dim=-1) * bins, dim=-1
-            )
+            posterior_values = twohot_expectation(value_logits, bins)
             collected.append(
                 {
                     "episode": episode,
@@ -261,7 +264,7 @@ def simulate_matched_prefix(
         ).float()
         h_z = world_model.join_h_and_z(h_next, z_state)
         reward_logits = world_model.reward_predictor(h_z)
-        reward = torch.sum(F.softmax(reward_logits, dim=-1) * bins, dim=-1)
+        reward = twohot_expectation(reward_logits, bins)
         continue_prob = torch.sigmoid(
             world_model.continue_predictor(h_z).squeeze(-1)
         )
@@ -275,9 +278,7 @@ def simulate_matched_prefix(
         z_embed = world_model.z_embedding(z_state.view(rollout_count, -1))
 
     prior_value_logits = critic(h_z)
-    prior_values = torch.sum(
-        F.softmax(prior_value_logits, dim=-1) * bins, dim=-1
-    )
+    prior_values = twohot_expectation(prior_value_logits, bins)
     decoded_states = symexp(world_model.decoder(h_z)["state"])
     decoded_states = decoded_states.view(batch_size, samples, -1)
     target_states = target_states.unsqueeze(1)
@@ -437,14 +438,12 @@ def run_probe(
         load_checkpoint_models(checkpoint_path, device)
     )
     train_step = checkpoint.get("step", checkpoint.get("train_step"))
-    bins = symexp(
-        torch.linspace(
-            cfg.b_start,
-            cfg.b_end,
-            steps=int(cfg.num_bins),
-            device=device,
-            dtype=torch.float32,
-        )
+    bins = symexp_twohot_bins(
+        cfg.b_start,
+        cfg.b_end,
+        int(cfg.num_bins),
+        device=device,
+        dtype=torch.float32,
     )
     imagination_discount = learned_continue_discount(
         cfg.gamma, bool(getattr(cfg, "contdisc", True))

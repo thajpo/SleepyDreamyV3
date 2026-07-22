@@ -91,7 +91,8 @@ class RSSMWorldModel(nn.Module):
         # Rewards use two-hot encoding
         reward_out = int(num_bins)
         self.reward_predictor = nn.Linear(h_z_dim, reward_out)
-        nn.init.zeros_(self.reward_predictor.weight)  # Reward is initalized to zero
+        nn.init.zeros_(self.reward_predictor.weight)
+        nn.init.zeros_(self.reward_predictor.bias)
         continue_head_layers = int(
             getattr(models_config, "continue_head_layers", 0)
         )

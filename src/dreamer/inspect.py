@@ -30,7 +30,8 @@ from dreamer.models import (
     initialize_world_model,
     resize_pixels_to_target,
     symlog,
-    symexp,
+    symexp_twohot_bins,
+    twohot_expectation,
     unimix_logits,
 )
 
@@ -80,8 +81,7 @@ def load_models(checkpoint_path: Path, cfg: Config, device: str):
 def decode_twohot_expectation(
     logits: torch.Tensor, b_tensor: torch.Tensor
 ) -> torch.Tensor:
-    probs = F.softmax(logits, dim=-1)
-    return torch.sum(probs * b_tensor, dim=-1)
+    return twohot_expectation(logits, b_tensor)
 
 
 def imagine_dream_frames(
@@ -173,14 +173,12 @@ def run_inspection(
     )
     if critic_out_bins <= 0:
         critic_out_bins = int(getattr(cfg, "num_bins", 255))
-    b_tensor = symexp(
-        torch.linspace(
-            cfg.b_start,
-            cfg.b_end,
-            steps=critic_out_bins,
-            device=device,
-            dtype=torch.float32,
-        )
+    b_tensor = symexp_twohot_bins(
+        cfg.b_start,
+        cfg.b_end,
+        critic_out_bins,
+        device=device,
+        dtype=torch.float32,
     )
 
     summary = {

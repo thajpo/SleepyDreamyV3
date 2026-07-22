@@ -22,6 +22,7 @@ from ..models import (
     symlog,
     symexp,
     twohot_encode,
+    twohot_expectation,
     unimix_logits,
 )
 from .logging import StepMetrics, collect_viz_data
@@ -335,9 +336,8 @@ def dreamer_step(
             dreamed_rewards_logits = world_model.reward_predictor(
                 dreamed_recurrent_states[1:]
             ).detach()
-            dreamed_rewards_probs = F.softmax(dreamed_rewards_logits, dim=-1)
-            dreamed_rewards = torch.sum(
-                dreamed_rewards_probs * bins, dim=-1
+            dreamed_rewards = twohot_expectation(
+                dreamed_rewards_logits, bins
             ).detach()
             dreamed_continues = (
                 world_model.continue_predictor(dreamed_recurrent_states[1:])
@@ -357,14 +357,10 @@ def dreamer_step(
             dreamed_values_logits = critic(dreamed_recurrent_states)
             with torch.no_grad():
                 dreamed_values_logits_ema = critic_ema(dreamed_recurrent_states)
-                dreamed_values_probs_ema = F.softmax(
-                    dreamed_values_logits_ema, dim=-1
+                dreamed_values_ema = twohot_expectation(
+                    dreamed_values_logits_ema, bins
                 )
-                dreamed_values_ema = torch.sum(
-                    dreamed_values_probs_ema * bins, dim=-1
-                )
-            dreamed_values_probs = F.softmax(dreamed_values_logits, dim=-1)
-            dreamed_values = torch.sum(dreamed_values_probs * bins, dim=-1)
+            dreamed_values = twohot_expectation(dreamed_values_logits, bins)
             metrics.dreamed_values.append(dreamed_values.detach().cpu())
 
             critic_target_values = select_critic_target_values(
@@ -496,8 +492,7 @@ def dreamer_step(
                     q_logits_ema = q_logits_ema.view(
                         n_dream_steps + 1, B, n_actions, num_bins
                     )
-                    q_probs_ema = F.softmax(q_logits_ema, dim=-1)
-                    q_values_ema = torch.sum(q_probs_ema * bins, dim=-1)
+                    q_values_ema = twohot_expectation(q_logits_ema, bins)
                     q_state_values = q_values_ema.max(dim=-1).values
                     q_lambda_returns = calculate_lambda_returns(
                         dreamed_rewards,

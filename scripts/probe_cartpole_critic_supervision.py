@@ -17,9 +17,10 @@ from dreamer.inspect import infer_config_from_checkpoint, resolve_device
 from dreamer.models import (
     initialize_critic,
     initialize_world_model,
-    symexp,
+    symexp_twohot_bins,
     symlog,
     twohot_encode,
+    twohot_expectation,
     unimix_logits,
 )
 from dreamer.models.encoder import ThreeLayerMLP
@@ -250,7 +251,7 @@ def pearson(predicted: torch.Tensor, target: torch.Tensor) -> float | None:
 @torch.no_grad()
 def evaluate(critic, xs, ys, bins, indices) -> dict:
     logits = critic(xs[indices])
-    predicted = (F.softmax(logits, dim=-1) * bins).sum(dim=-1)
+    predicted = twohot_expectation(logits, bins)
     target = ys[indices]
     error = predicted - target
     return {
@@ -334,8 +335,8 @@ def main() -> None:
     train_indices, test_indices = episode_split(
         episode_ids, args.test_fraction, args.seed
     )
-    bins = symexp(
-        torch.linspace(cfg.b_start, cfg.b_end, cfg.num_bins, device=device)
+    bins = symexp_twohot_bins(
+        cfg.b_start, cfg.b_end, cfg.num_bins, device=device
     )
 
     latent_critic = initialize_critic(device, cfg)

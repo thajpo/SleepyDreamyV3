@@ -19,5 +19,13 @@ from .dreaming import (
     compute_mpc_teacher_actor_loss,
     learned_continue_discount,
 )
-from .math_utils import symlog, symexp, resize_pixels_to_target, unimix_logits, twohot_encode
+from .math_utils import (
+    symlog,
+    symexp,
+    symexp_twohot_bins,
+    resize_pixels_to_target,
+    unimix_logits,
+    twohot_encode,
+    twohot_expectation,
+)
 from .optimizers import LaProp, adaptive_gradient_clipping

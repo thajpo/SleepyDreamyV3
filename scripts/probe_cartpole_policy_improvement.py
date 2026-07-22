@@ -13,7 +13,7 @@ import torch
 import torch.nn.functional as F
 
 from dreamer.inspect import resolve_device
-from dreamer.models import learned_continue_discount, symexp
+from dreamer.models import learned_continue_discount, symexp_twohot_bins
 from dreamer.models.dreaming import estimate_policy_lambda_action_values
 
 if __package__:
@@ -69,14 +69,12 @@ def collect_policy_dataset(
 ) -> tuple[torch.Tensor, torch.Tensor, list[float], list[float], int]:
     """Follow the deployed actor and retain statistically separated policy-Q labels."""
     env = gym.make(cfg.environment_name)
-    bins = symexp(
-        torch.linspace(
-            cfg.b_start,
-            cfg.b_end,
-            steps=int(cfg.num_bins),
-            device=device,
-            dtype=torch.float32,
-        )
+    bins = symexp_twohot_bins(
+        cfg.b_start,
+        cfg.b_end,
+        int(cfg.num_bins),
+        device=device,
+        dtype=torch.float32,
     )
     imagination_discount = learned_continue_discount(
         cfg.gamma, bool(getattr(cfg, "contdisc", True))

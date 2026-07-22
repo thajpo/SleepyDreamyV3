@@ -24,6 +24,8 @@ from dreamer.models import (
     learned_continue_discount,
     symlog,
     symexp,
+    symexp_twohot_bins,
+    twohot_expectation,
     unimix_logits,
 )
 from dreamer.models.dreaming import enumerate_first_action_values
@@ -426,14 +428,12 @@ def run_probe(
         1, world_model.n_latents, world_model.n_classes, device=device
     )
     z_prev_embed = world_model.z_embedding(z_prev.view(1, -1))
-    bins = symexp(
-        torch.linspace(
-            cfg.b_start,
-            cfg.b_end,
-            steps=int(getattr(cfg, "num_bins", 255)),
-            device=device,
-            dtype=torch.float32,
-        )
+    bins = symexp_twohot_bins(
+        cfg.b_start,
+        cfg.b_end,
+        int(getattr(cfg, "num_bins", 255)),
+        device=device,
+        dtype=torch.float32,
     )
     decomposition_horizons = sorted(
         {max(1, int(horizon)) for horizon in (decomposition_horizons or [])}
@@ -471,9 +471,7 @@ def run_probe(
             direct_q_np = None
             if q_critic_key is not None:
                 direct_q_logits = q_critic(h_z).view(1, cfg.n_actions, -1)
-                direct_q_values = torch.sum(
-                    F.softmax(direct_q_logits, dim=-1) * bins, dim=-1
-                )
+                direct_q_values = twohot_expectation(direct_q_logits, bins)
                 direct_q_np = direct_q_values.squeeze(0).detach().cpu().numpy()
             h_prev_backup = world_model.h_prev.clone()
             try:

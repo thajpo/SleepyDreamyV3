@@ -2428,10 +2428,13 @@ The continued value-path audit returns to an early observation that was never
 corrected. CartPole overrides the global two-hot support from symmetric
 symlog-space endpoints `[-20, 20]` to asymmetric endpoints `[-5, 6]`. After
 `symexp`, those 255 bins span approximately `[-147.41, 402.43]` and their
-uniform mean is `+23.505`. Because both reward and value output layers are
-zero-initialized, the first zero-logit prediction is therefore `+23.505`, not
-the intended zero. This exact value appeared in the first logged imagined
-critic distributions of the initial three-seed investigation.
+uniform mean is `+23.505`. The value output is zero-initialized, so its first
+zero-logit prediction is therefore `+23.505`, not the intended zero. This exact
+value appeared in the first logged imagined critic distributions of the initial
+three-seed investigation. The reward layer has a second cold-start defect: its
+weight is zeroed but its PyTorch bias is left at random initialization, despite
+the source comment claiming zero reward initialization. The result is a state-
+independent but nonuniform initial reward distribution.
 
 Reference commit `e3f0224` instead uses symmetric `[-20, 20]` symlog endpoints
 and pairs negative and positive terms when computing the expectation. That
@@ -2444,14 +2447,16 @@ physical bins suffers cancellation error even when probabilities are uniform.
   will start learned reward and value at exactly zero and improve later action-
   ordering stability.
 - **Causal variable:** centralize two-hot expectation decoding using the
-  reference's symmetric pairwise reduction and remove only CartPole's `[-5, 6]`
-  support override so new runs inherit `[-20, 20]`. Keep network depth,
+  reference's symmetric pairwise reduction, remove only CartPole's `[-5, 6]`
+  support override so new runs inherit `[-20, 20]`, and zero the reward output
+  bias alongside its already-zero weight. These are the three parts of the
+  reference's zero-at-initialization distribution contract. Keep network depth,
   optimizer rates and ownership, replay losses, online targets, truncation
   bootstrap, actor objective, continuation head, data pacing, and every other
   benchmark setting unchanged. Historical checkpoints remain loadable because
   their config snapshots retain their authored endpoints.
-- **Mechanical gate:** zero logits over the new support must decode to exactly
-  zero for reward and value heads; the decoder must preserve ordinary weighted
+- **Mechanical gate:** initialized reward and value logits over the new support
+  must decode to exactly zero; the decoder must preserve ordinary weighted
   expectations and gradients; all direct expectation sites must share it.
   Focused tests, the full fast suite, compile/type gates, and a one-update
   process smoke must pass.

@@ -15,7 +15,12 @@ import torch
 import torch.nn.functional as F
 
 from dreamer.inspect import resolve_device
-from dreamer.models import learned_continue_discount, symlog, symexp
+from dreamer.models import (
+    learned_continue_discount,
+    symlog,
+    symexp,
+    symexp_twohot_bins,
+)
 from dreamer.models.dreaming import enumerate_first_action_values
 
 if __package__:
@@ -253,14 +258,12 @@ def run_fixed_history_probe(
         if env_spec is not None and env_spec.max_episode_steps is not None
         else 500
     )
-    bins = symexp(
-        torch.linspace(
-            target_cfg.b_start,
-            target_cfg.b_end,
-            steps=int(getattr(target_cfg, "num_bins", 255)),
-            device=device,
-            dtype=torch.float32,
-        )
+    bins = symexp_twohot_bins(
+        target_cfg.b_start,
+        target_cfg.b_end,
+        int(getattr(target_cfg, "num_bins", 255)),
+        device=device,
+        dtype=torch.float32,
     )
     imagination_discount = learned_continue_discount(
         target_cfg.gamma, bool(getattr(target_cfg, "contdisc", True))

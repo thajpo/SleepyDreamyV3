@@ -20,7 +20,7 @@ from ..runtime.replay_buffer import EpisodeReplayBuffer, EnvData
 from .checkpoints import save_checkpoint, load_checkpoint
 from ..models import (
     symlog,
-    symexp,
+    symexp_twohot_bins,
     resize_pixels_to_target,
     initialize_actor,
     initialize_critic,
@@ -127,14 +127,13 @@ class WorldModelTrainer:
         b_start = config.b_start
         b_end = config.b_end
         num_bins = int(getattr(self.critic.mlp[-1], "out_features"))
-        beta_range = torch.linspace(
-            start=b_start,
-            end=b_end,
-            steps=num_bins,
+        self.B = symexp_twohot_bins(
+            b_start,
+            b_end,
+            num_bins,
             device=self.device,
             dtype=torch.float32,
         )
-        self.B = symexp(beta_range)
 
         if config.compile_models and hasattr(torch, "compile"):
             try:
