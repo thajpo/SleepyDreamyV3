@@ -2950,6 +2950,48 @@ the late-policy ratio `308.05` into early training. The fresh AdamW fit is a
 capacity diagnostic, not evidence that the trainer should switch optimizers or
 use its `1e-3` rate.
 
+#### Preregistered balanced-continuation canary
+
+The representability probe selects a class-calibration intervention, but its
+late-policy weight `308.05` must not be hard-coded into startup. The replay
+failure fraction changes by more than an order of magnitude as episodes grow,
+and an unnormalized terminal multiplier would also change the total
+world-model objective scale.
+
+- **Hypothesis:** natural live/terminal imbalance drives the continuation head
+  toward a well-ranked but always-continue solution. An online prevalence-
+  balanced BCE will retain the latent's demonstrated failure discrimination,
+  improve imagined survival calibration, and prevent the late policy/value
+  collapse.
+- **Causal variable:** maintain a non-debiased rate-`0.01` EMA of the sampled
+  terminal fraction, computed with valid-row masks and the existing replay
+  inclusion weights. Initialize prevalence at `0.5`. For continuation BCE only,
+  multiply terminal rows by `0.5 / max(p, 0.001)` and live rows by
+  `0.5 / max(1-p, 0.001)`, in addition to their inclusion weight. When the EMA
+  matches prevalence, terminal and live classes each contribute half the loss
+  while expected total weight remains one. Save/restore the EMA. Keep every
+  other world-model term, sequence reduction, replay sample, actor/critic loss,
+  optimizer, learning rate, and run hyperparameter unchanged.
+- **Mechanical gate:** tests must establish the masked importance-weighted
+  prevalence update, non-debiased first update, equal expected class mass,
+  continuation-only loss effect, disabled-path identity, and checkpoint
+  persistence. Focused/full tests, compile/type gates, and a one-update process
+  smoke must pass.
+- **Frozen run:** repeat seed 0 for 3,500 updates from the sequence-mean
+  configuration, fixed evaluation cohort, and one-thread resource cap, changing
+  only balanced continuation on.
+- **Behavioral gate:** reach mean return `450`; never fall below `300`
+  afterward; final at least `400`; best-to-final gap at most `100`.
+- **Continuation gate:** on deterministic seeds 17--36, final posterior
+  terminal continuation probability must be below `0.5`, terminal recall must
+  exceed `0.5`, and terminal/live balanced accuracy must exceed `0.7`.
+- **Boundary gate:** only if behavior passes, final fixed-history Q/real
+  accuracy and correlation must not regress below `0.592` and `0.088`, and
+  actor/Q agreement must remain above `0.8`.
+- **Stop rule:** one seed only. Failure rejects adaptive class balancing as a
+  sufficient cause and does not authorize learning-rate, optimizer, start-
+  continuation, or architecture changes.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
