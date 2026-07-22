@@ -3097,6 +3097,69 @@ therefore implement the pinned equation rather than cherry-pick that patch.
   normalization, joint optimization, learning-rate warmup, or continuation
   weighting.
 
+#### Reference-RSSM-core canary result
+
+The mechanical gate passes at source commit `b52bf15`. The new equation-level
+tests cover the legacy and reference parameter layouts, compare the grouped
+reference calculation with an explicit block-by-block calculation, and verify
+recurrent gradients. The focused suite passed (`32`, followed by `21` after the
+last compatibility test), the full fast suite passed (`156`), compile and the
+supported scoped type gate passed, and a canonical one-update CPU process smoke
+completed with its collector stopped. New Hydra-authored runs select the
+reference core, while historical snapshots and checkpoints retain or infer the
+legacy core.
+
+The frozen seed-0 run completed normally under
+`experiments/2026-07-22_cartpole_reference_rssm_core_seed0_3500/`, with manifest
+run ID `c3e29f0406aa46e68d2ef513f7d60721` and MLflow run ID
+`78c5e66ed4214b11a3d7523a7e12b886`. It used 3,500 learner updates, 21,454
+environment steps, and 1,030.75 seconds on ROCm. The manifest records clean
+source `b52bf155075be0aba94ab87ff954362e6ac7a173`, `max_train_steps`, and normal
+collector shutdown under the one-thread host resource cap.
+
+The reference core materially improves capability and learning speed. Mean
+evaluation first exceeds 450 at update 1,200, reaches 500 at updates 1,500,
+1,800, 1,900, 2,100, and 2,500, and reaches at least 450 at 13 evaluations.
+This is substantially earlier and more repeatable solved behavior than the
+recent legacy-core controls. The complete 100-update evaluation sequence is:
+
+```text
+9.35, 9.35, 9.35, 9.35, 18.45, 37.50, 119.70, 152.90, 399.85,
+437.00, 429.10, 471.45, 497.85, 476.40, 500.00, 464.35, 281.45,
+500.00, 500.00, 446.80, 500.00, 385.35, 446.05, 496.70, 500.00,
+222.35, 325.40, 499.15, 475.75, 195.15, 311.90, 231.15, 237.30,
+498.15, 313.00
+```
+
+The behavioral stability gate nevertheless fails. After first solving, return
+falls below 300 at updates 1,700, 2,600, 3,000, 3,200, and 3,300. Best return is
+`500` at update 1,500 and final return is `313`, so final is below 400 and the
+best-to-final gap is `187`. The implementation correction is retained because
+it restores the pinned architecture and exposes substantially more capability;
+it is rejected only as a sufficient explanation of the late collapse.
+
+The required deterministic final continuation audit is retained under
+`experiments/2026-07-22_cartpole_reference_rssm_core_continuation_probe/`.
+Seeds 17--36 average return `303.1` with no truncations, yielding 6,062 rows and
+20 physical terminals. The final posterior predicts mean continuation `0.804`
+on terminal rows and `0.787` on live rows: terminal states are assigned *more*
+survival than live states. Failure AUC is `0.291`, balanced accuracy is `0.500`,
+and the Brier score is `0.0533`. Mode-state and prior-state audits agree
+(failure AUC `0.317` and `0.302` respectively), while posterior-to-prior
+transport RMS is only `0.00464`. Terminal and near-terminal rows remain around
+`0.805` continuation versus `0.786` at distance ten or greater.
+
+This localizes the next boundary to continuation-head supervision rather than
+posterior-to-prior transport. The exact recurrent core makes solved behavior
+accessible but does not teach the natural-prior continuation head the physical
+failure boundary. The earlier balanced-loss intervention demonstrated that
+greater terminal gradient exposure can produce useful ranking, but its raw
+sigmoid represents a 50/50 reweighted class distribution and is therefore not
+a valid imagination discount. The next intervention must increase rare
+terminal learning while preserving—or explicitly recovering—the real
+continuation probability. Because the behavior gate failed, the conditional Q
+probe is not run and no broad seed sweep is authorized.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
