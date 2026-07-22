@@ -4768,3 +4768,73 @@ stability. Per the preregistration, aggregation retries end here. The next
 bounded intervention is the coupled reference vector encoder/posterior
 architecture audit; optimizer, replay, warmup, target-smoothing, and further
 state-loss tuning remain frozen.
+
+### Coupled reference observation-posterior source audit
+
+Pinned source `e3f0224` applies three complete normalized hidden transforms to
+vector observations. Each transform is `Linear(units) -> RMSNorm(eps=1e-4) ->
+SiLU`, including the third layer's normalization and activation. Local
+`StateOnlyEncoder` instead uses three linear projections with SiLU only after
+the first two. It has no normalization and exposes the third layer's raw
+affine output as the observation token. The authored `encoder_mlp_n_layers=3`
+field does not change this hard-coded topology.
+
+The mismatch continues immediately at the posterior boundary. Pinned RSSM
+`obslayers=1` concatenates the deterministic state and encoder tokens, then
+applies `Linear(hidden) -> RMSNorm(eps=1e-4) -> SiLU -> Linear(stoch*classes)`.
+Local `compute_posterior()` sends the concatenation directly through one linear
+logit projection. Thus the current posterior has no learned normalized mixing
+layer between a 512-dimensional recurrent state and the 128-dimensional token
+in the state-sum canary.
+
+These are one coupled representational boundary, not two independent training
+knobs: the posterior consumes the encoder's output directly, and neither
+intermediate topology matches a pinned model. The state-sum result makes this
+the earliest remaining shared failure point. The actor can reach return 500,
+but final posterior continuation AUC is only 0.617 and the imagined policy-
+target margin has effectively zero correlation with real counterfactual
+margin. A richer normalized observation-to-latent map could preserve the small
+terminal and recovery distinctions that the stronger reconstruction gradient
+now supplies. This remains a hypothesis; the state-sum canary does not prove
+that encoder/posterior capacity is the cause of late collapse.
+
+### Preregistered coupled reference observation-posterior canary
+
+- **Hypothesis:** matching the pinned vector encoder and one-hidden-layer
+  posterior topology will turn the state-sum canary's newly useful observation
+  grounding into stable latent failure-risk and action-value geometry.
+- **Causal variable:** add explicit, checkpointed architecture semantics.
+  `vector_encoder_mode=reference` uses three
+  `Linear -> RMSNorm(eps=1e-4) -> SiLU` transforms;
+  `posterior_head_layers=1` inserts one
+  `Linear -> RMSNorm(eps=1e-4) -> SiLU` transform before posterior logits.
+  Historical snapshots and field-less checkpoints retain/infer the old raw
+  three-linear encoder and direct posterior projection. Change both modes
+  together because the pinned observation-posterior boundary contains both.
+- **Frozen variables:** retain source-state aggregation, seed 0, 3,500 learner
+  updates, 20 deterministic evaluation episodes every 100 updates, `d_hidden`
+  128, four recurrent blocks, batch 8, sequence 16, burn-in 4, replay ratio 16,
+  one collector, equal `4e-5` rates, 1,000-update optimizer warmup, and every
+  optimizer/replay/continuation/actor/value setting from run
+  `bfdfe890249a42448758a51135715e14`. Do not also change model width, reward,
+  actor, critic, decoder, dynamics, or continuation-head topology.
+- **Mechanical gate:** prove the exact reference module sequence and epsilon,
+  preserved legacy parameter layouts, encoder and posterior gradient flow,
+  authored-Hydra selection, historical snapshot fallback, no-snapshot
+  architecture inference, and resume rejection of an unapproved semantic
+  migration. Then run focused tests, the full fast suite, compile, scoped
+  Pyright, and a one-update multiprocess CPU smoke.
+- **Behavioral gate:** reach mean return 450; never fall below 300 afterward;
+  final at least 400; best-to-final gap at most 100.
+- **Boundary gate:** regardless of behavior, run the same final 20-seed
+  continuation audit and five-seed, 64-sample online policy-target probe.
+  Posterior and prior failure ROC AUC must each reach 0.8. The policy target
+  must have at least 100 confident actionable rows, target/trusted-real
+  balanced accuracy at least 0.592, and actor/target agreement at least 0.8.
+- **Interpretation:** passing both gates selects the complete observation-
+  posterior boundary for replication. Improved latent gates but unstable
+  behavior localizes the next defect downstream. Failure ends normalized
+  observation-posterior retries and selects a fresh source-equation audit
+  rather than width or optimizer tuning.
+- **Stop rule:** one seed only. Do not add seeds or proceed to Pong unless both
+  frozen gates pass.
