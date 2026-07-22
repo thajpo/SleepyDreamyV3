@@ -81,7 +81,7 @@ class EpisodeReplayBuffer:
     - Circular buffer stores up to max_episodes (FIFO eviction)
     - Samples uniformly over valid sequence starts, not uniformly over episodes
     - sample() returns fixed-length subsequences (pads short episodes)
-    - Blocks only on startup until min_episodes collected
+    - Blocks whenever the configured replay population is not sampleable
     """
 
     def __init__(
@@ -122,7 +122,7 @@ class EpisodeReplayBuffer:
         self.buffer = deque(maxlen=max_episodes)
         self.lock = threading.Lock()
         self._budget_changed = threading.Condition(self.lock)
-        self.ready_event = threading.Event()  # Signals when min_episodes reached
+        self.ready_event = threading.Event()
 
         self._stop = False
         self._thread = None
@@ -171,6 +171,7 @@ class EpisodeReplayBuffer:
         with self._budget_changed:
             while (
                 not self._stop
+                and self.ready_event.is_set()
                 and self._env_step_budget is not None
                 and self._total_steps >= self._env_step_budget
             ):
@@ -188,6 +189,20 @@ class EpisodeReplayBuffer:
                 return
             self._env_step_budget += float(steps)
             self._budget_changed.notify_all()
+
+    def allow_env_steps_until(self, total_steps: float) -> None:
+        """Extend the collection budget to an absolute environment-step target."""
+        if not self.throttle_collection:
+            return
+        if total_steps < 0:
+            raise ValueError("collection budget target must be non-negative")
+        with self._budget_changed:
+            if self._env_step_budget is None:
+                return
+            target = float(total_steps)
+            if target > self._env_step_budget:
+                self._env_step_budget = target
+                self._budget_changed.notify_all()
 
     def add_episode(self, episode):
         """Insert one complete episode into the replay buffer."""
@@ -221,7 +236,8 @@ class EpisodeReplayBuffer:
             collector_id,
             episode_id,
         )
-        with self.lock:
+        with self._budget_changed:
+            was_ready = self.ready_event.is_set()
             self.buffer.append(stored_episode)
             self._episodes_added += 1
             self._total_steps += ep_len
@@ -229,21 +245,20 @@ class EpisodeReplayBuffer:
             has_complete_sequence = self.sequence_mode == "episode" or bool(
                 self._stream_start_candidates()
             )
-            if (
-                len(self.buffer) >= self.min_episodes
-                and has_complete_sequence
-                and not self.ready_event.is_set()
-            ):
-                if self.throttle_collection:
-                    # Startup is intentionally unrestricted. Once the minimum
-                    # population exists, every later episode must be paid for by
-                    # completed trainer updates.
-                    self._env_step_budget = float(self._total_steps)
+            is_ready = len(self.buffer) >= self.min_episodes and has_complete_sequence
+            if is_ready:
                 self.ready_event.set()
+            else:
+                self.ready_event.clear()
+            if is_ready and not was_ready:
+                if self.throttle_collection and self._env_step_budget is None:
+                    self._env_step_budget = float(self._total_steps)
                 print(
                     f"Replay buffer ready: {len(self.buffer)} episodes collected",
                     flush=True,
                 )
+            if is_ready != was_ready:
+                self._budget_changed.notify_all()
 
     def _sample_subsequence(self, episode):
         """
@@ -425,8 +440,9 @@ class EpisodeReplayBuffer:
             is_first,
         )
 
-    def _sample_stream(self, batch_size, recent_fraction):
-        candidates = self._stream_start_candidates()
+    def _sample_stream(self, batch_size, recent_fraction, candidates=None):
+        if candidates is None:
+            candidates = self._stream_start_candidates()
         if not candidates:
             raise RuntimeError("replay stream has no complete sequence")
 
@@ -460,7 +476,7 @@ class EpisodeReplayBuffer:
         """
         Sample a batch of fixed-length subsequences with recent bias.
 
-        Blocks until buffer has min_episodes, then returns instantly.
+        Blocks until the configured replay population can provide a sequence.
         Samples recent_fraction of batch from newest episodes (recency bias).
         Within each pool, episode probability is proportional to the number of
         valid starts so every stored training window is equally likely.
@@ -474,14 +490,22 @@ class EpisodeReplayBuffer:
             future_returns, continue_weights, mask, is_first) tuples, each with
             shape (sequence_length, ...)
         """
-        # Wait for buffer to have enough episodes (only blocks on startup)
+        if self.sequence_mode == "stream":
+            while True:
+                self.ready_event.wait()
+                with self.lock:
+                    if not self.ready_event.is_set():
+                        continue
+                    candidates = self._stream_start_candidates()
+                    if candidates:
+                        return self._sample_stream(
+                            batch_size, recent_fraction, candidates=candidates
+                        )
+                    self.ready_event.clear()
+                    self._budget_changed.notify_all()
+
         self.ready_event.wait()
-
-        # Guard buffer sampling to keep episode list/metadata consistent.
         with self.lock:
-            if self.sequence_mode == "stream":
-                return self._sample_stream(batch_size, recent_fraction)
-
             buffer_len = len(self.buffer)
             n_recent = int(batch_size * recent_fraction)
             n_uniform = batch_size - n_recent
@@ -605,7 +629,7 @@ class EpisodeReplayBuffer:
 
     @property
     def is_ready(self):
-        """Whether buffer has minimum episodes for sampling."""
+        """Whether the configured replay population can be sampled."""
         return self.ready_event.is_set()
 
     @property

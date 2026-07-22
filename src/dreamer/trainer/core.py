@@ -16,7 +16,7 @@ import time
 from .logging import create_step_metrics, log_step_metrics, log_progress
 from .forward import dreamer_step
 from .gradient_diagnostics import measure_gradient_alignment
-from ..runtime.replay_buffer import EpisodeReplayBuffer, EnvData
+from ..runtime.replay_buffer import EpisodeReplayBuffer
 from .checkpoints import save_checkpoint, load_checkpoint
 from ..models import (
     symlog,
@@ -185,7 +185,7 @@ class WorldModelTrainer:
         self.data_queue = data_queue
         self.model_queues = list(model_queues)
 
-        # Replay buffer: background thread drains queue, sample() returns instantly
+        # Replay buffer: background thread drains the queue for synchronous sampling
         self.replay_buffer = EpisodeReplayBuffer(
             data_queue=data_queue,
             max_episodes=config.replay_buffer_size,
@@ -197,7 +197,7 @@ class WorldModelTrainer:
             sequence_mode=config.replay_sequence_mode,
         )
 
-        self.batch_size = config.batch_size  # needed by get_data_from_buffer
+        self.batch_size = config.batch_size
         self.replay_buffer.start()
         print(f"Replay buffer started (max={config.replay_buffer_size} episodes)")
 
@@ -297,83 +297,6 @@ class WorldModelTrainer:
         if self.train_step < self.config.max_train_steps:
             self.send_models_to_collectors(self.train_step)
 
-    def get_data_from_buffer(self) -> EnvData | None:
-        """Sample batch from replay buffer. Returns EnvData or None if empty."""
-        raw_batch = self.replay_buffer.sample(self.batch_size)
-
-        batch_pixels = []
-        batch_pixels_original = []
-        batch_states = []
-        batch_actions = []
-        batch_rewards = []
-        batch_is_first = []
-        batch_is_last = []
-        batch_is_terminal = []
-        batch_future_returns = []
-        batch_continue_weights = []
-        batch_mask = []
-
-        for (
-            pixels,
-            states,
-            actions,
-            rewards,
-            is_last,
-            is_terminal,
-            future_returns,
-            continue_weights,
-            mask,
-            is_first,
-        ) in raw_batch:
-            if self.use_pixels and pixels is not None:
-                target_size = self.config.encoder_cnn_target_size
-                pixels_tensor = torch.from_numpy(pixels).permute(0, 3, 1, 2)
-                batch_pixels_original.append(pixels_tensor)
-                if pixels_tensor.shape[-2:] != target_size:
-                    pixels_tensor = resize_pixels_to_target(pixels_tensor, target_size)
-                batch_pixels.append(pixels_tensor)
-
-            batch_states.append(torch.from_numpy(states))
-            batch_actions.append(torch.from_numpy(actions))
-            batch_rewards.append(torch.from_numpy(rewards))
-            batch_is_first.append(torch.from_numpy(is_first))
-            batch_is_last.append(torch.from_numpy(is_last))
-            batch_is_terminal.append(torch.from_numpy(is_terminal))
-            if future_returns is not None:
-                batch_future_returns.append(torch.from_numpy(future_returns))
-            batch_continue_weights.append(torch.from_numpy(continue_weights))
-            batch_mask.append(torch.from_numpy(mask))
-
-        if self.use_pixels and batch_pixels:
-            pixels_out = torch.stack(batch_pixels).to(self.device).float()
-            pixels_original_out = (
-                torch.stack(batch_pixels_original).to(self.device).float()
-            )
-        else:
-            pixels_out = None
-            pixels_original_out = None
-
-        states_out = torch.stack(batch_states).to(self.device)
-        future_returns_out = (
-            torch.stack(batch_future_returns).to(self.device)
-            if len(batch_future_returns) == len(raw_batch)
-            else None
-        )
-
-        return EnvData(
-            states=states_out,
-            actions=torch.stack(batch_actions).to(self.device),
-            rewards=torch.stack(batch_rewards).to(self.device),
-            is_first=torch.stack(batch_is_first).to(self.device),
-            is_last=torch.stack(batch_is_last).to(self.device),
-            is_terminal=torch.stack(batch_is_terminal).to(self.device),
-            future_returns=future_returns_out,
-            continue_weights=torch.stack(batch_continue_weights).to(self.device),
-            mask=torch.stack(batch_mask).to(self.device),
-            pixels=pixels_out,
-            pixels_original=pixels_original_out,
-        )
-
     def prevent_stale_training(self) -> bool:
         """Gate training speed to match environment data collection rate.
 
@@ -387,12 +310,25 @@ class WorldModelTrainer:
             self.config.sequence_length - 1,
         )
         effective_seq_for_gate = max(1, self.config.sequence_length - effective_burn_in)
+        env_steps_per_update = (
+            self.batch_size
+            * effective_seq_for_gate
+            * self.config.action_repeat
+        )
         target_train_steps = int(
             env_steps
             * self.config.replay_ratio
-            / (self.batch_size * effective_seq_for_gate * self.config.action_repeat)
+            / env_steps_per_update
         )
         if self.train_step >= target_train_steps and env_steps > 0:
+            next_update_steps = math.ceil(
+                (self.train_step + 1)
+                * env_steps_per_update
+                / self.config.replay_ratio
+            )
+            self.replay_buffer.allow_env_steps_until(
+                max(0, next_update_steps - self._resume_env_steps_offset)
+            )
             time.sleep(0.01)  # Brief wait for more data
             return True
         return False

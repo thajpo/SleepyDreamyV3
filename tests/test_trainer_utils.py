@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -11,6 +13,7 @@ from dreamer.models import (
     twohot_encode,
     twohot_expectation,
 )
+from dreamer.trainer.core import WorldModelTrainer
 
 
 def test_twohot_encode():
@@ -53,6 +56,39 @@ def test_initialized_reward_and_value_heads_decode_to_exactly_zero():
 
     torch.testing.assert_close(reward, torch.zeros(2), rtol=0, atol=0)
     torch.testing.assert_close(value, torch.zeros(2), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(("train_step", "resume_offset"), [(0, 0), (3, 36)])
+def test_pacing_gate_funds_collection_until_next_update_is_affordable(
+    monkeypatch, train_step, resume_offset
+):
+    trainer = object.__new__(WorldModelTrainer)
+    trainer.train_step = train_step
+    trainer.batch_size = 4
+    trainer._resume_env_steps_offset = resume_offset
+    budget_targets = []
+    trainer.replay_buffer = SimpleNamespace(
+        total_env_steps=4,
+        allow_env_steps_until=lambda steps: budget_targets.append(steps),
+    )
+    trainer.config = SimpleNamespace(
+        replay_burn_in=1,
+        sequence_length=4,
+        replay_ratio=1.0,
+        action_repeat=1,
+    )
+    sleep_calls = []
+    monkeypatch.setattr(
+        "dreamer.trainer.core.time.sleep", lambda seconds: sleep_calls.append(seconds)
+    )
+
+    assert trainer.prevent_stale_training()
+    assert budget_targets == [12]
+    assert sleep_calls == [0.01]
+
+    trainer.replay_buffer.total_env_steps = 12
+    assert not trainer.prevent_stale_training()
+    assert budget_targets == [12]
 
 
 @pytest.mark.parametrize("num_bins", [8, 9])

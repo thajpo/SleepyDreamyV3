@@ -1,5 +1,6 @@
-from queue import Queue
+import threading
 import time
+from queue import Queue
 
 import numpy as np
 import pytest
@@ -231,6 +232,69 @@ def test_stream_never_crosses_collectors_or_episode_id_gaps():
 
     assert replay._stream_start_candidates() == []
     assert not replay.is_ready
+
+
+def test_stream_sample_waits_while_fifo_contents_are_not_contiguous():
+    replay = EpisodeReplayBuffer(
+        data_queue=None,
+        max_episodes=2,
+        min_episodes=2,
+        sequence_length=4,
+        sequence_mode="stream",
+    )
+    replay.add_episode((*_episode(2, marker=1.0), 0, 1))
+    replay.add_episode((*_episode(2, marker=2.0), 0, 2))
+    assert replay.is_ready
+
+    replay.add_episode((*_episode(2, marker=3.0), 1, 1))
+    assert not replay.is_ready
+
+    samples = []
+    sampler = threading.Thread(
+        target=lambda: samples.extend(replay.sample(1)), daemon=True
+    )
+    sampler.start()
+    sampler.join(timeout=0.05)
+    assert sampler.is_alive()
+
+    replay.add_episode((*_episode(2, marker=4.0), 1, 2))
+    sampler.join(timeout=1.0)
+
+    assert not sampler.is_alive()
+    assert len(samples) == 1
+    assert np.all(samples[0][1][:, 0] >= 3.0)
+
+
+def test_stream_readiness_recovers_after_fifo_eviction():
+    queue = Queue()
+    replay = EpisodeReplayBuffer(
+        data_queue=queue,
+        max_episodes=2,
+        min_episodes=2,
+        sequence_length=4,
+        throttle_collection=True,
+        sequence_mode="stream",
+    )
+    queue.put((*_episode(2, marker=1.0), 0, 1))
+    queue.put((*_episode(2, marker=2.0), 0, 2))
+    queue.put((*_episode(2, marker=3.0), 1, 1))
+    queue.put((*_episode(2, marker=4.0), 1, 2))
+    queue.put((*_episode(2, marker=5.0), 1, 3))
+    replay.start()
+    try:
+        assert replay.ready_event.wait(timeout=1.0)
+        replay.allow_env_steps(5)
+        for _ in range(100):
+            if replay.total_env_steps == 10:
+                break
+            time.sleep(0.01)
+
+        assert replay.total_env_steps == 10
+        assert replay.is_ready
+        assert all(episode[8] == 1 for episode in replay.buffer)
+        assert replay.sample(batch_size=1)[0][1].shape[0] == 4
+    finally:
+        replay.stop()
 
 
 def test_background_collection_allows_one_episode_of_budget_debt():
