@@ -2487,6 +2487,19 @@ against an NTFS volume. No Dreamer code or process fault occurred. A clean
 retry of the same seed and frozen configuration remains the one authorized
 research canary; the interrupted attempt is not a second statistical seed.
 
+The first retry is likewise retained, not interpreted, under
+`experiments/2026-07-22_cartpole_symmetric_twohot_seed0_3500_retry1/`, with
+manifest run ID `0d0ad13580bc426b82e71fa7a0412456` and MLflow run ID
+`4cc53cd9fbd943179ce05fae728bb1e2`. It reached update 500 at the expected
+`9.35` pre-learning floor. Throughput was `3.61` updates/second while the host
+was free, then fell to `1.00` after the external VLA supervisor launched its
+next worker; Dreamer and VLA together saturated all 20 logical CPUs. The run
+was stopped to avoid perturbing the VLA study. The final clean retry will cap
+OpenMP, MKL, and OpenBLAS to one thread per Dreamer process; this is an
+operational resource limit, not an authored model, data, optimizer, or RNG
+change. It must first demonstrate normal bounded CPU use and adequate
+throughput before consuming the full canary budget.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
