@@ -4329,6 +4329,52 @@ the first broken model boundary.
   Do not train or rebalance continuation after seeing the result; compare it
   with the already-recorded actor/target and one-step-state boundaries first.
 
+### Decoded-mean continuation-boundary result
+
+The frozen audit completed under
+`experiments/2026-07-22_cartpole_slow_mean_continuation_probe/` from clean
+source `df40377`. Best update 1,200 averages `379.15` over seeds 17--36 (17
+physical failures and three time-limit truncations); final update 3,500 averages
+`185.65` with 20 physical failures.
+
+| Metric | Best 1,200 | Final 3,500 |
+|---|---:|---:|
+| Posterior failure ROC AUC | 0.910 | **0.987** |
+| Prior failure ROC AUC | 0.887 | **0.985** |
+| Posterior terminal / live effective discount | 0.9948 / 0.9970 | **0.9315 / 0.9835** |
+| Prior terminal / live effective discount | 0.9945 / 0.9970 | **0.9266 / 0.9824** |
+| Posterior-to-prior transport RMS, all rows | 0.00030 | 0.00199 |
+| Posterior-to-prior transport RMS, terminal rows | 0.00204 | 0.00539 |
+| Balanced accuracy at half task discount | 0.500 | 0.500 |
+
+Both channels exceed the preregistered `0.8` ordering gate at both checkpoints,
+so posterior-to-prior transport and failure-risk ordering are rejected as the
+first broken target component. The final head is especially informative: it
+becomes *better* at ranking imminent failure while behavior falls by roughly
+194 return. Transport error is also tiny relative to terminal label error.
+
+This does not mean continuation is calibrated correctly. No terminal row
+crosses the half-discount decision boundary; the final posterior still assigns
+actual failures effective discount `0.9315`. Conversely, it underpredicts the
+live target `0.997` at `0.9835`; that roughly 1.35-percentage-point per-step gap
+compounds across imagination. The distance profile is monotonic and useful
+(`0.9315` at failure versus `0.9858` at distance ten or greater), but it acts as
+a smooth hazard score rather than a physical termination probability. This
+matches the earlier continuation-capacity, stream-exposure, and class-balance
+experiments: the signal is present, while naïve balancing destroys the natural
+probability needed as a discount and does not stabilize behavior.
+
+The current failure therefore remains value-target quality on recovery states,
+not missing reward or latent transport. The existing policy-Q decomposition
+supports that ordering: on final-policy actionable states, one-step critic-
+bootstrap balanced accuracy is `0.407`, while the learned three-step model-
+return action delta is only `0.00295` in mean absolute magnitude and has
+balanced accuracy `0.356`. The 15-step policy target's much larger `0.985` mean
+action margin is consequently dominated by bootstrapped value geometry rather
+than immediate learned reward differences. The next audit must focus on why
+the critic is self-consistent but wrong on recovery histories; repeating
+continuation-head capacity or class-weight experiments is not authorized.
+
 Interrupted manifests correctly record `status: interrupted` and evaluation
 history, but incorrectly retain `progress.train_step: 0` and `env_steps: 0`.
 Fix this bookkeeping issue separately from the learning experiment so it does
