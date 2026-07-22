@@ -2230,6 +2230,65 @@ corrected opposite source claim.
   causal hypothesis; it does not justify combining head-depth, optimizer-ramp,
   or replay-coverage changes.
 
+#### Online-value-target canary result
+
+The frozen seed-0 canary completed normally at source commit `43d43a1` with run
+ID `d9c14b1ba1d74173aaa85a7d8531f05c` and MLflow run ID
+`3de8bb86ef06442b9df38ab72edc104d`. It used 3,500 learner updates, 21,353
+environment steps, and 1,208.5 seconds on ROCm. The run retained an atomic
+manifest plus best and final checkpoints under
+`experiments/2026-07-21_cartpole_online_target_seed0_3500/`.
+
+The intervention makes learning earlier but does not make it stable. Evaluation
+remained near `9.4` through update 1,200, then reached `362.95` at 1,700,
+fell to `149.25` at 2,300, recovered to `441.05` at 2,700, fell to `156.35`
+at 2,900, and reached a best of `493.30` at 3,100. It immediately violated
+the post-solve floor with `284.80` at 3,200 and ended at `163.20`; the
+best-to-final gap is `330.10`. The behavioral gate therefore fails, and seeds
+1 and 2 are stopped by the preregistered rule.
+
+This rejects stale slow targets as a sufficient cause of collapse. It does not
+reverse the source-conformance correction: online targets match the audited
+reference and materially change learning dynamics. The already-preregistered
+boundary diagnostics now compare best and final on-policy behavior and run the
+symmetric fixed-history probe from both source policies, using episodes/seeds
+17--36, real horizon 30, and model horizon 3. Their purpose is to determine
+whether online targets improved recovery-state value ordering despite failing
+the behavioral gate; they cannot rescue the canary's disposition.
+
+The probes completed and retain summaries plus per-state rows under
+`experiments/2026-07-21_cartpole_online_target_on_policy_probe/`,
+`experiments/2026-07-21_cartpole_online_target_fixed_history_best_source/`, and
+`experiments/2026-07-21_cartpole_online_target_fixed_history_final_source/`.
+The on-policy best checkpoint solves all 20 episodes at return `500.0`; the
+final checkpoint averages `183.2` and solves none.
+
+| Fixed history source | Target | Q/real balanced | Q/real corr. | Actor/Q | Actor/real balanced | Posterior x MSE | One-step prior x MSE |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Best, return 500.0 | Best 3,100 | 0.515 | 0.132 | 0.951 | 0.533 | 0.139 | 0.104 |
+| Best, return 500.0 | Final 3,500 | 0.557 | 0.061 | 0.935 | 0.582 | 0.155 | 0.175 |
+| Final, return 183.2 | Best 3,100 | 0.332 | -0.049 | 0.962 | 0.334 | 1.702 | 0.689 |
+| Final, return 183.2 | Final 3,500 | 0.433 | 0.065 | 0.865 | 0.482 | 0.128 | 0.063 |
+
+The final checkpoint therefore improves rather than forgets action ordering on
+the solved checkpoint's fixed histories. Its own histories are harder: mean
+absolute cart position is `0.637` instead of `0.538`, and `28.8%` of states
+have `|x| >= 1` instead of `20.0%`. The best checkpoint represents those
+histories poorly and ranks their actions worse; the final checkpoint adapts its
+representation but still ranks real action outcomes below chance. Its actor
+continues to follow that ranking on `86.5%` of actionable states.
+
+The boundary gate fails. Relative to the slow-target canary on final-policy
+histories, online targets change Q/real correlation from `-0.072` to `0.065`
+but reduce balanced accuracy from `0.521` to `0.433`; actor/Q agreement remains
+above its `0.8` floor. The isolated stale-target causal hypothesis is rejected:
+online targets improve speed and one aspect of ordering but do not supply a
+robust recovery value landscape. No replication seeds or combined corrective
+changes are authorized by this result. The evidence-selected next step is to
+finish the remaining objective/optimizer source audit and preregister one
+conformance intervention only if it exposes another concrete divergence that
+can explain recovery-state value errors.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
