@@ -2473,6 +2473,20 @@ physical bins suffers cancellation error even when probabilities are uniform.
   sufficient cause; it does not authorize stacking optimizer warmup, joint
   ownership, value-head depth, or representation gradients.
 
+The first launch attempt is retained as interrupted operational evidence under
+`experiments/2026-07-22_cartpole_symmetric_twohot_seed0_3500/`, with manifest
+run ID `206f4d5a6487409e847e119a150fd5d0` and MLflow run ID
+`e56179f7872b46eb849e9a51dcc6fff2`. Runtime telemetry confirmed the intended
+mechanism at update 0: imagined reward and critic-value means were both exactly
+`0.0`, rather than the historical cold critic's `+23.505`. The run was manually
+stopped near update 220 without a learning disposition because throughput was
+only `0.98` updates/second, versus `3.57` for the matched predecessor at update
+200. The learner was collection-gated: frame/update ratios were matched and the
+host simultaneously had a separate VLA study issuing heavy CPU/filesystem work
+against an NTFS volume. No Dreamer code or process fault occurred. A clean
+retry of the same seed and frozen configuration remains the one authorized
+research canary; the interrupted attempt is not a second statistical seed.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
