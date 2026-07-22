@@ -61,7 +61,8 @@ def add_sequence_mean_auxiliary_loss(
 
 def calculate_replay_lambda_targets(
     rewards: torch.Tensor,
-    continues: torch.Tensor,
+    is_last: torch.Tensor,
+    is_terminal: torch.Tensor,
     value_annotations: torch.Tensor,
     gamma: float,
     lam: float,
@@ -77,15 +78,33 @@ def calculate_replay_lambda_targets(
     num_targets = max(0, rewards.shape[0] - 1)
     if num_targets == 0:
         return rewards[:0]
-    return calculate_lambda_returns(
-        rewards[1:],
-        rewards[1:],
-        continues[1:],
-        gamma,
-        lam,
-        num_targets,
-        value_annotations=value_annotations,
-        continues_are_logits=False,
+    next_rewards = rewards[1:]
+    next_last = is_last[1:].float()
+    next_terminal = is_terminal[1:].float()
+    next_bootstrap = value_annotations[1:]
+
+    live = float(gamma) * (1.0 - next_terminal)
+    trace = float(lam) * (1.0 - next_last)
+    next_return = value_annotations[-1]
+    returns: list[torch.Tensor] = []
+    for index in reversed(range(num_targets)):
+        next_return = (
+            next_rewards[index]
+            + (1.0 - trace[index]) * live[index] * next_bootstrap[index]
+            + live[index] * trace[index] * next_return
+        )
+        returns.append(next_return)
+    return torch.stack(list(reversed(returns)))
+
+
+def calculate_replay_pair_mask(
+    replay_mask: torch.Tensor, replay_is_last: torch.Tensor
+) -> torch.Tensor:
+    """Mask invalid and cross-episode posterior/target pairs."""
+    return (
+        replay_mask[:-1]
+        * replay_mask[1:]
+        * (1.0 - replay_is_last[:-1].float())
     )
 
 
@@ -568,15 +587,13 @@ def dreamer_step(
 
         replay_rewards = batch.rewards[:, train_start_t:].transpose(0, 1)
         replay_is_last = batch.is_last[:, train_start_t:].transpose(0, 1)
-        replay_continues = (1.0 - batch.is_terminal.float()).transpose(0, 1)[
-            train_start_t:
-        ]
-        replay_continues = replay_continues * (1.0 - replay_is_last.float())
+        replay_is_terminal = batch.is_terminal[:, train_start_t:].transpose(0, 1)
         replay_mask = batch.mask[:, train_start_t:].transpose(0, 1)
 
         replay_lambda_returns = calculate_replay_lambda_targets(
             replay_rewards,
-            replay_continues,
+            replay_is_last,
+            replay_is_terminal,
             replay_annotations,
             gamma,
             lam,
@@ -585,11 +602,7 @@ def dreamer_step(
         replay_logits = critic(replay_posterior[:, :-1].detach())
         logits_flat = replay_logits.reshape(-1, replay_logits.size(-1))
         targets_flat = replay_lambda_returns.detach().reshape(-1)
-        replay_pair_mask = (
-            replay_mask[:-1]
-            * replay_mask[1:]
-            * (1.0 - replay_is_last[:-1].float())
-        )
+        replay_pair_mask = calculate_replay_pair_mask(replay_mask, replay_is_last)
         mask_flat = replay_pair_mask.transpose(0, 1).reshape(-1).float()
 
         targets_twohot = twohot_encode(targets_flat, bins)
