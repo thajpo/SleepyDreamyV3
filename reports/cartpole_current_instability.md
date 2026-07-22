@@ -2916,6 +2916,40 @@ state information or online fitting dominated by live labels.
   seed, and fit configuration. Do not train the end-to-end agent, alter loss
   weighting, or iterate the classifier settings after observing the result.
 
+#### Continuation-representability result
+
+The preregistered probe completed from clean diagnostic commit `5ea09c7` and
+is retained under
+`experiments/2026-07-22_cartpole_continuation_representability/`. Focused probe
+tests passed (`5`), its direct type check and bytecode compilation passed, and
+the frozen checkpoint was not modified. The 100 deployed deterministic
+episodes average return `308.42`; none truncate, so they supply exactly 100
+physical terminal rows. The episode-level split contains 24,724 training rows
+and 80 terminals, a live-to-terminal ratio of `308.05`, plus 6,118 held-out
+rows and 20 terminals.
+
+| Held-out input/head | Failure AUC | Balanced accuracy | Terminal recall | Terminal failure probability | Live failure probability |
+|---|---:|---:|---:|---:|---:|
+| Original posterior-latent head | 0.944 | 0.500 | 0.000 | 0.172 | 0.053 |
+| Fresh balanced posterior-latent head | 0.973 | 0.935 | 1.000 | 0.944 | 0.124 |
+| Fresh balanced true-state control | 0.998 | 0.989 | 1.000 | 0.973 | 0.023 |
+
+Both preregistered gates pass. The true-state control proves the cohort and fit
+can express the physical failure rule. More importantly, the same authored
+one-hidden-layer MLP fitted on the frozen joined posterior latent exceeds both
+latent thresholds by wide margins. The checkpoint's original head already has
+strong risk ordering, but all 20 terminal probabilities remain below the fixed
+failure cutoff; it is miscalibrated toward the overwhelmingly common live
+class rather than deprived of terminal information.
+
+This classifies the next boundary as online continuation supervision/calibration,
+not encoder/RSSM representability. A training intervention may now balance the
+terminal and live contributions, but it must preserve the overall continuation-
+loss scale and adapt to the changing failure prevalence rather than hard-code
+the late-policy ratio `308.05` into early training. The fresh AdamW fit is a
+capacity diagnostic, not evidence that the trainer should switch optimizers or
+use its `1e-3` rate.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
