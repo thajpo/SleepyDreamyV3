@@ -13,7 +13,7 @@ import torch
 import torch.nn.functional as F
 
 from dreamer.inspect import resolve_device
-from dreamer.models import symlog
+from dreamer.models import symlog, unimix_logits
 
 if __package__:
     from scripts.probe_cartpole_q import load_checkpoint_models
@@ -42,6 +42,7 @@ def select_policy_action(
     generator: torch.Generator | None = None,
 ) -> torch.Tensor:
     """Select a deterministic or reproducibly sampled categorical action."""
+    logits = unimix_logits(logits, unimix_ratio=0.01)
     if policy_mode == "argmax":
         return logits.argmax(dim=-1)
     if policy_mode == "sample":
@@ -54,6 +55,24 @@ def select_policy_action(
     raise ValueError(f"unsupported policy mode: {policy_mode}")
 
 
+def select_posterior_latent(
+    logits: torch.Tensor,
+    *,
+    latent_mode: str,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    """Select posterior categories using evaluation or collection semantics."""
+    mixed = unimix_logits(logits, unimix_ratio=0.01)
+    if latent_mode == "argmax":
+        return mixed.argmax(dim=-1)
+    if latent_mode == "sample":
+        probabilities = F.softmax(mixed, dim=-1)
+        flat = probabilities.reshape(-1, probabilities.shape[-1])
+        indices = torch.multinomial(flat, 1, generator=generator)
+        return indices.view(*probabilities.shape[:-1])
+    raise ValueError(f"unsupported latent mode: {latent_mode}")
+
+
 def evaluate_checkpoint(
     checkpoint_path: Path,
     *,
@@ -61,6 +80,7 @@ def evaluate_checkpoint(
     episodes: int,
     seed: int,
     policy_mode: str = "argmax",
+    latent_mode: str = "argmax",
 ) -> dict[str, object]:
     """Run one policy mode without counterfactual probe overhead."""
     (
@@ -86,6 +106,8 @@ def evaluate_checkpoint(
     h_prev_backup = world_model.h_prev.clone()
     action_generator = torch.Generator(device=device)
     action_generator.manual_seed(seed + 1_000_000)
+    latent_generator = torch.Generator(device=device)
+    latent_generator.manual_seed(seed + 2_000_000)
 
     try:
         with torch.no_grad():
@@ -113,7 +135,11 @@ def evaluate_checkpoint(
                     )
                     tokens = encoder(symlog(state.unsqueeze(0)))
                     posterior_logits = world_model.compute_posterior(h, tokens)
-                    posterior_index = posterior_logits.argmax(dim=-1)
+                    posterior_index = select_posterior_latent(
+                        posterior_logits,
+                        latent_mode=latent_mode,
+                        generator=latent_generator,
+                    )
                     z_sample = F.one_hot(
                         posterior_index,
                         num_classes=world_model.n_classes,
@@ -144,7 +170,9 @@ def evaluate_checkpoint(
         "checkpoint": str(checkpoint_path.resolve()),
         "train_step": train_step,
         "policy_mode": policy_mode,
+        "latent_mode": latent_mode,
         "action_seed": seed + 1_000_000,
+        "latent_seed": seed + 2_000_000,
         "seed_start": seed,
         "seed_end": seed + episodes - 1,
         "returns": returns,
@@ -165,6 +193,12 @@ def main() -> None:
         default="argmax",
         help="Select mode actions or reproducibly sample categorical actions",
     )
+    parser.add_argument(
+        "--latent-mode",
+        choices=("argmax", "sample"),
+        default="argmax",
+        help="Select posterior mode or reproducibly sample as collection does",
+    )
     args = parser.parse_args()
     if args.episodes <= 0:
         parser.error("--episodes must be positive")
@@ -179,6 +213,7 @@ def main() -> None:
             episodes=args.episodes,
             seed=args.seed,
             policy_mode=args.policy_mode,
+            latent_mode=args.latent_mode,
         )
         results.append(result)
         print(

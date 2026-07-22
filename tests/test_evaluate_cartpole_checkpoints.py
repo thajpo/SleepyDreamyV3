@@ -2,6 +2,7 @@ import pytest
 import torch
 
 from scripts.evaluate_cartpole_checkpoints import (
+    select_posterior_latent,
     select_policy_action,
     summarize_returns,
 )
@@ -40,3 +41,28 @@ def test_select_policy_action_supports_argmax_and_reproducible_sampling():
 def test_select_policy_action_rejects_unknown_mode():
     with pytest.raises(ValueError, match="unsupported policy mode"):
         select_policy_action(torch.zeros(1, 2), policy_mode="greedy")
+
+
+def test_select_posterior_latent_supports_mode_and_reproducible_sampling():
+    logits = torch.tensor(
+        [
+            [[3.0, 1.0], [1.0, 3.0]],
+            [[0.0, 0.0], [0.0, 0.0]],
+        ]
+    )
+    first = torch.Generator().manual_seed(11)
+    second = torch.Generator().manual_seed(11)
+
+    torch.testing.assert_close(
+        select_posterior_latent(logits[:1], latent_mode="argmax"),
+        torch.tensor([[0, 1]]),
+    )
+    torch.testing.assert_close(
+        select_posterior_latent(logits, latent_mode="sample", generator=first),
+        select_posterior_latent(logits, latent_mode="sample", generator=second),
+    )
+
+
+def test_select_posterior_latent_rejects_unknown_mode():
+    with pytest.raises(ValueError, match="unsupported latent mode"):
+        select_posterior_latent(torch.zeros(1, 1, 2), latent_mode="mean")

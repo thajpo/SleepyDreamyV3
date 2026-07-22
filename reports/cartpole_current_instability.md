@@ -5076,3 +5076,46 @@ shift.
 - **Stop rule:** 14 read-only cells over existing checkpoints. Do not change
   entropy, evaluation policy, actor objective, or training from this result
   alone; use it to identify the instability being measured.
+
+### Action-extraction partial result and latent-semantics extension
+
+The first 14 cells are retained under
+`experiments/2026-07-22_cartpole_reference_observation_posterior_policy_extraction/`.
+
+| Update | Argmax mean / solved fraction | Sampled-action mean / solved fraction | Paired return MAE |
+|---:|---:|---:|---:|
+| 500 | 9.39 / 0.00 | 23.95 / 0.00 | 14.62 |
+| 1,000 | 9.25 / 0.00 | 21.58 / 0.00 | 12.33 |
+| 1,500 | 127.43 / 0.01 | 102.81 / 0.00 | 35.10 |
+| 2,000 | 159.17 / 0.00 | 156.53 / 0.00 | 11.10 |
+| 2,500 | 500.00 / 1.00 | 500.00 / 1.00 | 0.00 |
+| 3,000 | 500.00 / 1.00 | 500.00 / 1.00 | 0.00 |
+| 3,500 | 500.00 / 1.00 | 500.00 / 1.00 | 0.00 |
+
+Sampling only the actor action does not explain the acquired 500-return orbit;
+after update 2,500 it produces exactly the same perfect returns as argmax over
+100 seeds. Earlier stochastic actions improve the near-constant bad policies
+and modestly reduce the update-1,500 policy, but the update-2,000-to-2,500 phase
+change remains.
+
+This partial result does not yet test the trained policy semantics. The
+collector and pinned DreamerV3 both sample the categorical posterior latent on
+every observed step. Local deterministic evaluation instead takes posterior
+argmax before selecting the actor action. The existing action-sampling cells
+therefore hold fixed a mode latent that the collection policy does not use.
+
+The preregistered extraction diagnostic is extended once, before inspecting
+the missing cells:
+
+- add posterior-sampled/action-argmax and posterior-sampled/action-sampled
+  evaluations for the same seven checkpoints, 100 reset seeds, and independent
+  fixed latent/action RNG streams;
+- apply the authored one-percent unimix before either categorical sample, as
+  collection does; argmax ordering remains unchanged;
+- compare the four extraction combinations. If posterior sampling alone
+  destroys the solved orbit, the reported deterministic success is a mode-
+  latent artifact and the stochastic learned/collected policy remains unstable.
+  If both posterior-sampled cells remain solved, extraction is rejected more
+  generally and the closed-loop phase change belongs to the trained policy.
+
+The original no-training stop rule remains in force.
