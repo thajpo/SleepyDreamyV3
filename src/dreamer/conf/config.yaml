@@ -116,6 +116,8 @@ train:
   beta_dyn: 1.0
   beta_rep: 0.1
   beta_pred: 1.0
+  # Reference vector heads sum squared error across observation event dimensions.
+  state_loss_mode: reference_sum
   # Match DreamerV3: stop KL gradients once the one-nat free-bits budget is met.
   free_bits_straight_through: false
   prior_state_pred_scale: 0.0

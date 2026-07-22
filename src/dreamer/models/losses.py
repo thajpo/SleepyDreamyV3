@@ -73,8 +73,16 @@ def compute_wm_loss(
         # vector observations and the raw target is squashed inside the loss.
         obs_pred = state_pred
         obs_target = symlog(state_target)
-        pred_loss_vector = 1 / 2 * (obs_pred - obs_target) ** 2
-        pred_loss_vector = pred_loss_vector.mean(dim=-1)  # (B,)
+        squared_error = (obs_pred - obs_target) ** 2
+        state_loss_mode = getattr(
+            config, "state_loss_mode", "legacy_half_mean"
+        )
+        if state_loss_mode == "legacy_half_mean":
+            pred_loss_vector = 0.5 * squared_error.mean(dim=-1)
+        elif state_loss_mode == "reference_sum":
+            pred_loss_vector = squared_error.sum(dim=-1)
+        else:
+            raise ValueError(f"unsupported state_loss_mode: {state_loss_mode!r}")
     else:
         pred_loss_vector = torch.zeros(
             reward_t.shape[0], device=device, dtype=reward_t.dtype

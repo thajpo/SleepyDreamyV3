@@ -134,6 +134,61 @@ def test_state_decoder_loss_uses_raw_target_symlog_once():
     assert loss_dict["prediction_vector"].item() == 0.0
 
 
+def test_reference_state_loss_is_sum_without_gaussian_half_factor():
+    batch_size = 2
+    state_size = 4
+    n_bins = 5
+    n_latents = 2
+    n_classes = 3
+    target = torch.zeros(batch_size, state_size)
+
+    def evaluate(mode):
+        prediction = torch.tensor(
+            [[1.0, -2.0, 0.5, -0.25], [-1.0, 0.25, 2.0, -0.5]],
+            requires_grad=True,
+        )
+        _total, losses = compute_wm_loss(
+            obs_reconstruction={"state": prediction},
+            obs_t={"state": target},
+            reward_dist=torch.zeros(batch_size, n_bins),
+            reward_t=torch.zeros(batch_size),
+            terminated_t=torch.zeros(batch_size, dtype=torch.bool),
+            continue_logits=torch.zeros(batch_size, 1),
+            posterior_logits=torch.zeros(batch_size, n_latents, n_classes),
+            prior_logits=torch.zeros(batch_size, n_latents, n_classes),
+            B=torch.linspace(-2.0, 2.0, n_bins),
+            config=SimpleNamespace(
+                beta_dyn=0.0,
+                beta_rep=0.0,
+                beta_pred=1.0,
+                state_loss_mode=mode,
+            ),
+            device=target.device,
+            use_pixels=False,
+            sample_mask=torch.ones(batch_size),
+        )
+        losses["prediction_vector"].backward()
+        return losses, prediction.grad
+
+    legacy_losses, legacy_gradient = evaluate("legacy_half_mean")
+    reference_losses, reference_gradient = evaluate("reference_sum")
+
+    assert reference_losses["prediction_vector"].item() == pytest.approx(
+        8.0 * legacy_losses["prediction_vector"].item()
+    )
+    assert torch.allclose(reference_gradient, 8.0 * legacy_gradient)
+    for key in (
+        "prediction_pixel",
+        "prediction_reward",
+        "prediction_continue",
+        "dynamics",
+        "representation",
+    ):
+        assert reference_losses[key].item() == pytest.approx(
+            legacy_losses[key].item()
+        )
+
+
 def test_continue_importance_weights_only_change_continue_loss():
     batch_size = 2
     n_bins = 5

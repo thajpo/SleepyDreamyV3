@@ -134,6 +134,9 @@ class Config:
     beta_dyn: float = 1.0
     beta_rep: float = 0.1
     beta_pred: float = 1.0
+    # Historical runs used half the mean squared vector-observation error.
+    # Authored Hydra runs sum squared event errors like reference DreamerV3.
+    state_loss_mode: str = "legacy_half_mean"  # legacy_half_mean, reference_sum
     free_bits_straight_through: bool = False
     prior_state_pred_scale: float = 0.0
 
@@ -302,6 +305,10 @@ def validate_config(cfg: Config) -> None:
         errors.append("optimizer_contract must be 'legacy' or 'reference'")
     if cfg.critic_ema_target not in {"distribution", "mean_twohot"}:
         errors.append("critic_ema_target must be 'distribution' or 'mean_twohot'")
+    if cfg.state_loss_mode not in {"legacy_half_mean", "reference_sum"}:
+        errors.append(
+            "state_loss_mode must be 'legacy_half_mean' or 'reference_sum'"
+        )
     if cfg.optimizer_warmup_steps < 0:
         errors.append("optimizer_warmup_steps must be >= 0")
     if cfg.optimizer_contract == "reference":

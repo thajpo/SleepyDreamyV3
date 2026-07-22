@@ -28,6 +28,7 @@ def test_hydra_yaml_defines_every_runtime_field():
     assert runtime_config.optimizer_contract == "reference"
     assert runtime_config.optimizer_warmup_steps == 1000
     assert runtime_config.weight_imagination_starts is True
+    assert runtime_config.state_loss_mode == "reference_sum"
     assert runtime_config.wm_lr == runtime_config.actor_lr
     assert runtime_config.actor_lr == runtime_config.critic_lr
     validate_config(runtime_config)
@@ -43,6 +44,7 @@ def test_hydra_yaml_defines_every_runtime_field():
         (replace(Config(), continue_head_layers=2), "continue_head_layers"),
         (replace(Config(), optimizer_contract="mystery"), "optimizer_contract"),
         (replace(Config(), critic_ema_target="mystery"), "critic_ema_target"),
+        (replace(Config(), state_loss_mode="mystery"), "state_loss_mode"),
         (
             replace(Config(), optimizer_warmup_steps=-1),
             "optimizer_warmup_steps",
@@ -102,6 +104,7 @@ def test_resume_inherits_historical_checkpoint_semantics(tmp_path):
     snapshot.pop("optimizer_contract")
     snapshot.pop("optimizer_warmup_steps")
     snapshot.pop("weight_imagination_starts")
+    snapshot.pop("state_loss_mode")
     (run_dir / "config.json").write_text(json.dumps(snapshot))
 
     resumed = resolve_resume_config(
@@ -124,6 +127,7 @@ def test_resume_inherits_historical_checkpoint_semantics(tmp_path):
     assert resumed.optimizer_contract == "legacy"
     assert resumed.optimizer_warmup_steps == 0
     assert resumed.weight_imagination_starts is False
+    assert resumed.state_loss_mode == "legacy_half_mean"
 
 
 def test_resume_requires_explicit_semantic_migration(tmp_path):
@@ -182,6 +186,7 @@ def test_resume_restores_checkpoint_authored_loss_and_bin_semantics(tmp_path):
         num_bins=127,
         weight_imagination_starts=True,
         critic_ema_target="mean_twohot",
+        state_loss_mode="reference_sum",
     )
     current = replace(
         Config(),
@@ -192,6 +197,7 @@ def test_resume_restores_checkpoint_authored_loss_and_bin_semantics(tmp_path):
         num_bins=255,
         weight_imagination_starts=False,
         critic_ema_target="distribution",
+        state_loss_mode="legacy_half_mean",
     )
 
     resumed = resolve_resume_config(
@@ -208,6 +214,7 @@ def test_resume_restores_checkpoint_authored_loss_and_bin_semantics(tmp_path):
     assert (resumed.b_start, resumed.b_end, resumed.num_bins) == (-5, 6, 127)
     assert resumed.weight_imagination_starts is True
     assert resumed.critic_ema_target == "mean_twohot"
+    assert resumed.state_loss_mode == "reference_sum"
 
 
 def test_resume_infers_reference_rssm_core_without_config_snapshot(tmp_path):

@@ -243,6 +243,7 @@ def resolve_resume_config(
             actor_lr=checkpoint_config.actor_lr,
             critic_lr=checkpoint_config.critic_lr,
             normalize_advantages=checkpoint_config.normalize_advantages,
+            state_loss_mode=checkpoint_config.state_loss_mode,
             free_bits_straight_through=(
                 checkpoint_config.free_bits_straight_through
             ),
@@ -281,6 +282,7 @@ def resolve_resume_config(
         optimizer_contract="legacy",
         optimizer_warmup_steps=0,
         normalize_advantages=True,
+        state_loss_mode="legacy_half_mean",
         free_bits_straight_through=True,
         b_start=-20,
         b_end=20,

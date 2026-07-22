@@ -234,6 +234,7 @@ runs.
 | `train.normalize_advantages` | false | Use only the running return-percentile scale; `true` additionally z-scores each imagined batch |
 | `train.balance_continuation` | false | Preserve natural continuation probabilities; `true` applies adaptive class-balanced supervision whose raw sigmoid is not a calibrated discount |
 | `train.continuation_balance_rate` | 0.01 | Terminal-prevalence EMA rate used only when continuation balancing is enabled |
+| `train.state_loss_mode` | reference_sum | Sum vector-observation squared errors like reference DreamerV3; `legacy_half_mean` preserves historical checkpoint training semantics |
 | `train.free_bits_straight_through` | false | Opt into KL gradients below the one-nat free-bits threshold |
 | `train.b_start` / `train.b_end` / `train.num_bins` | -20 / 20 / 255 | Symmetric symlog two-hot support shared by reward and value heads |
 | `models.d_hidden` | 64 | Hidden dimension |
