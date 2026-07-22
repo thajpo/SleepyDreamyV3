@@ -2735,6 +2735,64 @@ them while recent episode length increases.
   coverage as sufficient and does not authorize stacking the deferred start-
   continuation multiplier, loss-class balancing, or architecture changes.
 
+#### Continuation-coverage canary result
+
+The mechanical gate passes at source commit `f29f7a8`. Exact enumeration tests
+show equal aggregate continuation weight for every transition in a fully
+sampled episode and mean sampled-row weight one; short padded episodes retain
+unit weight on real rows and zero weight on padding. Loss-isolation tests show
+that the importance tensor changes continuation BCE only. The focused suite
+passed (`24`), the full fast suite passed (`138`), compile and the supported
+scoped type gate passed, and the one-update CPU process smoke exited normally
+with its collector stopped.
+
+The frozen seed-0 run completed normally under
+`experiments/2026-07-22_093847_CartPole-v1/`, with manifest run ID
+`f7dcbf8531f34a949b690604bccc41d2` and MLflow run ID
+`72f1939bbecb48edb97cb05298da7f8f`. It used 3,500 learner updates, 21,357
+environment steps, and 947.6 seconds on ROCm. Its manifest records clean source
+`f29f7a8`, `max_train_steps`, final/best/periodic checkpoints, and successful
+collector shutdown. The one-thread OpenMP/MKL/OpenBLAS cap remained in force.
+
+The behavioral gate fails strictly, although this is the strongest sustained
+late behavior on the current corrected stack. Evaluation first reaches `463.5`
+at update 1,900 and immediately violates the post-solve floor at `207.3`. It
+later falls to `169.45` at update 2,700, then holds a six-evaluation near-solved
+plateau from updates 2,800--3,300: `488.4`, `500.0`, `499.1`, `461.95`,
+`470.35`, and `473.95`. It ends at `396.65` after `331.8` at update 3,400.
+Consequently, final return misses `400` by `3.35` and the best-to-final gap is
+`103.35`, also missing its limit by `3.35`. Compared with the preceding
+return-normalizer canary, first solve is 400 updates earlier and final return is
+242.5 points higher, so the intervention has useful behavioral evidence even
+though it does not pass the frozen criterion.
+
+The continuation gate fails decisively. The deterministic seed-17--36 probe is
+retained under
+`experiments/2026-07-22_cartpole_continuation_coverage_probe/`. The best
+checkpoint solves all 20 episodes to the 500-step time limit, so it contains no
+physical terminal transitions on which to measure failure recall. The final
+checkpoint averages return `377.25` and supplies 20 physical failures across
+7,545 transitions. Its posterior expected effective discount is `0.98574` on
+terminal rows versus `0.98702` on live rows. Dividing by configured discount
+`0.997`, this corresponds to mean terminal continuation probability about
+`0.9887`, not below `0.5`. Every terminal remains classified as continue, so
+terminal recall is `0.0`, balanced terminal/live accuracy is `0.500`, and
+failure ROC AUC is only `0.554`. The one-step prior is similarly
+non-discriminative (`0.98530` terminal effective discount; AUC `0.536`).
+
+This isolates two conclusions. Correcting replay inclusion multiplicity is a
+real and materially beneficial training correction, but it is not sufficient
+to make the learned continuation head recognize CartPole failures. The late
+near-solved plateau can coexist with an always-continue model because most
+successful CartPole rollouts end by the 500-step time limit, while rare
+physical failures remain a tiny binary-loss minority even after removing the
+extra window-position bias. Seeds 1 and 2 are stopped, and the conditional
+fixed-history Q gate is not run because the behavior gate did not pass. Per the
+preregistered stop rule, this result does not authorize stacking the deferred
+start-continuation multiplier or class balancing. The next intervention must
+come from a fresh source/gradient audit rather than treating the near-pass as a
+success.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
