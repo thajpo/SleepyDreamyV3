@@ -2844,6 +2844,46 @@ that behavior depend on sequence length.
   sufficient cause and does not authorize stacking AGC changes, learning-rate
   warmup, optimizer unification, or continuation class balancing.
 
+#### Sequence-loss reduction canary result
+
+The mechanical gate passes at source commit `216cf37`. The focused loss,
+gradient, replay-auxiliary, return-normalizer, replay, and logging tests passed
+(`19`); the full fast suite passed (`143`); compile and the supported scoped
+type gate passed; and the one-update CPU process smoke exited normally with its
+collector stopped. The forward result now contains actual mean objectives,
+replay representation diagnostics use the same reduction, and scalar/progress
+logging no longer applies a second division.
+
+The frozen seed-0 run completed normally under
+`experiments/2026-07-22_cartpole_sequence_loss_seed0_3500/`, with manifest run
+ID `f2a2e4b3b9424047a2859db33c72b65c` and MLflow run ID
+`4c8a47f4c0694d959bd4e2f5bb9a48d6`. It used 3,500 learner updates, 21,370
+environment steps, and 920.3 seconds on ROCm. The manifest records clean source
+`216cf37`, `max_train_steps`, final/best/periodic checkpoints, and successful
+collector shutdown under the one-thread host resource cap.
+
+The reduction materially changes optimization but fails the behavioral gate.
+The policy remains near the 9.35 floor through update 2,000, begins moving at
+2,200 (`130.4`), and oscillates through `75.2`, `340.15`, and `284.9` before
+first solving at update 2,600 (`483.0`). Its complete post-solve sequence is
+`483.0`, `490.75`, `369.25`, `438.55`, `457.9`, `437.95`, `301.0`, `408.45`,
+`297.8`, and `310.85`. Update 3,400 therefore violates the strict floor by
+2.2 points; final return is 89.15 below 400, and the best-to-final gap is
+179.90 rather than at most 100.
+
+Compared with the preceding continuation-coverage run, first solve is delayed
+by 700 updates, final return falls from `396.65` to `310.85`, and the six-point
+near-solved late plateau is not reproduced. The longer 2,600--3,300 interval
+above the floor shows that mean reduction is not equivalent to the old summed
+path under pre-LaProp AGC, but its eventual drop shows that sequence-dependent
+clipping was not the sufficient instability mechanism. The source-conforming
+reduction is retained so sequence length no longer silently changes the
+authored objective or makes logs disagree with backward. Seeds 1 and 2 are
+stopped, and the conditional fixed-history Q probe is not run because behavior
+failed. Any later learning-rate or optimizer experiment requires a fresh
+contract calibrated to the corrected mean-loss path; it cannot be smuggled into
+this result as compensation.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
