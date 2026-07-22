@@ -5288,3 +5288,78 @@ recovery-support benchmark and multi-seed replication remain explicit TODOs.
 - **Stop rule:** one seed-0 run and its fixed-history diagnostic. Do not launch
   seeds 1--4, tune the unimix ratio, change entropy, or start Pong from this
   canary. Broad recovery coverage and multi-seed replication remain TODOs.
+
+### Actor-action-support canary result
+
+The preregistered run completed normally under
+`experiments/2026-07-22_cartpole_actor_unimix_10pct_seed0_3500/`. Its run ID is
+`3f2ada71b1ea439490e201b0cc1d2b41` (MLflow
+`9c1e1943ecec416ebc5a6cf7169061d3`), its clean source is `95dd9a2`, and it
+finished 3,500 updates / 21,440 environment steps in 1,461.49 seconds. The
+fixed-history evidence is retained under
+`experiments/2026-07-22_cartpole_actor_unimix_10pct_recovery_value_boundary/`.
+
+The intervention did not stabilize behavior. It accelerated parts of initial
+acquisition, then produced larger solved-to-failed transitions than the matched
+one-percent baseline:
+
+| Readout | 1% matched baseline | 10% actor-unimix canary |
+|---|---:|---:|
+| First evaluation at least 475 | update 2,100 | update 2,400 |
+| Best evaluation | 500.0 | 500.0 |
+| Minimum after first solve | 488.95 | 45.10 |
+| Final evaluation | 500.0 | 121.90 |
+| Best-to-final gap | 0.0 | 378.10 |
+
+The canary evaluated `490.9, 496.4, 500.0, 347.5, 500.0, 500.0, 140.95,
+126.5, 109.15, 117.75, 45.1, 121.9` from updates 2,400 through 3,500. Thus it
+both solved and later lost the task. This was not failure to realize the
+configured action support. From the first solve onward, the mean minimum action
+probability in actor-generated dreams was `0.1689` (range `0.1185--0.2116`),
+and the realized non-modal sample fraction was `0.1708` (range
+`0.1139--0.2215`). Even the update-3,000 collapse from two consecutive 500
+evaluations to `140.95` occurred with minimum action probability around `0.16`.
+
+The frozen recovery cohort rejects action starvation as a sufficient repair:
+
+| Target | Actionable / labels | Actor action-1 recall | Posterior-critic action-1 recall | Full-dream action-1 recall | Balanced accuracy (actor / posterior / dream) |
+|---|---:|---:|---:|---:|---:|
+| update 2,500 | 46 / 30 action 1, 16 action 0 | 0.000 | 0.000 | 0.000 | 0.500 / 0.500 / 0.500 |
+| final 3,500 | 29 / 19 action 1, 10 action 0 | 0.789 | 1.000 | 0.105 | 0.445 / 0.500 / 0.553 |
+
+Both checkpoints fall below the preregistered 100-actionable-state categorical
+floor, so these values are descriptive rather than a replicated estimate. The
+update-2,500 result is nevertheless mechanistically direct: all four learned
+boundaries choose action 0 on every actionable state. On the 30 states whose
+real branches prefer action 1, the actor now assigns action 1 mean probability
+`0.0640` and median `0.0600`, with no row below one percent. That is materially
+more support than the baseline's `0.0168` mean / `0.0137` median, yet the
+posterior critic's mean action-1-minus-action-0 margin is still `-2.794` and the
+full dream's is `-3.220` against a positive real margin of one survival step.
+
+The final checkpoint does not show stable two-class recovery either. Its
+posterior critic chooses action 1 on all 29 actionable states, correctly
+recalling all 19 action-1 labels while missing all ten action-0 labels. The
+full dream does the opposite on most states: it recalls all ten action-0 labels
+but only two of 19 action-1 labels. This is a class flip, not recovery-value
+ordering. It accompanies the final behavioral collapse and low actor/full-
+target agreement, so the isolated action-1 recall does not satisfy the
+selection rule.
+
+The evidence rejects low actor action probability as the necessary proximal
+cause of CartPole collapse and rejects higher actor unimix as the next fix.
+Low support can amplify a bad closed-loop regime, but the value/policy system
+already crosses good and bad regimes while both actions remain common. More
+importantly, increasing action support does not repair the posterior critic on
+the frozen recovery histories. Actor-generated dreams still start from replay
+posterior states; sampling both actions does not help histories that are absent
+or diluted at the imagination-start boundary, nor does it remove a moving
+policy-conditioned value target.
+
+Per the selection rule, do not tune actor unimix or repeat this canary across
+seeds. The evidence-selected next boundary is replay/history support: determine
+whether the failing recovery histories are represented among imagination
+starts and whether posterior value ordering changes because those histories
+leave the sampled replay distribution or because the scalar value target moves
+on histories that remain represented. Keep the authored actor-unimix default at
+one percent; retain the configuration and telemetry as diagnostic machinery.
