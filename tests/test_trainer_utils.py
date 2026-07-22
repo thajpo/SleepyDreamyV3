@@ -39,6 +39,16 @@ def test_symmetric_twohot_zero_logits_decode_exactly_to_zero():
     torch.testing.assert_close(prediction, torch.zeros(4), rtol=0, atol=0)
 
 
+def test_even_symmetric_twohot_bins_are_distinct_mirrored_pairs():
+    bins = symexp_twohot_bins(-20, 20, 254)
+    prediction = twohot_expectation(torch.zeros(4, 254), bins)
+
+    assert torch.all(bins[1:] > bins[:-1])
+    assert not torch.any(bins == 0)
+    torch.testing.assert_close(bins, -bins.flip(0), rtol=0, atol=0)
+    torch.testing.assert_close(prediction, torch.zeros(4), rtol=0, atol=0)
+
+
 def test_initialized_reward_and_value_heads_decode_to_exactly_zero():
     config = Config()
     critic = initialize_critic("cpu", config)

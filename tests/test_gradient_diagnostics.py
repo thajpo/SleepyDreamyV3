@@ -1,8 +1,27 @@
 import copy
 
+import pytest
 import torch
 
-from dreamer.trainer.gradient_diagnostics import measure_gradient_alignment
+from dreamer.trainer.gradient_diagnostics import (
+    _parameter_group,
+    measure_gradient_alignment,
+)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "world_model.dynin_deter.0.weight",
+        "world_model.z_embedding.0.weight",
+        "world_model.dynin_action.0.weight",
+        "world_model.dynhid.weight",
+        "world_model.dynhid_norm.weight",
+        "world_model.dyngru.weight",
+    ],
+)
+def test_reference_rssm_parameters_are_grouped_as_recurrent(name):
+    assert _parameter_group(name) == "recurrent"
 
 
 def _losses(encoder, critic, inputs, targets):

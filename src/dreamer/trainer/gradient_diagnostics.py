@@ -19,9 +19,18 @@ def _parameter_group(name: str) -> str:
         return "encoder"
     if name.startswith("world_model.posterior_head."):
         return "posterior"
-    if name.startswith("world_model.z_embedding."):
-        return "recurrent"
-    if name.startswith("world_model._W_") or name.startswith("world_model._b_"):
+    if name.startswith(
+        (
+            "world_model.z_embedding.",
+            "world_model.dynin_deter.",
+            "world_model.dynin_action.",
+            "world_model.dynhid.",
+            "world_model.dynhid_norm.",
+            "world_model.dyngru.",
+            "world_model._W_",
+            "world_model._b_",
+        )
+    ):
         return "recurrent"
     return "other"
 

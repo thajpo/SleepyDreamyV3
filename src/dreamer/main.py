@@ -241,6 +241,13 @@ def resolve_resume_config(
             wm_lr=checkpoint_config.wm_lr,
             actor_lr=checkpoint_config.actor_lr,
             critic_lr=checkpoint_config.critic_lr,
+            normalize_advantages=checkpoint_config.normalize_advantages,
+            free_bits_straight_through=(
+                checkpoint_config.free_bits_straight_through
+            ),
+            b_start=checkpoint_config.b_start,
+            b_end=checkpoint_config.b_end,
+            num_bins=checkpoint_config.num_bins,
             balance_continuation=checkpoint_config.balance_continuation,
             continuation_balance_rate=checkpoint_config.continuation_balance_rate,
             replay_sequence_mode=checkpoint_config.replay_sequence_mode,
@@ -268,6 +275,11 @@ def resolve_resume_config(
         critic_slow_target=True,
         optimizer_contract="legacy",
         optimizer_warmup_steps=0,
+        normalize_advantages=True,
+        free_bits_straight_through=True,
+        b_start=-20,
+        b_end=20,
+        num_bins=255,
         balance_continuation=False,
         replay_sequence_mode="episode",
     )

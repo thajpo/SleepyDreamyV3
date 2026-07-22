@@ -45,6 +45,8 @@ def symexp_twohot_bins(
     """
     if num_bins < 2:
         raise ValueError("num_bins must be at least 2")
+    if float(end) <= float(start):
+        raise ValueError("end must be greater than start")
     if float(start) == -float(end):
         if num_bins % 2 == 1:
             half = torch.linspace(
@@ -52,8 +54,9 @@ def symexp_twohot_bins(
             )
             half = symexp(half)
             return torch.cat((half, -half[:-1].flip(0)), dim=0)
+        center_offset = float(start) / float(num_bins - 1)
         half = torch.linspace(
-            start, 0.0, num_bins // 2, device=device, dtype=dtype
+            start, center_offset, num_bins // 2, device=device, dtype=dtype
         )
         half = symexp(half)
         return torch.cat((half, -half.flip(0)), dim=0)

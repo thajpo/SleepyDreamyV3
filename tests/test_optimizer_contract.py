@@ -3,9 +3,19 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from dreamer.models import LaProp, adaptive_gradient_clipping
+from dreamer.config import Config
+from dreamer.models import (
+    LaProp,
+    adaptive_gradient_clipping,
+    initialize_actor,
+    initialize_critic,
+    initialize_world_model,
+    symexp_twohot_bins,
+)
+from dreamer.runtime.replay_buffer import EnvData
 from dreamer.trainer.core import WorldModelTrainer
-from dreamer.trainer.forward import replay_value_features
+from dreamer.trainer.forward import dreamer_step, replay_value_features
+from dreamer.trainer.logging import create_step_metrics
 
 
 def _optimizer(parameter, lr=4e-5):
@@ -62,6 +72,96 @@ def test_replay_value_representation_gradient_is_contract_gated():
     )
     assert not legacy.requires_grad
     assert source.grad is None
+
+
+@pytest.mark.parametrize(
+    ("optimizer_contract", "expected_representation_gradient"),
+    [("reference", True), ("legacy", False)],
+)
+def test_replay_value_loss_obeys_observed_representation_contract(
+    optimizer_contract, expected_representation_gradient
+):
+    torch.manual_seed(11)
+    config = Config(
+        batch_size=1,
+        sequence_length=3,
+        replay_burn_in=0,
+        d_hidden=32,
+        num_latents=4,
+        rnn_n_blocks=1,
+        n_observations=4,
+        n_actions=2,
+        use_pixels=False,
+        num_dream_steps=2,
+        rssm_core="reference",
+        optimizer_contract=optimizer_contract,
+        critic_replay_scale=0.3,
+    )
+    encoder, world_model = initialize_world_model("cpu", config, batch_size=1)
+    actor = initialize_actor("cpu", config)
+    critic = initialize_critic("cpu", config)
+    critic_ema = initialize_critic("cpu", config)
+    with torch.no_grad():
+        critic.mlp[-1].weight.normal_(mean=0.0, std=0.1)
+    critic_ema.load_state_dict(critic.state_dict())
+    states = torch.randn(1, 3, 4)
+    batch = EnvData(
+        states=states,
+        actions=torch.tensor([[[1.0, 0.0], [0.0, 1.0], [1.0, 0.0]]]),
+        rewards=torch.tensor([[0.0, 1.0, 1.0]]),
+        is_first=torch.tensor([[True, False, False]]),
+        is_last=torch.tensor([[False, False, True]]),
+        is_terminal=torch.tensor([[False, False, True]]),
+        future_returns=None,
+        continue_weights=torch.ones(1, 3),
+        mask=torch.ones(1, 3),
+    )
+    all_tokens = encoder(states.reshape(3, 4)).reshape(1, 3, -1)
+    world_model.init_state(1)
+
+    result = dreamer_step(
+        encoder=encoder,
+        world_model=world_model,
+        actor=actor,
+        critic=critic,
+        critic_ema=critic_ema,
+        batch=batch,
+        metrics=create_step_metrics(torch.device("cpu"), False),
+        all_tokens=all_tokens,
+        B=1,
+        T=3,
+        train_start_t=0,
+        skip_actor=True,
+        skip_critic=False,
+        bins=symexp_twohot_bins(-20, 20, config.num_bins),
+        return_scale=1.0,
+        config=config,
+        device=torch.device("cpu"),
+        use_pixels=False,
+        do_log_images=False,
+    )
+    result.total_critic_loss.backward()
+
+    encoder_has_gradient = any(
+        parameter.grad is not None and parameter.grad.norm().item() > 0.0
+        for parameter in encoder.parameters()
+    )
+    recurrent_has_gradient = any(
+        parameter.grad is not None and parameter.grad.norm().item() > 0.0
+        for name, parameter in world_model.named_parameters()
+        if name.startswith(
+            (
+                "dynin_deter.",
+                "z_embedding.",
+                "dynin_action.",
+                "dynhid.",
+                "dynhid_norm.",
+                "dyngru.",
+            )
+        )
+    )
+    assert encoder_has_gradient is expected_representation_gradient
+    assert recurrent_has_gradient is expected_representation_gradient
 
 
 def test_equal_rate_split_laprop_matches_one_joint_optimizer():

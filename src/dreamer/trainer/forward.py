@@ -825,7 +825,7 @@ def dreamer_step(
             lam,
         ).transpose(0, 1)
 
-        replay_logits = critic(replay_posterior[:, :-1].detach())
+        replay_logits = critic(replay_posterior[:, :-1])
         logits_flat = replay_logits.reshape(-1, replay_logits.size(-1))
         targets_flat = replay_lambda_returns.detach().reshape(-1)
         replay_pair_mask = calculate_replay_pair_mask(replay_mask, replay_is_last)

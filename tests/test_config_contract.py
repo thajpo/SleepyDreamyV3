@@ -165,6 +165,38 @@ def test_resume_restores_reference_optimizer_contract_and_rates(tmp_path):
     )
 
 
+def test_resume_restores_checkpoint_authored_loss_and_bin_semantics(tmp_path):
+    checkpoint_config = replace(
+        Config(),
+        normalize_advantages=True,
+        free_bits_straight_through=True,
+        b_start=-5,
+        b_end=6,
+        num_bins=127,
+    )
+    current = replace(
+        Config(),
+        normalize_advantages=False,
+        free_bits_straight_through=False,
+        b_start=-20,
+        b_end=20,
+        num_bins=255,
+    )
+
+    resumed = resolve_resume_config(
+        current,
+        tmp_path / "checkpoint.pt",
+        checkpoint={
+            "config_snapshot": asdict(checkpoint_config),
+            "world_model": {},
+        },
+    )
+
+    assert resumed.normalize_advantages is True
+    assert resumed.free_bits_straight_through is True
+    assert (resumed.b_start, resumed.b_end, resumed.num_bins) == (-5, 6, 127)
+
+
 def test_resume_infers_reference_rssm_core_without_config_snapshot(tmp_path):
     resumed = resolve_resume_config(
         Config(),
