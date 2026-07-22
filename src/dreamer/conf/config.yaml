@@ -1,6 +1,7 @@
 # DreamerV3 Default Configuration
 # Override with: uv run dreamer-train env=cartpole_state_only
-# Sweep with: uv run dreamer-train --multirun train.actor_lr=1e-5,3e-5,1e-4
+# Bounded sweep example:
+# uv run dreamer-train --multirun general.seed=0 train.actor_entropy_coef=3e-4,1e-3
 
 defaults:
   - _self_
@@ -124,7 +125,7 @@ train:
   # Training phases
   wm_ac_ratio: 1  # WM updates per AC update (e.g., 4 = train WM 4x more than AC)
 
-  # Cosine LR decay (applies to all optimizers over training)
+  # Cosine LR decay (applies to all optimizers after the shared warmup)
   lr_cosine_decay: false
   lr_cosine_min_factor: 0.1  # Decay to 10% of base LR
 

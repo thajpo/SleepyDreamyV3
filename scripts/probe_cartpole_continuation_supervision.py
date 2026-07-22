@@ -190,7 +190,7 @@ def fit_balanced_head(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("checkpoint", type=Path)
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--device", default="cpu")

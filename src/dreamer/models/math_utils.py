@@ -71,7 +71,7 @@ def twohot_expectation(logits: torch.Tensor, bins: torch.Tensor) -> torch.Tensor
     The arithmetic is the same weighted expectation as ``sum(probs * bins)``.
     Pairing the negative and positive halves avoids catastrophic cancellation
     for DreamerV3's wide symmetric support and guarantees an exactly zero
-    prediction for uniform logits over exactly symmetric odd-length bins.
+    prediction for uniform logits over exactly symmetric bins.
     """
     if bins.ndim != 1 or logits.shape[-1] != bins.numel():
         raise ValueError("bins must be 1D and match the logits' final dimension")

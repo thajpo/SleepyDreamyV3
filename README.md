@@ -76,7 +76,8 @@ than replacing the CPU or ROCm contract.
 uv run --extra cpu dreamer-train
 
 # Override parameters via CLI
-uv run --extra cpu dreamer-train train.actor_lr=3e-5 train.max_train_steps=50000
+uv run --extra cpu dreamer-train \
+  train.actor_entropy_coef=1e-3 train.max_train_steps=50000
 
 # Smoke test / dry run (no MLflow, no checkpoints, temp directory)
 uv run --extra cpu dreamer-train \
@@ -88,9 +89,10 @@ uv run --extra cpu dreamer-train \
 
 Resume into a new output directory while restoring model and optimizer state,
 the training step, return-normalization and continuation-prevalence state,
-best-evaluation state, the RSSM and continuation-head architectures,
-value/continuation-target semantics, replay-sequence semantics, and MLflow run
-identity:
+best-evaluation state, the RSSM and continuation-head architectures, optimizer
+contract, base rates, and linear-warmup length, advantage and free-bits
+semantics, two-hot support, online-versus-slow value targeting, continuation
+balancing, replay-sequence semantics, and MLflow run identity:
 
 ```bash
 uv run --extra cpu dreamer-train \
@@ -101,20 +103,26 @@ uv run --extra cpu dreamer-train \
 Current checkpoints embed their runtime configuration. Historical checkpoints
 fall back to the adjacent `config.json`. If neither snapshot exists, resume
 infers the RSSM and continuation-head architectures from model weights and uses
-the historical slow-critic target, unbalanced continuation loss, and
+the historical legacy optimizer contract with no learning-rate ramp, batch
+advantage normalization, straight-through free bits, 255 symmetric bins over
+`[-20, 20]`, the slow-critic target, unbalanced continuation loss, and
 episode-contained replay semantics. Set `allow_resume_semantic_migration=true`
-to intentionally use all current authored model, target, and replay settings
-instead. Resume does not restore replay contents or random-number-generator
-state.
+to intentionally use all current authored model, optimization, loss,
+value-support, target, and replay settings instead; authored architecture
+changes may be incompatible with the checkpoint weights. Resume does not
+restore replay contents or random-number-generator state.
 
 ### Hyperparameter Sweeps
 
-```bash
-# Grid search over learning rates
-uv run --extra cpu dreamer-train --multirun train.actor_lr=1e-5,3e-5,1e-4
+Preregister a hypothesis, primary metric, seed set, sample budget, and stop rule
+before launching a sweep. The reference optimizer contract couples all three
+learning rates, so an actor-only rate sweep requires an intentional switch to
+the historical `legacy` contract.
 
-# Use predefined sweep config
-uv run --extra cpu dreamer-train --multirun +sweep=ac_params
+```bash
+# Example bounded two-run canary under the reference contract
+uv run --extra cpu dreamer-train --multirun \
+  general.seed=0 train.actor_entropy_coef=3e-4,1e-3
 ```
 
 ### Evaluation and Visualization
@@ -131,6 +139,10 @@ uv run --extra cpu dreamer-inspect \
   --episodes 5 --policy_mode argmax \
   --save_video --compose_debug_video
 ```
+
+Inspection loads the embedded configuration or adjacent `config.json`
+automatically. Use `--config` only to select a fallback preset for a legacy
+checkpoint that has neither.
 
 ### Monitoring
 
@@ -200,9 +212,10 @@ uv run --extra cpu python scripts/probe_cartpole_continuation.py --help
 ### Key Parameters
 
 Defaults below are for the composed CartPole training configuration. The flat
-`Config` defaults for the RSSM core, continuation-head depth, critic targeting,
-and replay sequence mode intentionally preserve historical checkpoints and are
-not the authored defaults for new runs.
+`Config` defaults for the RSSM core, continuation-head depth, optimizer
+contract and warmup, critic targeting, and replay sequence mode intentionally
+preserve historical checkpoints and are not the authored defaults for new
+runs.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -210,6 +223,8 @@ not the authored defaults for new runs.
 | `train.batch_size` | 32 | Batch size |
 | `train.sequence_length` | 32 | Sequence length for training |
 | `train.eval_metric` | episode_reward | Metric used to preserve the best checkpoint |
+| `train.wm_lr` / `train.actor_lr` / `train.critic_lr` | 4e-5 / 4e-5 / 4e-5 | Equal LaProp rates required by the reference optimizer contract |
+| `train.gamma` / `train.horizon` / `train.contdisc` | 0.997 / 333 / true | Train continuation with `1 - 1 / horizon`; when enabled, `gamma` must match that value and is not applied again in imagination |
 | `train.replay_ratio` | 1.0 | Replayed non-burn-in transitions per raw environment frame |
 | `train.replay_sequence_mode` | stream | Sample same-collector, gap-free streams that may cross episode resets; `episode` preserves historical contained-window sampling |
 | `train.optimizer_contract` | reference | Use equal-rate, shared-warmup optimization and let replay value loss shape observed features; `legacy` preserves split-rate detached updates |
@@ -220,6 +235,7 @@ not the authored defaults for new runs.
 | `train.balance_continuation` | false | Preserve natural continuation probabilities; `true` applies adaptive class-balanced supervision whose raw sigmoid is not a calibrated discount |
 | `train.continuation_balance_rate` | 0.01 | Terminal-prevalence EMA rate used only when continuation balancing is enabled |
 | `train.free_bits_straight_through` | false | Opt into KL gradients below the one-nat free-bits threshold |
+| `train.b_start` / `train.b_end` / `train.num_bins` | -20 / 20 / 255 | Symmetric symlog two-hot support shared by reward and value heads |
 | `models.d_hidden` | 64 | Hidden dimension |
 | `models.rssm_core` | reference | Grouped, normalized recurrent core; `legacy` preserves historical checkpoint equations and layout |
 | `models.continue_head_layers` | 1 | One RMSNorm/SiLU hidden layer in the continuation head; `0` selects the legacy linear head |
@@ -294,9 +310,10 @@ Current limitations:
 - Full training is intentionally not run in hosted CI; CI verifies syntax,
   scoped reliability types, and fast tests only.
 - Current retained CartPole runs do not demonstrate stable solved performance.
-  The reference-RSSM run repeatedly reaches return 500 but later falls to 313;
-  the latest audit localizes the next boundary to rare terminal continuation
-  supervision and preregisters cross-reset stream replay as the isolated canary.
+  Cross-reset stream replay fixes continuation-risk ordering but still collapses
+  from a best return of 500 to 205. The latest audit localizes the next bounded
+  canary to the coherent reference optimizer time scale and replay-value
+  representation gradient.
 - The README still needs a reproduced experiment report with config, seeds,
   runtime, return curve, checkpoint hash, and evaluation video/GIF.
 - Generated checkpoints, MLflow runs, and videos should stay out of normal Git
@@ -317,7 +334,9 @@ Current limitations:
 **Policy doesn't learn**:
 - Inspect terminal/live continuation calibration and replay terminal coverage,
   then actor entropy and on-policy action-value agreement
-- Try different `train.actor_lr` values (sweep recommended)
+- Under the reference optimizer contract, change world-model, actor, and critic
+  rates together in a preregistered bounded canary; use `legacy` explicitly
+  when investigating split rates
 
 ## References
 

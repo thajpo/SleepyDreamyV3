@@ -480,7 +480,7 @@ def run_fixed_history_probe(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-checkpoint", required=True, type=Path)
     parser.add_argument("targets", nargs="+", type=Path)
     parser.add_argument(

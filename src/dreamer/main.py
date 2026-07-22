@@ -7,7 +7,7 @@ Usage:
     uv run dreamer-train
 
     # Override parameters
-    uv run dreamer-train train.wm_lr=5e-4 models.d_hidden=128
+    uv run dreamer-train train.actor_entropy_coef=1e-3 models.d_hidden=128
 
     # Use environment-specific base config
     uv run dreamer-train env=cartpole_state_only
@@ -218,7 +218,7 @@ def resolve_resume_config(
     checkpoint: dict | None = None,
     allow_semantic_migration: bool = False,
 ) -> Config:
-    """Restore checkpoint model, target, and replay semantics."""
+    """Restore compatibility-sensitive architecture and training semantics."""
     if allow_semantic_migration:
         return flat_cfg
 

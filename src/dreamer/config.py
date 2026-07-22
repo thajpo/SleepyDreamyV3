@@ -91,7 +91,7 @@ class Config:
     weight_decay: float = 0.0
     critic_ema_decay: float = 0.98
     critic_ema_regularizer: float = 1.0
-    # True preserves runs authored before the reference slowtar audit. Hydra
+    # True preserves runs authored before the reference slow-target audit. Hydra
     # explicitly disables this for new training runs.
     critic_slow_target: bool = True
     critic_replay_scale: float = 0.3

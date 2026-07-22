@@ -672,7 +672,7 @@ def run_probe(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("checkpoints", nargs="+", type=Path)
     parser.add_argument("--out", type=Path, default=Path("runs/control_ablation/q_probe"))
     parser.add_argument("--device", default="cpu")
