@@ -218,7 +218,7 @@ def resolve_resume_config(
     checkpoint: dict | None = None,
     allow_semantic_migration: bool = False,
 ) -> Config:
-    """Restore checkpoint model and target semantics."""
+    """Restore checkpoint model, target, and replay semantics."""
     if allow_semantic_migration:
         return flat_cfg
 
@@ -272,7 +272,7 @@ def run_training(
     checkpoint_path: str | None = None,
     allow_resume_semantic_migration: bool = False,
 ):
-    """Run training, preserving checkpoint model/target semantics by default."""
+    """Run training while preserving checkpoint semantics by default."""
     checkpoint = None
     if checkpoint_path:
         checkpoint = torch.load(

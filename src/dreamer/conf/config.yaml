@@ -10,7 +10,8 @@ defaults:
 # Optional checkpoint and semantic-migration control. These orchestration
 # fields are not part of the flattened model/training Config snapshot.
 checkpoint_path: null
-# Preserve checkpoint continuation/value semantics unless migration is explicit.
+# Preserve checkpoint model, continuation/value, and replay semantics unless
+# migration is explicit.
 allow_resume_semantic_migration: false
 
 # General settings
@@ -102,8 +103,8 @@ train:
   mpc_teacher_margin_min: 0.0
   mpc_teacher_normalize_values: true
   terminal_reward_penalty: 0.0
-  balance_continuation: false
-  continuation_balance_rate: 0.01
+  balance_continuation: false  # false preserves the natural continuation prior
+  continuation_balance_rate: 0.01  # terminal-prevalence EMA rate when enabled
 
   # Loss coefficients (DreamerV3 paper: βpred=1, βdyn=1, βrep=0.1)
   beta_dyn: 1.0
@@ -148,7 +149,8 @@ train:
   min_buffer_episodes: 64
   steps_per_weight_sync: 5
   replay_burn_in: 8
-  replay_sequence_mode: stream  # reference-style windows may cross episode resets
+  # Reference-style same-collector windows may cross consecutive episode resets.
+  replay_sequence_mode: stream
 
   # Replay ratio gating (DreamerV3 paper)
   replay_ratio: 1.0  # replayed non-burn-in transitions per raw env frame

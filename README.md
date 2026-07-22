@@ -87,8 +87,9 @@ uv run --extra cpu dreamer-train \
 ```
 
 Resume into a new output directory while restoring model and optimizer state,
-the training step, return-normalization state, best-evaluation state, the
-continuation-head architecture, value-target semantics, and MLflow run
+the training step, return-normalization and continuation-prevalence state,
+best-evaluation state, the RSSM and continuation-head architectures,
+value/continuation-target semantics, replay-sequence semantics, and MLflow run
 identity:
 
 ```bash
@@ -98,11 +99,13 @@ uv run --extra cpu dreamer-train \
 ```
 
 Current checkpoints embed their runtime configuration. Historical checkpoints
-fall back to the adjacent `config.json`, then to legacy linear-continuation-head
-and slow-critic-target semantics when those fields are absent. Set
-`allow_resume_semantic_migration=true` to intentionally use the current
-continuation-head and critic-target settings instead. Resume does not restore
-replay contents or random-number-generator state.
+fall back to the adjacent `config.json`. If neither snapshot exists, resume
+infers the RSSM and continuation-head architectures from model weights and uses
+the historical slow-critic target, unbalanced continuation loss, and
+episode-contained replay semantics. Set `allow_resume_semantic_migration=true`
+to intentionally use all current authored model, target, and replay settings
+instead. Resume does not restore replay contents or random-number-generator
+state.
 
 ### Hyperparameter Sweeps
 
@@ -168,11 +171,38 @@ This writes `reports/runs.csv` and `reports/runs.md`. Exact comparison keys are
 only assigned to completed, clean, manifest-backed runs with a complete
 evaluation protocol. Legacy runs remain visible but are marked for review.
 
+### CartPole Research Diagnostics
+
+The scripts below are bounded diagnostic probes, not alternate training entry
+points. Run any script with `--help` for its arguments.
+
+- `evaluate_cartpole_checkpoints.py` evaluates checkpoints on one fixed reset
+  cohort; `probe_cartpole_checkpoint_drift.py` compares several checkpoints on
+  histories fixed by one source policy.
+- `probe_cartpole_continuation.py` audits posterior/prior continuation, while
+  `probe_cartpole_continuation_supervision.py` tests whether frozen latents make
+  physical failure classifiable.
+- `probe_cartpole_critic_supervision.py`, `probe_cartpole_q.py`,
+  `probe_cartpole_on_policy.py`, `probe_cartpole_policy_improvement.py`, and
+  `probe_cartpole_rollout_fidelity.py` isolate value, action-ordering, policy,
+  and matched-rollout errors. `probe_cartpole_actor_supervision.py` supplies the
+  related frozen-actor baseline.
+- `summarize_cartpole_replay_coverage.py` and
+  `summarize_cartpole_gradient_alignment.py` reduce MLflow telemetry;
+  `profile_cartpole_capacity.py` measures bounded concurrent-run resource use.
+
+For example:
+
+```bash
+uv run --extra cpu python scripts/probe_cartpole_continuation.py --help
+```
+
 ### Key Parameters
 
 Defaults below are for the composed CartPole training configuration. The flat
-`Config` defaults for continuation-head depth and critic targeting intentionally
-preserve legacy checkpoints and are not the authored defaults for new runs.
+`Config` defaults for the RSSM core, continuation-head depth, critic targeting,
+and replay sequence mode intentionally preserve historical checkpoints and are
+not the authored defaults for new runs.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -181,10 +211,15 @@ preserve legacy checkpoints and are not the authored defaults for new runs.
 | `train.sequence_length` | 32 | Sequence length for training |
 | `train.eval_metric` | episode_reward | Metric used to preserve the best checkpoint |
 | `train.replay_ratio` | 1.0 | Replayed non-burn-in transitions per raw environment frame |
+| `train.replay_sequence_mode` | stream | Sample same-collector, gap-free streams that may cross episode resets; `episode` preserves historical contained-window sampling |
 | `train.critic_slow_target` | false | Use the online value for lambda returns and the actor baseline; keep the slow value as a regularizer |
 | `train.critic_real_return_scale` | 0.0 | Optional full-episode replay return-to-go critic loss scale |
+| `train.normalize_advantages` | false | Use only the running return-percentile scale; `true` additionally z-scores each imagined batch |
+| `train.balance_continuation` | false | Preserve natural continuation probabilities; `true` applies adaptive class-balanced supervision whose raw sigmoid is not a calibrated discount |
+| `train.continuation_balance_rate` | 0.01 | Terminal-prevalence EMA rate used only when continuation balancing is enabled |
 | `train.free_bits_straight_through` | false | Opt into KL gradients below the one-nat free-bits threshold |
 | `models.d_hidden` | 64 | Hidden dimension |
+| `models.rssm_core` | reference | Grouped, normalized recurrent core; `legacy` preserves historical checkpoint equations and layout |
 | `models.continue_head_layers` | 1 | One RMSNorm/SiLU hidden layer in the continuation head; `0` selects the legacy linear head |
 | `general.use_pixels` | false | Use pixel observations |
 | `general.research_gradient_diagnostics` | false | Read-only replay/WM gradient-alignment telemetry on scalar-log updates |
@@ -216,7 +251,7 @@ src/dreamer/
 - **Symlog encoding** for unbounded value predictions
 - **Twohot discrete distributions** for reward/value prediction
 - **One-nat hard free bits** by default, with an opt-in straight-through mode
-- **Block-diagonal GRU** for efficient recurrent state updates
+- **Grouped, normalized RSSM core** with legacy recurrent-checkpoint support
 - **EMA-based return normalization** for stable policy gradients
 - **Online value targets** for lambda returns and the policy baseline, with the
   slow value retained as a distributional regularizer
@@ -254,10 +289,10 @@ Current limitations:
 
 - Full training is intentionally not run in hosted CI; CI verifies syntax,
   scoped reliability types, and fast tests only.
-- Current retained CartPole runs do not provide a reproduced solved checkpoint.
-  The latest research notes localize the remaining failure to imagined action-
-  value ordering on the harder closed-loop recovery distribution; the actor
-  faithfully follows that learned ordering.
+- Current retained CartPole runs do not demonstrate stable solved performance.
+  The reference-RSSM run repeatedly reaches return 500 but later falls to 313;
+  the latest audit localizes the next boundary to rare terminal continuation
+  supervision and preregisters cross-reset stream replay as the isolated canary.
 - The README still needs a reproduced experiment report with config, seeds,
   runtime, return curve, checkpoint hash, and evaluation video/GIF.
 - Generated checkpoints, MLflow runs, and videos should stay out of normal Git
@@ -276,7 +311,8 @@ Current limitations:
 - Ensure GPU is being utilized (check with `nvidia-smi` or `rocm-smi`)
 
 **Policy doesn't learn**:
-- Inspect actor entropy and on-policy action-value agreement before changing the objective
+- Inspect terminal/live continuation calibration and replay terminal coverage,
+  then actor entropy and on-policy action-value agreement
 - Try different `train.actor_lr` values (sweep recommended)
 
 ## References

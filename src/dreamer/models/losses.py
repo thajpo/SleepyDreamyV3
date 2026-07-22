@@ -40,9 +40,11 @@ def compute_wm_loss(
         posterior_logits: Raw posterior logits from world model (B, num_latents, num_classes)
         prior_logits: Prior logits from dynamics model
         B: Bin tensor for twohot encoding
-        config: Config object with beta coefficients
+        config: Config object with beta, continuation-discount, and free-bits settings
         device: Torch device
         use_pixels: Whether to compute pixel loss
+        sample_mask: Optional validity mask for padded replay rows
+        continue_loss_weights: Optional per-row continuation supervision weights
 
     Returns:
         Tuple of (total_loss, loss_dict) where loss_dict contains individual components
@@ -220,7 +222,9 @@ def compute_actor_critic_losses(
         normalize_advantages: Center and scale advantages within the imagined batch
         dreamed_values_logits_ema: Logits from EMA critic (for regularization)
         critic_ema_coef: Coefficient for EMA regularization
-        actor_baseline_values: Slow-critic values used as the actor baseline
+        sample_mask: Optional validity mask for imagined starts
+        actor_baseline_values: Selected detached baseline values; online by
+            default, or slow-critic values for historical semantics
 
     Returns:
         Tuple of (actor_loss, critic_loss, entropy)

@@ -3253,6 +3253,17 @@ passed (`48`), the full fast suite passed (`162`), compile and the supported
 scoped type gate passed, and a one-update canonical stream-mode CPU process
 smoke completed with its collector stopped.
 
+Final review also closed two replay liveness edges without changing the
+scientific intervention. Stream readiness now clears when FIFO eviction leaves
+no complete same-collector sequence, so a sampler blocks until a later episode
+restores a gap-free stream. When replay-ratio pacing pauses the learner, the
+trainer extends the absolute collection budget far enough to make the next
+update affordable; episode-sized queue delivery can no longer deadlock below
+that threshold. Regression tests cover both readiness loss/recovery and fresh
+and resumed pacing budgets. On the final reviewed tree, the focused
+config/replay/resume/RSSM suite passed (`50`), the full fast suite passed
+(`166`), and source, test, and script compilation passed.
+
 A bounded sampler microprofile used the canary capacity of 512 stored episodes,
 episode length 176, `B=8`, `T=16`, and 1,000 batch draws. Episode mode required
 `0.053 ms` per batch and produced 40 terminal-bearing batches; stream mode

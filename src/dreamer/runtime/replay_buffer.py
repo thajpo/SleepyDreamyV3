@@ -1,8 +1,8 @@
-"""
-Episode Replay Buffer for Dreamer training.
+"""Episode-backed replay for fixed-length DreamerV3 training sequences.
 
-Stores complete episodes, samples fixed-length subsequences.
-This matches DreamerV3's approach for consistent batch shapes.
+Historical episode mode samples contained subsequences and pads short episodes.
+Reference-style stream mode joins only consecutive episodes from one collector,
+may cross resets, and marks each boundary so the RSSM can reset its carry.
 """
 
 import threading
@@ -26,7 +26,7 @@ class EnvData(NamedTuple):
     is_last: torch.Tensor  # (B, T)
     is_terminal: torch.Tensor  # (B, T)
     future_returns: Optional[torch.Tensor]  # (B, T), when exact targets enabled
-    continue_weights: torch.Tensor  # (B, T), replay-window inclusion correction
+    continue_weights: torch.Tensor  # (B, T), continuation supervision weights
     mask: torch.Tensor  # (B, T) — 1=real, 0=padded
     pixels: Optional[torch.Tensor] = None  # (B, T, C, H, W)
     pixels_original: Optional[torch.Tensor] = None  # (B, T, C, H, W)
@@ -73,15 +73,17 @@ def continuation_inclusion_weights(
 
 class EpisodeReplayBuffer:
     """
-    Thread-safe replay buffer that stores complete episodes and samples
-    fixed-length subsequences.
+    Thread-safe replay buffer that stores complete episodes and samples fixed-
+    length episode-contained or same-collector stream subsequences.
 
     Design:
     - Background thread continuously drains the mp.Queue (never blocks collectors)
     - Circular buffer stores up to max_episodes (FIFO eviction)
-    - Samples uniformly over valid sequence starts, not uniformly over episodes
-    - sample() returns fixed-length subsequences (pads short episodes)
-    - Blocks whenever the configured replay population is not sampleable
+    - Episode mode pads short episodes and corrects window-edge inclusion bias
+    - Stream mode uses every gap-free start with unit continuation weights
+    - Sampling is uniform over valid starts, not uniform over episodes
+    - Readiness clears after eviction if no complete configured sequence remains
+    - sample() blocks whenever the configured replay population is not sampleable
     """
 
     def __init__(
@@ -205,7 +207,7 @@ class EpisodeReplayBuffer:
                 self._budget_changed.notify_all()
 
     def add_episode(self, episode):
-        """Insert one complete episode into the replay buffer."""
+        """Insert one episode, including optional collector and episode IDs."""
         pixels, states, actions, rewards, is_last, is_terminal = episode[:6]
         ep_len = episode[6] if len(episode) > 6 else len(states)
         collector_id = int(episode[7]) if len(episode) > 7 else 0
@@ -477,9 +479,10 @@ class EpisodeReplayBuffer:
         Sample a batch of fixed-length subsequences with recent bias.
 
         Blocks until the configured replay population can provide a sequence.
-        Samples recent_fraction of batch from newest episodes (recency bias).
-        Within each pool, episode probability is proportional to the number of
-        valid starts so every stored training window is equally likely.
+        Samples recent_fraction of the batch from starts in newer episodes.
+        Within each pool, selection is proportional to valid-start count so
+        every stored episode window or same-collector stream start is equally
+        likely.
 
         Args:
             batch_size: Number of subsequences to sample
