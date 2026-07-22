@@ -35,14 +35,34 @@ def summarize_returns(returns: list[float]) -> dict[str, float | int]:
     }
 
 
+def select_policy_action(
+    logits: torch.Tensor,
+    *,
+    policy_mode: str,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    """Select a deterministic or reproducibly sampled categorical action."""
+    if policy_mode == "argmax":
+        return logits.argmax(dim=-1)
+    if policy_mode == "sample":
+        probabilities = F.softmax(logits, dim=-1)
+        return torch.multinomial(
+            probabilities,
+            num_samples=1,
+            generator=generator,
+        ).squeeze(-1)
+    raise ValueError(f"unsupported policy mode: {policy_mode}")
+
+
 def evaluate_checkpoint(
     checkpoint_path: Path,
     *,
     device: str,
     episodes: int,
     seed: int,
+    policy_mode: str = "argmax",
 ) -> dict[str, object]:
-    """Run the deployed argmax policy without counterfactual probe overhead."""
+    """Run one policy mode without counterfactual probe overhead."""
     (
         cfg,
         actor,
@@ -64,6 +84,8 @@ def evaluate_checkpoint(
     )
     returns: list[float] = []
     h_prev_backup = world_model.h_prev.clone()
+    action_generator = torch.Generator(device=device)
+    action_generator.manual_seed(seed + 1_000_000)
 
     try:
         with torch.no_grad():
@@ -97,7 +119,11 @@ def evaluate_checkpoint(
                         num_classes=world_model.n_classes,
                     ).float()
                     actor_input = world_model.join_h_and_z(h, z_sample)
-                    action = actor(actor_input).argmax(dim=-1)
+                    action = select_policy_action(
+                        actor(actor_input),
+                        policy_mode=policy_mode,
+                        generator=action_generator,
+                    )
                     previous_action = F.one_hot(
                         action, num_classes=cfg.n_actions
                     ).float()
@@ -117,6 +143,8 @@ def evaluate_checkpoint(
     return {
         "checkpoint": str(checkpoint_path.resolve()),
         "train_step": train_step,
+        "policy_mode": policy_mode,
+        "action_seed": seed + 1_000_000,
         "seed_start": seed,
         "seed_end": seed + episodes - 1,
         "returns": returns,
@@ -131,6 +159,12 @@ def main() -> None:
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--episodes", type=int, default=20)
     parser.add_argument("--seed", type=int, default=17)
+    parser.add_argument(
+        "--policy-mode",
+        choices=("argmax", "sample"),
+        default="argmax",
+        help="Select mode actions or reproducibly sample categorical actions",
+    )
     args = parser.parse_args()
     if args.episodes <= 0:
         parser.error("--episodes must be positive")
@@ -144,6 +178,7 @@ def main() -> None:
             device=device,
             episodes=args.episodes,
             seed=args.seed,
+            policy_mode=args.policy_mode,
         )
         results.append(result)
         print(

@@ -3682,6 +3682,63 @@ selected against the earlier stream checkpoint, which preserved terminal-risk
 ranking and reached solved behavior; the full reference optimizer bundle should
 not become the authored default on the strength of this result.
 
+#### Preregistered sampled-policy deployment audit
+
+Pinned reference DreamerV3 `e3f0224` samples categorical policy actions in its
+policy method, including evaluation calls; the local benchmark deliberately
+uses deterministic `argmax` evaluation so a reported solution is reproducible.
+The difference may expose a real deployment boundary: a stochastic policy can
+cancel small directional biases over time, while `argmax` repeatedly applies
+the same side of a nearly tied distribution and can accumulate cart drift.
+
+- **Question:** are the stream canary's solved-best/collapsed-final distinction
+  and the reference-optimizer canary's weak behavior specific to deterministic
+  policy extraction, or are their categorical policies also weak when sampled?
+- **Frozen cohort:** evaluate stream best (update 1,400), stream final (3,500),
+  reference-optimizer best (2,800), and reference-optimizer final (3,500) on
+  environment reset seeds 17--116. For every checkpoint, compare `argmax` with
+  categorical sampling using a separate action generator seeded from the same
+  fixed base. Use posterior latent modes in both conditions, matching the
+  existing deterministic evaluation except for action selection.
+- **Primary readout:** 100-episode mean, median, range, and solved fraction for
+  each mode/checkpoint. The earlier 20-seed deterministic values remain context,
+  but this larger frozen cohort is the paired comparison of record.
+- **Interpretation:** sampled mean at least 450 with solved fraction at least
+  0.8 while `argmax` fails localizes useful stochastic policy knowledge that is
+  lost at deterministic extraction. If both fail, sampling does not rescue the
+  learned behavior. If sampling materially harms a solved `argmax` checkpoint,
+  entropy/probability calibration is itself a deployment problem.
+- **Stop rule:** these eight read-only evaluations only. Do not tune action
+  temperature, sampling seeds, or training from this result. Select the next
+  intervention only after recording all eight cells.
+
+#### Sampled-policy deployment-audit result
+
+The paired evaluation is retained under
+`experiments/2026-07-22_cartpole_sampled_policy_audit/`. All eight cells used
+the same reset seeds 17--116; sampled cells used the independent action seed
+1,000,017.
+
+| Checkpoint | Argmax mean / median / solved | Sample mean / median / solved |
+|---|---:|---:|
+| Stream best, update 1,400 | 500.00 / 500.0 / 1.00 | 500.00 / 500.0 / 1.00 |
+| Stream final, update 3,500 | 203.02 / 199.5 / 0.00 | 191.40 / 185.0 / 0.00 |
+| Reference optimizer best, update 2,800 | 173.28 / 155.5 / 0.02 | 153.74 / 141.0 / 0.00 |
+| Reference optimizer final, update 3,500 | 169.33 / 168.5 / 0.00 | 166.84 / 166.0 / 0.00 |
+
+The stream-best policy solves every episode under both extraction modes, while
+sampling does not solve a single episode from any of the three failed
+checkpoints. Sampling slightly reduces all three failed means rather than
+recovering hidden stochastic policy knowledge. The deterministic benchmark is
+therefore stricter than pinned reference evaluation in implementation, but it
+does not cause the observed instability. The solved-to-collapsed change is in
+the learned policy distribution itself, not merely its `argmax` projection.
+
+This rejects action sampling or temperature as the next intervention. Return
+to the earlier stream contract, whose best checkpoint demonstrates adequate
+model and optimizer capacity, and audit the training signal that later moves
+that same policy away from solved behavior.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation

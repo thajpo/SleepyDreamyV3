@@ -1,6 +1,10 @@
 import pytest
+import torch
 
-from scripts.evaluate_cartpole_checkpoints import summarize_returns
+from scripts.evaluate_cartpole_checkpoints import (
+    select_policy_action,
+    summarize_returns,
+)
 
 
 def test_summarize_returns_preserves_range_and_solved_fraction():
@@ -19,3 +23,20 @@ def test_summarize_returns_preserves_range_and_solved_fraction():
 def test_summarize_returns_rejects_empty_input():
     with pytest.raises(ValueError, match="at least one"):
         summarize_returns([])
+
+
+def test_select_policy_action_supports_argmax_and_reproducible_sampling():
+    logits = torch.tensor([[0.0, 0.0]]).expand(12, -1)
+    first = torch.Generator().manual_seed(19)
+    second = torch.Generator().manual_seed(19)
+
+    assert select_policy_action(logits[:1], policy_mode="argmax").item() == 0
+    assert torch.equal(
+        select_policy_action(logits, policy_mode="sample", generator=first),
+        select_policy_action(logits, policy_mode="sample", generator=second),
+    )
+
+
+def test_select_policy_action_rejects_unknown_mode():
+    with pytest.raises(ValueError, match="unsupported policy mode"):
+        select_policy_action(torch.zeros(1, 2), policy_mode="greedy")
