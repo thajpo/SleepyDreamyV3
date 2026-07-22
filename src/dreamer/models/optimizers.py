@@ -32,6 +32,7 @@ class LaProp(Optimizer):
         betas: tuple = (0.9, 0.999),
         eps: float = 1e-20,
         weight_decay: float = 0.0,
+        bias_correction: bool = True,
     ):
         if lr < 0.0:
             raise ValueError(f"Invalid learning rate: {lr}")
@@ -42,6 +43,7 @@ class LaProp(Optimizer):
         if not 0.0 <= betas[1] < 1.0:
             raise ValueError(f"Invalid beta parameter at index 1: {betas[1]}")
 
+        self.bias_correction = bool(bias_correction)
         defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
         super().__init__(params, defaults)
 
@@ -95,8 +97,11 @@ class LaProp(Optimizer):
                 # Match DreamerV3's scale_by_rms: normalize by the bias-corrected
                 # second moment. Without this correction, the first normalized
                 # gradient is amplified by 1 / sqrt(1 - beta2).
-                bias_correction2 = 1 - beta2 ** state["step"]
-                denom = (exp_avg_sq / bias_correction2).sqrt().add_(eps)
+                if self.bias_correction:
+                    bias_correction2 = 1 - beta2 ** state["step"]
+                    denom = (exp_avg_sq / bias_correction2).sqrt().add_(eps)
+                else:
+                    denom = exp_avg_sq.sqrt().add_(eps)
                 normalized_grad = grad / denom
 
                 # Momentum on the normalized gradient (not the raw gradient)
@@ -105,8 +110,11 @@ class LaProp(Optimizer):
 
                 # Match DreamerV3's scale_by_momentum: bias-correct the momentum
                 # accumulator before applying the learning rate.
-                bias_correction1 = 1 - beta1 ** state["step"]
-                p.add_(exp_avg, alpha=-(lr / bias_correction1))
+                if self.bias_correction:
+                    bias_correction1 = 1 - beta1 ** state["step"]
+                    p.add_(exp_avg, alpha=-(lr / bias_correction1))
+                else:
+                    p.add_(exp_avg, alpha=-lr)
 
         return loss
 

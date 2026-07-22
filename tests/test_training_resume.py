@@ -111,6 +111,31 @@ def test_cli_resume_restores_checkpoint_model_and_target_semantics(tmp_path):
     )
 
 
+def test_cli_resume_preserves_actor_warmup(tmp_path):
+    original_dir = tmp_path / "actor_warmup"
+    resumed_dir = tmp_path / "resumed_actor_warmup"
+    original = _run_training(
+        original_dir,
+        extra_overrides=["train.actor_warmup_steps=3"],
+    )
+    assert original.returncode == 0, original.stdout + original.stderr
+
+    original_checkpoint = original_dir / "checkpoints" / "checkpoint_final.pt"
+    resumed = _run_training(resumed_dir, checkpoint=original_checkpoint)
+    assert resumed.returncode == 0, resumed.stdout + resumed.stderr
+
+    resumed_config = json.loads((resumed_dir / "config.json").read_text())
+    resumed_checkpoint = torch.load(
+        resumed_dir / "checkpoints" / "checkpoint_final.pt",
+        map_location="cpu",
+        weights_only=False,
+    )
+
+    assert resumed_config["actor_warmup_steps"] == 3
+    assert resumed_checkpoint["actor_optimizer"]["state"] == {}
+    assert resumed_checkpoint["critic_optimizer"]["state"] != {}
+
+
 def test_initial_model_update_is_published_to_each_collector(tmp_path):
     result = _run_training(
         tmp_path / "multi_collector",

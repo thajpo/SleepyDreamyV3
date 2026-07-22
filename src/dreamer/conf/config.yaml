@@ -74,6 +74,7 @@ train:
   actor_lr: 4e-5
   critic_lr: 4e-5
   optimizer_contract: reference
+  laprop_bias_correction: true
   optimizer_warmup_steps: 1000
   weight_decay: 0.0
   critic_ema_decay: 0.98        # slow-critic Polyak decay
@@ -129,6 +130,7 @@ train:
 
   # Training phases
   wm_ac_ratio: 1  # WM updates per AC update (e.g., 4 = train WM 4x more than AC)
+  actor_warmup_steps: 0
 
   # Cosine LR decay (applies to all optimizers after the shared warmup)
   lr_cosine_decay: false

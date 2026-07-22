@@ -228,7 +228,9 @@ runs.
 | `train.replay_ratio` | 1.0 | Replayed non-burn-in transitions per raw environment frame |
 | `train.replay_sequence_mode` | stream | Sample same-collector, gap-free streams that may cross episode resets; `episode` preserves historical contained-window sampling |
 | `train.optimizer_contract` | reference | Use equal-rate, shared-warmup optimization and let replay value loss shape observed features; `legacy` preserves split-rate detached updates |
+| `train.laprop_bias_correction` | true | Use reference bias-corrected LaProp moments; historical snapshots without this field retain the former uncorrected equation |
 | `train.optimizer_warmup_steps` | 1000 | Linearly ramp every optimizer's learning rate from zero; all modules still train from the first update |
+| `train.actor_warmup_steps` | 0 | Train and publish the actor immediately; resumed historical snapshots retain any authored actor-only warmup |
 | `train.critic_slow_target` | false | Use the online value for lambda returns and the actor baseline; keep the slow value as a regularizer |
 | `train.critic_real_return_scale` | 0.0 | Optional full-episode replay return-to-go critic loss scale |
 | `train.normalize_advantages` | false | Use only the running return-percentile scale; `true` additionally z-scores each imagined batch |

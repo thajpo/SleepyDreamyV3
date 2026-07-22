@@ -157,6 +157,7 @@ class WorldModelTrainer:
             self.wm_params,
             lr=config.wm_lr,
             weight_decay=config.weight_decay,
+            bias_correction=config.laprop_bias_correction,
         )
         self.critic_params = list(self.critic.parameters()) + list(
             self.q_critic.parameters()
@@ -165,11 +166,13 @@ class WorldModelTrainer:
             self.critic_params,
             lr=config.critic_lr,
             weight_decay=config.weight_decay,
+            bias_correction=config.laprop_bias_correction,
         )
         self.actor_optimizer = LaProp(
             self.actor.parameters(),
             lr=config.actor_lr,
             weight_decay=config.weight_decay,
+            bias_correction=config.laprop_bias_correction,
         )
 
         # Slow critics regularize online critics; historical configs may also
@@ -291,10 +294,10 @@ class WorldModelTrainer:
                 / denom
             )
 
-        # Make learned weights available as soon as trainer initialization
-        # finishes. Every trainable component is optimized from the first
-        # learner update; replay readiness remains the startup data gate.
-        if self.train_step < self.config.max_train_steps:
+        if (
+            self.train_step < self.config.max_train_steps
+            and self.train_step >= self.config.actor_warmup_steps
+        ):
             self.send_models_to_collectors(self.train_step)
 
     def prevent_stale_training(self) -> bool:
@@ -403,10 +406,9 @@ class WorldModelTrainer:
             all_tokens = self.encoder(encoder_input)  # (B*T, token_dim)
             all_tokens = all_tokens.view(B, T, -1)
 
-            # Apply the WM:AC ratio to both actor and critic. When an AC update
-            # is scheduled, both heads train from the first learner update.
+            in_actor_warmup = self.train_step < self.config.actor_warmup_steps
             skip_ac_batch = self.should_skip_ac_update()
-            skip_actor_batch = skip_ac_batch
+            skip_actor_batch = in_actor_warmup or skip_ac_batch
             skip_critic_batch = skip_ac_batch
 
             # Forward pass: RSSM rollout + dreaming + replay grounding
@@ -564,7 +566,11 @@ class WorldModelTrainer:
             # Send models to collector periodically
             if (
                 self.train_step < self.config.max_train_steps
-                and self.train_step % self.config.steps_per_weight_sync == 0
+                and self.train_step >= self.config.actor_warmup_steps
+                and (
+                    self.train_step == self.config.actor_warmup_steps
+                    or self.train_step % self.config.steps_per_weight_sync == 0
+                )
             ):
                 self.send_models_to_collectors(self.train_step)
 

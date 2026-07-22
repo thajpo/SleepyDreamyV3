@@ -87,6 +87,7 @@ class Config:
     # Legacy preserves historical split-rate, detached replay-value updates.
     # Authored Hydra runs use the coherent reference optimizer contract.
     optimizer_contract: str = "legacy"  # legacy, reference
+    laprop_bias_correction: bool = True
     optimizer_warmup_steps: int = 0
     weight_decay: float = 0.0
     critic_ema_decay: float = 0.98
@@ -147,6 +148,7 @@ class Config:
 
     # ===== Training: WM-AC ratio =====
     wm_ac_ratio: int = 1
+    actor_warmup_steps: int = 0
 
     # ===== Training: LR schedule =====
     lr_cosine_decay: bool = False
@@ -193,7 +195,7 @@ def default_config() -> Config:
 def config_from_snapshot(data: dict) -> Config:
     """Construct a runtime config from a current or historical snapshot."""
     normalized = dict(data)
-    normalized.pop("actor_warmup_steps", None)
+    normalized.setdefault("laprop_bias_correction", False)
     return Config(**normalized)
 
 
@@ -311,6 +313,8 @@ def validate_config(cfg: Config) -> None:
         )
     if cfg.optimizer_warmup_steps < 0:
         errors.append("optimizer_warmup_steps must be >= 0")
+    if cfg.actor_warmup_steps < 0:
+        errors.append("actor_warmup_steps must be >= 0")
     if cfg.optimizer_contract == "reference":
         rates = (cfg.wm_lr, cfg.actor_lr, cfg.critic_lr)
         if not math.isclose(rates[0], rates[1]) or not math.isclose(

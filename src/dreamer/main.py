@@ -238,6 +238,7 @@ def resolve_resume_config(
             critic_slow_target=checkpoint_config.critic_slow_target,
             critic_ema_target=checkpoint_config.critic_ema_target,
             optimizer_contract=checkpoint_config.optimizer_contract,
+            laprop_bias_correction=checkpoint_config.laprop_bias_correction,
             optimizer_warmup_steps=checkpoint_config.optimizer_warmup_steps,
             wm_lr=checkpoint_config.wm_lr,
             actor_lr=checkpoint_config.actor_lr,
@@ -252,10 +253,14 @@ def resolve_resume_config(
             num_bins=checkpoint_config.num_bins,
             balance_continuation=checkpoint_config.balance_continuation,
             continuation_balance_rate=checkpoint_config.continuation_balance_rate,
+            gamma=checkpoint_config.gamma,
+            horizon=checkpoint_config.horizon,
+            contdisc=checkpoint_config.contdisc,
             weight_imagination_starts=(
                 checkpoint_config.weight_imagination_starts
             ),
             replay_sequence_mode=checkpoint_config.replay_sequence_mode,
+            actor_warmup_steps=checkpoint_config.actor_warmup_steps,
         )
 
     world_model_state = checkpoint.get("world_model", {})
@@ -280,6 +285,7 @@ def resolve_resume_config(
         critic_slow_target=True,
         critic_ema_target="distribution",
         optimizer_contract="legacy",
+        laprop_bias_correction=False,
         optimizer_warmup_steps=0,
         normalize_advantages=True,
         state_loss_mode="legacy_half_mean",
@@ -288,8 +294,12 @@ def resolve_resume_config(
         b_end=20,
         num_bins=255,
         balance_continuation=False,
+        gamma=0.997,
+        horizon=333,
+        contdisc=True,
         weight_imagination_starts=False,
         replay_sequence_mode="episode",
+        actor_warmup_steps=0,
     )
 
 
