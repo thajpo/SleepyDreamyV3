@@ -3553,6 +3553,135 @@ an implementation detail, not a semantic relaxation.
   as sufficient and does not authorize stacking actor-head depth, balanced
   continuation, larger replay batches, or diagnostic resampling.
 
+#### Reference optimizer-contract canary result
+
+The frozen seed-0 run completed normally under
+`experiments/2026-07-22_cartpole_reference_optimizer_seed0_3500/`, with manifest
+run ID `32c41510ade04d36891b6085102ec750` and MLflow run ID
+`27ffda015826420fb00047e2c59f3f82`. It used 3,500 learner updates, 21,435
+environment steps, and 918.4 seconds on ROCm. The manifest records clean source
+commit `90946ccc0d228b0845f66d007838145b836b9fc3`, the collector stopped normally,
+and periodic, best, and final checkpoints were retained separately.
+
+The 20-episode evaluation means at each 100-update boundary were:
+
+```text
+100:9.40 200:16.35 300:9.35 400:9.35 500:9.35 600:9.35
+700:9.35 800:9.35 900:9.35 1000:9.35 1100:9.35 1200:22.45
+1300:9.40 1400:11.45 1500:9.35 1600:9.35 1700:10.95
+1800:75.70 1900:39.00 2000:34.75 2100:42.25 2200:60.10
+2300:62.25 2400:170.95 2500:129.10 2600:141.35 2700:189.65
+2800:195.20 2900:162.00 3000:176.10 3100:133.85 3200:45.80
+3300:34.95 3400:107.25 3500:170.15
+```
+
+The behavioral gate failed: the run never reached `450`, its best was only
+`195.20` at update 2,800, and its final return was `170.15`. The small
+best-to-final gap of `25.05` does not rescue the gate because the policy never
+entered the solved regime. Relative to the stream-replay canary, the coherent
+reference time scale delayed useful behavior by roughly 700 updates and then
+plateaued below 200 before a transient fall to `34.95` at update 3,300.
+
+The required deterministic final continuation audit is under
+`experiments/2026-07-22_cartpole_reference_optimizer_continuation_probe/`. On
+seeds 17--36 it produced mean return `167.6` across 3,352 transitions and 20
+physical terminals. Posterior effective discount was `0.99107` on terminal
+transitions and `0.99118` on live transitions, with failure ROC AUC `0.523` and
+balanced accuracy `0.5`; the prior result was similarly uninformative (terminal
+`0.99093`, live `0.99063`, AUC `0.410`). Posterior/prior transport RMS was only
+`0.00085`, so this is a learned continuation-head failure rather than latent
+transport corruption.
+
+This rejects the optimizer bundle as sufficient and, more specifically, shows
+that it regresses the stream canary's strong terminal-risk ordering (posterior
+AUC `0.998`) to chance. The fixed-history Q probe is skipped because the
+behavioral gate failed. Before choosing another intervention, use the already
+bounded on-policy left-drift and exact policy-target readouts to distinguish a
+globally weak policy/value system from the previous late distributional drift;
+do not stack another training change onto this failed canary.
+
+#### Preregistered reference optimizer boundary readouts
+
+- **Question:** did the best-to-final degradation reproduce the stream canary's
+  left-drift distribution shift, and does the actor track its exact sampled
+  policy-conditioned target despite the failed continuation head?
+- **On-policy cohort:** compare best update 2,800 and final update 3,500 on the
+  same deterministic seeds 17--36, real horizon 30, learned-model horizon 3,
+  decomposition horizons 1 and 3, critical real-action margin 15, and terminal
+  window 10 used for the stream readout.
+- **Exact target cohort:** compare the same two checkpoints on only seeds
+  17--19, using 64 sampled 15-step policy-conditioned returns per forced first
+  action. Retain the existing 1.96-combined-standard-error confidence rule and
+  require at least 100 separated states before a categorical tracking claim.
+- **Interpretation:** similar left-drift statistics with actor/target agreement
+  below `0.8` would reproduce the prior transfer failure; globally weak action
+  ranking or ample actor/target agreement would instead show that the coherent
+  bundle changed the failure boundary. These readouts describe the failed run
+  and cannot rescue it.
+- **Stop rule:** these two checkpoint comparisons only; do not resample, tune,
+  or launch another training intervention before recording both results.
+
+#### Reference optimizer boundary-readout result
+
+The 20-seed on-policy comparison is retained under
+`experiments/2026-07-22_cartpole_reference_optimizer_on_policy_probe/`:
+
+| Metric | Best, update 2,800 | Final, update 3,500 |
+|---|---:|---:|
+| Mean return / solved episodes | 159.05 / 0 of 20 | 167.60 / 0 of 20 |
+| Actor/real accuracy | 0.488 | 0.493 |
+| Actor/real balanced accuracy | 0.489 | 0.592 |
+| Critical-margin accuracy | 0.464 | 0.462 |
+| Terminal-window accuracy | 0.695 | 0.508 |
+| Three-step Q/real balanced accuracy | 0.444 | 0.562 |
+| Three-step Q/real correlation | -0.001 | 0.020 |
+| Actor/three-step-Q agreement | 0.490 | 0.723 |
+| Mean one-step state MSE | 0.191 | 0.455 |
+| Mean one-step prior x MSE | 0.306 | 1.225 |
+
+The failure distribution changes across training. The best checkpoint fails by
+pole angle in both directions, with terminal x near plus or minus `1.4--1.6`
+and theta near plus or minus `0.205`; it is globally weak rather than a solved
+policy observed on rare recovery states. Every final episode instead crosses
+the negative cart boundary at x approximately `-2.38--2.40` while theta remains
+near upright. On the final distribution the trusted real rollout prefers action
+1 on 2,214 of 2,314 actionable states, but the actor executes action 0 on 1,733
+of all 3,352 states. This reproduces the systematic left-drift endpoint, while
+the roughly balanced action histogram shows it is not a constant-action actor.
+World-model state fidelity also degrades materially from best to final.
+
+The exact 64-sample, 15-step readout is retained under
+`experiments/2026-07-22_cartpole_reference_optimizer_policy_q_probe/`:
+
+| Metric | Best, update 2,800 | Final, update 3,500 |
+|---|---:|---:|
+| Three-seed mean return | 187.0 | 168.0 |
+| Statistically separated states | 176 | 309 |
+| Actor/policy-Q agreement on separated states | 0.955 | 0.663 |
+| All-state actor/policy-Q agreement | 0.830 | 0.533 |
+| Separated actionable states | 75 | 221 |
+| Policy-Q/real balanced accuracy there | 0.470 | 0.500 |
+| Policy-Q/real raw accuracy | 0.415 | 0.060 |
+| Mean absolute policy-Q action margin | 0.153 | 0.378 |
+
+Both checkpoints exceed the 100-state confidence floor, so the tracking result
+is categorical. At the best checkpoint the actor accurately follows a sampled
+policy target that is already worse than chance against real rollouts. At the
+final checkpoint the target becomes more confident and selects action 0 on 483
+of 504 states even though the trusted rollout prefers action 1 on 336 of 351
+actionable states; actor/target agreement then also falls below `0.8`.
+
+The coherent optimizer bundle therefore changes, but does not repair, the
+failure chain. Its first demonstrated broken boundary is learned policy-target
+quality, not actor tracking: bad target advice is present while tracking still
+passes. Later training adds actor/target mismatch, worse one-step state fidelity,
+chance continuation ranking, and the familiar left-drift state distribution.
+Continuation saturation is a plausible contributor to the target inversion,
+but these readouts do not isolate it causally. The next intervention must be
+selected against the earlier stream checkpoint, which preserved terminal-risk
+ranking and reached solved behavior; the full reference optimizer bundle should
+not become the authored default on the strength of this result.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
