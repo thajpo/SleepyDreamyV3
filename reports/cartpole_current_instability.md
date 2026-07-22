@@ -2289,6 +2289,37 @@ finish the remaining objective/optimizer source audit and preregister one
 conformance intervention only if it exposes another concrete divergence that
 can explain recovery-state value errors.
 
+#### Preregistered value-head representability comparison
+
+The remaining source audit confirms that official `main` is still reference
+commit `e3f0224`. Its value head has three `d_hidden`-wide hidden layers, each
+followed by RMSNorm and SiLU. The local actor and value networks still share an
+original two-hidden-layer SiLU MLP with no normalization; this omission predates
+and survived the later repository-wide RMSNorm correction. The mismatch is
+directly adjacent to the measured latent-to-value ordering failure, but a
+source difference alone does not justify another online run.
+
+- **Question:** on identical frozen posterior latents and trusted value labels,
+  does the reference-style value head generalize materially better than the
+  deployed local head?
+- **Frozen source:** the online-target final checkpoint from run
+  `d9c14b1ba1d74173aaa85a7d8531f05c`. Collect 4,096 states with random behavior
+  using seed 17, split whole episodes 80/20, and compute exact discounted
+  remaining return under constant action 0 and constant action 1 separately.
+- **Causal variable:** compare the current two-hidden-layer SiLU critic with a
+  three-hidden-layer RMSNorm/SiLU critic. Use the same frozen encoder/RSSM,
+  two-hot bins, dataset/split, zero output initialization, AdamW `1e-3`, batch
+  128, 30 epochs, and random initialization seed for both heads.
+- **Primary gate:** the reference head must improve the worse of the two
+  posterior-latent held-out correlations by at least `0.10`, without increasing
+  held-out MAE for either action by more than `5%`. True-state results are a
+  control, not the selection metric.
+- **Stop rule:** this is a read-only paired comparison, not a trainer change. A
+  failed gate rejects value-head representability as the next intervention. A
+  pass authorizes only an isolated, backward-compatible value-head conformance
+  canary; it does not authorize actor, reward-head, optimizer, ramp, or replay-
+  gradient changes.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
