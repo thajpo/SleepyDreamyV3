@@ -4249,6 +4249,59 @@ sampled policy-conditioned target alongside its deterministic branch-max Q
 readout. The generated rows retain the standard errors and confidence rule so
 uncertain Monte Carlo preferences cannot masquerade as categorical labels.
 
+### Fixed-history actor/target time-scale result
+
+The read-only audit completed under
+`experiments/2026-07-22_cartpole_slow_mean_fixed_history_target_timeline/` from
+clean source `812cec5`. Both reset seeds follow the decoded-mean canary's best
+actor for a shared 830-state history (mean return `415.0`); every target
+checkpoint therefore sees identical observations and previous actions. The
+common Monte Carlo seed also reduces sampling noise between checkpoints.
+
+| Target update | Confident | Confident actionable | Actor/target | Target/real balanced | Mean abs target delta | Mean delta SE |
+|---:|---:|---:|---:|---:|---:|---:|
+| 500 | 539 | **116** | **0.314** | **0.501** | 1.483 | 0.530 |
+| 1,000 | 224 | 66 | **0.638** | **0.169** | 0.437 | 0.216 |
+| 1,200 best | 312 | 82 | 0.833 | **0.420** | 0.156 | 0.066 |
+| 1,500 | 410 | 80 | **0.788** | **0.553** | 0.721 | 0.292 |
+| 2,000 | 335 | 81 | 0.904 | 0.641 | 1.448 | 0.571 |
+| 2,500 | 407 | **104** | 0.980 | 0.620 | 3.908 | 1.567 |
+| 3,000 | 302 | 71 | 0.954 | 0.692 | 3.271 | 1.617 |
+| 3,500 | 211 | 24 | 0.972 | 0.783 | 2.067 | 1.493 |
+
+Only updates 500 and 2,500 meet the preregistered 100-confident-actionable
+support floor. The first selects a coupled early optimization failure: neither
+target quality nor actor tracking passes. By update 2,500 both pass. The
+underpowered intervening rows show the order rather than support a categorical
+gate claim: actor tracking crosses `0.8` at the best checkpoint while target
+ordering is still poor, then both improve on this fixed good-policy history.
+
+Adjacent actor-action flip rates are `0.633`, `0.129`, `0.190`, `0.067`,
+`0.265`, `0.393`, and `0.075`. Raw sampled target preferences flip `0.511`,
+`0.286`, `0.237`, `0.178`, `0.218`, `0.248`, and `0.208`. However, among rows
+that are statistically separated at both adjacent checkpoints, target flips
+fall from `0.425` at 500-to-1,000 to `0.043` at 1,200-to-1,500 and exactly zero
+for every later comparison. The large later raw flip rates therefore occur in
+uncertain rows, not in strong target reversals. One-step prior x MSE also falls
+from `0.371` at update 500 to `0.011--0.074` after update 1,500 on this cohort.
+
+This rejects critic-target change rate versus actor update rate as the main
+late-collapse mechanism on replay-supported good trajectories. It also makes
+the final checkpoint's earlier on-policy result more informative: on its own
+final-policy histories, actor/target agreement was `0.443` and target/real
+balanced accuracy `0.407`, whereas on the fixed best-policy histories the same
+weights give `0.972` agreement and a descriptive `0.783` target/real score.
+Useful behavior has not been overwritten globally. The learned system retains
+it on the old trajectory but the deployed policy induces a different state and
+latent-history distribution where both boundaries fail.
+
+The result does not justify an integrated optimizer rerun: equal rates could
+change early learning, but the suspected late actor lag is absent on the fixed
+cohort. The next source audit should instead inspect how imagined actor updates,
+replay sampling, and posterior/prior state construction constrain the policy to
+data-supported histories. Any intervention must distinguish a genuine local
+implementation mismatch from ordinary model exploitation before training.
+
 Interrupted manifests correctly record `status: interrupted` and evaluation
 history, but incorrectly retain `progress.train_step: 0` and `env_steps: 0`.
 Fix this bookkeeping issue separately from the learning experiment so it does
