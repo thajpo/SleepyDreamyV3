@@ -22,6 +22,8 @@ def test_hydra_yaml_defines_every_runtime_field():
     assert runtime_config.b_end == 20
     assert runtime_config.rssm_core == "reference"
     assert runtime_config.continue_head_layers == 1
+    assert runtime_config.vector_encoder_mode == "reference"
+    assert runtime_config.posterior_head_layers == 1
     assert runtime_config.replay_sequence_mode == "stream"
     assert runtime_config.critic_slow_target is False
     assert runtime_config.critic_ema_target == "mean_twohot"
@@ -42,8 +44,11 @@ def test_hydra_yaml_defines_every_runtime_field():
         (replace(Config(), replay_burn_in=64), "burn-in < sequence_length"),
         (replace(Config(), checkpoint_interval=0), "checkpoint_interval"),
         (replace(Config(), d_hidden=63), "divisible by 16"),
+        (replace(Config(), encoder_mlp_n_layers=0), "encoder_mlp_n_layers"),
         (replace(Config(), rssm_core="mystery"), "rssm_core"),
         (replace(Config(), continue_head_layers=2), "continue_head_layers"),
+        (replace(Config(), vector_encoder_mode="mystery"), "vector_encoder_mode"),
+        (replace(Config(), posterior_head_layers=2), "posterior_head_layers"),
         (replace(Config(), optimizer_contract="mystery"), "optimizer_contract"),
         (replace(Config(), critic_ema_target="mystery"), "critic_ema_target"),
         (replace(Config(), state_loss_mode="mystery"), "state_loss_mode"),
@@ -101,6 +106,8 @@ def test_resume_inherits_historical_checkpoint_semantics(tmp_path):
     snapshot = asdict(Config())
     snapshot.pop("rssm_core")
     snapshot.pop("continue_head_layers")
+    snapshot.pop("vector_encoder_mode")
+    snapshot.pop("posterior_head_layers")
     snapshot.pop("critic_slow_target")
     snapshot.pop("critic_ema_target")
     snapshot.pop("replay_sequence_mode")
@@ -120,6 +127,8 @@ def test_resume_inherits_historical_checkpoint_semantics(tmp_path):
             Config(),
             rssm_core="reference",
             continue_head_layers=1,
+            vector_encoder_mode="reference",
+            posterior_head_layers=1,
             critic_slow_target=False,
             replay_sequence_mode="stream",
             laprop_bias_correction=True,
@@ -134,6 +143,8 @@ def test_resume_inherits_historical_checkpoint_semantics(tmp_path):
 
     assert resumed.rssm_core == "legacy"
     assert resumed.continue_head_layers == 0
+    assert resumed.vector_encoder_mode == "legacy"
+    assert resumed.posterior_head_layers == 0
     assert resumed.critic_slow_target is True
     assert resumed.critic_ema_target == "distribution"
     assert resumed.replay_sequence_mode == "episode"
@@ -244,18 +255,44 @@ def test_resume_infers_reference_rssm_core_without_config_snapshot(tmp_path):
             "world_model": {
                 "dynin_deter.0.weight": object(),
                 "continue_predictor.0.weight": object(),
-            }
+                "posterior_head.0.weight": object(),
+            },
+            "encoder": {"MLP.mlp.1.weight": object()},
         },
     )
 
     assert resumed.rssm_core == "reference"
     assert resumed.continue_head_layers == 1
+    assert resumed.vector_encoder_mode == "reference"
+    assert resumed.posterior_head_layers == 1
     assert resumed.laprop_bias_correction is False
     assert (resumed.gamma, resumed.horizon, resumed.contdisc) == (
         0.997,
         333,
         True,
     )
+
+
+def test_resume_infers_legacy_observation_posterior_without_snapshot(tmp_path):
+    resumed = resolve_resume_config(
+        replace(
+            Config(),
+            vector_encoder_mode="reference",
+            posterior_head_layers=1,
+        ),
+        tmp_path / "checkpoint.pt",
+        checkpoint={
+            "world_model": {
+                "_W_ir": object(),
+                "continue_predictor.weight": object(),
+                "posterior_head.weight": object(),
+            },
+            "encoder": {"MLP.mlp.0.weight": object()},
+        },
+    )
+
+    assert resumed.vector_encoder_mode == "legacy"
+    assert resumed.posterior_head_layers == 0
 
 
 def test_trainer_requires_collector_queue_before_model_initialization(tmp_path):

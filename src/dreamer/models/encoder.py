@@ -20,13 +20,17 @@ class ObservationEncoder(nn.Module):
         d_hidden,
         n_observations,
         num_latents=32,
+        vector_encoder_mode="legacy",
     ):
         super().__init__()
         self.use_state = n_observations > 0
 
         if self.use_state:
-            self.MLP = ThreeLayerMLP(
-                d_in=n_observations, d_hidden=d_hidden, d_out=d_hidden
+            self.MLP = make_vector_encoder_mlp(
+                mode=vector_encoder_mode,
+                d_in=n_observations,
+                d_hidden=d_hidden,
+                n_layers=mlp_config.n_layers,
             )
         self.CNN = ObservationCNNEncoder(
             target_size=cnn_config.target_size,
@@ -187,6 +191,41 @@ class ThreeLayerMLP(nn.Module):
         return self.mlp(x)
 
 
+class ReferenceVectorMLP(nn.Module):
+    """Pinned vector encoder: complete normalized activation at every layer."""
+
+    def __init__(self, d_in, d_hidden, n_layers=3):
+        super().__init__()
+        layers = []
+        in_features = d_in
+        for _ in range(n_layers):
+            layers.extend(
+                [
+                    nn.Linear(in_features, d_hidden, bias=True),
+                    nn.RMSNorm(d_hidden, eps=1e-4),
+                    nn.SiLU(),
+                ]
+            )
+            in_features = d_hidden
+        self.mlp = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.mlp(x)
+
+
+def make_vector_encoder_mlp(mode, d_in, d_hidden, n_layers=3):
+    """Construct a checkpoint-stable historical or reference vector encoder."""
+    if mode == "legacy":
+        return ThreeLayerMLP(d_in=d_in, d_hidden=d_hidden, d_out=d_hidden)
+    if mode == "reference":
+        return ReferenceVectorMLP(
+            d_in=d_in,
+            d_hidden=d_hidden,
+            n_layers=n_layers,
+        )
+    raise ValueError("vector_encoder_mode must be 'legacy' or 'reference'")
+
+
 class StateOnlyEncoder(nn.Module):
     """
     Encoder for state-vector-only observations (no pixels).
@@ -202,9 +241,15 @@ class StateOnlyEncoder(nn.Module):
         d_hidden,
         n_observations,
         num_latents=32,
+        vector_encoder_mode="legacy",
     ):
         super().__init__()
-        self.MLP = ThreeLayerMLP(d_in=n_observations, d_hidden=d_hidden, d_out=d_hidden)
+        self.MLP = make_vector_encoder_mlp(
+            mode=vector_encoder_mode,
+            d_in=n_observations,
+            d_hidden=d_hidden,
+            n_layers=mlp_config.n_layers,
+        )
 
         num_classes = d_hidden // 16
         self.num_latents = num_latents

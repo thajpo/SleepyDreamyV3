@@ -47,6 +47,21 @@ def test_inspector_uses_legacy_rssm_core_for_historical_config(tmp_path):
     assert config.rssm_core == "legacy"
 
 
+def test_inspector_uses_legacy_observation_posterior_for_historical_config(tmp_path):
+    run_dir = tmp_path / "historical_run"
+    checkpoint_path = run_dir / "checkpoints" / "checkpoint_final.pt"
+    checkpoint_path.parent.mkdir(parents=True)
+    data = asdict(Config())
+    data.pop("vector_encoder_mode")
+    data.pop("posterior_head_layers")
+    (run_dir / "config.json").write_text(json.dumps(data))
+
+    config = infer_config_from_checkpoint(checkpoint_path, config_name=None)
+
+    assert config.vector_encoder_mode == "legacy"
+    assert config.posterior_head_layers == 0
+
+
 def test_inspector_uses_slow_critic_target_for_historical_config(tmp_path):
     run_dir = tmp_path / "historical_run"
     checkpoint_path = run_dir / "checkpoints" / "checkpoint_final.pt"

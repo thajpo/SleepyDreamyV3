@@ -89,7 +89,8 @@ uv run --extra cpu dreamer-train \
 
 Resume into a new output directory while restoring model and optimizer state,
 the training step, return-normalization and continuation-prevalence state,
-best-evaluation state, the RSSM and continuation-head architectures, optimizer
+best-evaluation state, the RSSM, vector-encoder, posterior, and continuation-
+head architectures, optimizer
 contract and LaProp equation, base rates, linear and actor-only warmup lengths,
 advantage, free-bits, and state-reconstruction semantics, two-hot support,
 online-versus-slow value targeting, continuation discount and balancing,
@@ -103,7 +104,8 @@ uv run --extra cpu dreamer-train \
 
 Current checkpoints embed their runtime configuration. Historical checkpoints
 fall back to the adjacent `config.json`. If neither snapshot exists, resume
-infers the RSSM and continuation-head architectures from model weights and uses
+infers the RSSM, vector-encoder, posterior, and continuation-head architectures
+from model weights and uses
 the historical legacy optimizer contract with uncorrected LaProp moments, no
 learning-rate or actor-only warmup, batch advantage normalization,
 straight-through free bits, half-mean vector-state reconstruction, 255 symmetric
@@ -247,6 +249,8 @@ checkpoints and are not the authored defaults for new runs.
 | `models.d_hidden` | 64 | Hidden dimension |
 | `models.rssm_core` | reference | Grouped, normalized recurrent core; `legacy` preserves historical checkpoint equations and layout |
 | `models.continue_head_layers` | 1 | One RMSNorm/SiLU hidden layer in the continuation head; `0` selects the legacy linear head |
+| `models.vector_encoder_mode` | reference | Normalize and activate all three vector-observation MLP layers; `legacy` preserves the historical raw final affine token |
+| `models.posterior_head_layers` | 1 | One RMSNorm/SiLU observation-mixing layer before posterior logits; `0` selects the historical direct projection |
 | `general.use_pixels` | false | Use pixel observations |
 | `general.research_gradient_diagnostics` | false | Read-only replay/WM gradient-alignment telemetry on scalar-log updates |
 

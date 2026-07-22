@@ -180,6 +180,10 @@ def dictconfig_to_config(cfg: DictConfig) -> Config:
             d["rssm_core"] = models.rssm_core
         if "continue_head_layers" in models:
             d["continue_head_layers"] = models.continue_head_layers
+        if "vector_encoder_mode" in models:
+            d["vector_encoder_mode"] = models.vector_encoder_mode
+        if "posterior_head_layers" in models:
+            d["posterior_head_layers"] = models.posterior_head_layers
         if "encoder" in models:
             enc = models.encoder
             if "cnn" in enc:
@@ -235,6 +239,8 @@ def resolve_resume_config(
             flat_cfg,
             rssm_core=checkpoint_config.rssm_core,
             continue_head_layers=checkpoint_config.continue_head_layers,
+            vector_encoder_mode=checkpoint_config.vector_encoder_mode,
+            posterior_head_layers=checkpoint_config.posterior_head_layers,
             critic_slow_target=checkpoint_config.critic_slow_target,
             critic_ema_target=checkpoint_config.critic_ema_target,
             optimizer_contract=checkpoint_config.optimizer_contract,
@@ -278,10 +284,32 @@ def resolve_resume_config(
         raise ValueError(
             "checkpoint does not identify its continuation-head architecture"
         )
+    encoder_state = checkpoint.get("encoder", {})
+    if "MLP.mlp.1.weight" in encoder_state:
+        vector_encoder_mode = "reference"
+    elif "MLP.mlp.0.weight" in encoder_state:
+        vector_encoder_mode = "legacy"
+    elif any(key.startswith("CNN.") for key in encoder_state):
+        # Pixel-only historical encoders contain no vector branch to inspect.
+        vector_encoder_mode = "legacy"
+    else:
+        raise ValueError(
+            "checkpoint does not identify its vector-encoder architecture"
+        )
+    if "posterior_head.0.weight" in world_model_state:
+        posterior_head_layers = 1
+    elif "posterior_head.weight" in world_model_state:
+        posterior_head_layers = 0
+    else:
+        raise ValueError(
+            "checkpoint does not identify its posterior-head architecture"
+        )
     return replace(
         flat_cfg,
         rssm_core=rssm_core,
         continue_head_layers=continue_head_layers,
+        vector_encoder_mode=vector_encoder_mode,
+        posterior_head_layers=posterior_head_layers,
         critic_slow_target=True,
         critic_ema_target="distribution",
         optimizer_contract="legacy",

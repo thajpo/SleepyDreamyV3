@@ -1,4 +1,9 @@
-from .encoder import ObservationEncoder, StateOnlyEncoder, ThreeLayerMLP
+from .encoder import (
+    ObservationEncoder,
+    ReferenceVectorMLP,
+    StateOnlyEncoder,
+    ThreeLayerMLP,
+)
 from .decoder import ObservationDecoder, StateOnlyDecoder
 from .world_model import RSSMWorldModel
 from .initialization import (

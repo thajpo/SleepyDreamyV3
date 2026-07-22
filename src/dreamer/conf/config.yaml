@@ -47,6 +47,8 @@ models:
   num_latents: 32
   rssm_core: reference  # grouped normalized recurrent core from pinned DreamerV3
   continue_head_layers: 1  # reference conhead: one RMSNorm/SiLU hidden layer
+  vector_encoder_mode: reference  # normalize and activate all vector MLP layers
+  posterior_head_layers: 1  # one normalized observation-mixing layer before logits
   encoder:
     cnn:
       stride: 2

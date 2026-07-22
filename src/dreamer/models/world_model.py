@@ -109,7 +109,21 @@ class RSSMWorldModel(nn.Module):
         # This is the key architectural requirement from the paper.
         posterior_in_dim = h_dim + encoder_token_dim
         posterior_out_dim = self.n_latents * self.n_classes
-        self.posterior_head = nn.Linear(posterior_in_dim, posterior_out_dim)
+        posterior_head_layers = int(
+            getattr(models_config, "posterior_head_layers", 0)
+        )
+        if posterior_head_layers == 0:
+            # Preserve the parameter layout of historical checkpoints.
+            self.posterior_head = nn.Linear(posterior_in_dim, posterior_out_dim)
+        elif posterior_head_layers == 1:
+            self.posterior_head = nn.Sequential(
+                nn.Linear(posterior_in_dim, self.d_hidden),
+                nn.RMSNorm(self.d_hidden, eps=1e-4),
+                nn.SiLU(),
+                nn.Linear(self.d_hidden, posterior_out_dim),
+            )
+        else:
+            raise ValueError("posterior_head_layers must be 0 or 1")
 
         # Initalizing network params for t=0 ; h_0 is the zero matrix
         h_prev = torch.zeros(batch_size, self.d_hidden * n_gru_blocks)

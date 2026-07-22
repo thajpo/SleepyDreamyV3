@@ -76,6 +76,8 @@ def test_cli_resume_restores_checkpoint_model_and_target_semantics(tmp_path):
         extra_overrides=[
             "models.rssm_core=legacy",
             "models.continue_head_layers=0",
+            "models.vector_encoder_mode=legacy",
+            "models.posterior_head_layers=0",
             "train.critic_slow_target=true",
             "train.replay_sequence_mode=episode",
             "train.state_loss_mode=legacy_half_mean",
@@ -96,13 +98,19 @@ def test_cli_resume_restores_checkpoint_model_and_target_semantics(tmp_path):
 
     assert resumed_config["rssm_core"] == "legacy"
     assert resumed_config["continue_head_layers"] == 0
+    assert resumed_config["vector_encoder_mode"] == "legacy"
+    assert resumed_config["posterior_head_layers"] == 0
     assert resumed_config["critic_slow_target"] is True
     assert resumed_config["replay_sequence_mode"] == "episode"
     assert resumed_config["state_loss_mode"] == "legacy_half_mean"
     assert "continue_predictor.weight" in resumed_checkpoint["world_model"]
+    assert "posterior_head.weight" in resumed_checkpoint["world_model"]
+    assert "MLP.mlp.1.weight" not in resumed_checkpoint["encoder"]
     assert "_W_ir" in resumed_checkpoint["world_model"]
     assert resumed_checkpoint["config_snapshot"]["rssm_core"] == "legacy"
     assert resumed_checkpoint["config_snapshot"]["continue_head_layers"] == 0
+    assert resumed_checkpoint["config_snapshot"]["vector_encoder_mode"] == "legacy"
+    assert resumed_checkpoint["config_snapshot"]["posterior_head_layers"] == 0
     assert resumed_checkpoint["config_snapshot"]["critic_slow_target"] is True
     assert resumed_checkpoint["config_snapshot"]["replay_sequence_mode"] == "episode"
     assert (

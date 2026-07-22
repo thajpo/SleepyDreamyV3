@@ -56,6 +56,12 @@ class Config:
     # Zero preserves historical linear-head checkpoint construction. Authored
     # Hydra configs use the reference-style one-hidden-layer continuation MLP.
     continue_head_layers: int = 0
+    # Legacy preserves the raw three-linear vector encoder used by historical
+    # checkpoints. Authored runs normalize and activate every encoder layer.
+    vector_encoder_mode: str = "legacy"  # legacy, reference
+    # Zero preserves the historical direct posterior projection. Authored runs
+    # use the pinned one-hidden-layer normalized observation posterior.
+    posterior_head_layers: int = 0
 
     # Encoder CNN (pixels only)
     encoder_cnn_stride: int = 2
@@ -283,6 +289,7 @@ def validate_config(cfg: Config) -> None:
         "d_hidden": cfg.d_hidden,
         "num_latents": cfg.num_latents,
         "rnn_n_blocks": cfg.rnn_n_blocks,
+        "encoder_mlp_n_layers": cfg.encoder_mlp_n_layers,
         "n_actions": cfg.n_actions,
         "num_dream_steps": cfg.num_dream_steps,
         "horizon": cfg.horizon,
@@ -303,6 +310,10 @@ def validate_config(cfg: Config) -> None:
         errors.append("rssm_core must be 'legacy' or 'reference'")
     if cfg.continue_head_layers not in {0, 1}:
         errors.append("continue_head_layers must be 0 or 1")
+    if cfg.vector_encoder_mode not in {"legacy", "reference"}:
+        errors.append("vector_encoder_mode must be 'legacy' or 'reference'")
+    if cfg.posterior_head_layers not in {0, 1}:
+        errors.append("posterior_head_layers must be 0 or 1")
     if cfg.optimizer_contract not in {"legacy", "reference"}:
         errors.append("optimizer_contract must be 'legacy' or 'reference'")
     if cfg.critic_ema_target not in {"distribution", "mean_twohot"}:
