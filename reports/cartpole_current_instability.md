@@ -4578,3 +4578,80 @@ and optimizer-contract retries end here. The next bounded decision must audit
 the model or target architecture that creates the replay/recovery latent and
 value geometry; another learning-rate, warmup, or target-smoothing change is
 not evidence-selected.
+
+### State-reconstruction aggregation source audit
+
+The next audit found a direct world-model target-scale mismatch against pinned
+reference `e3f0224`. The reference vector decoder produces a per-coordinate
+symlog MSE and wraps it in `Agg(..., jnp.sum)` over the observation event
+dimensions. Its state reconstruction term is therefore
+`sum_i (prediction_i - symlog(target_i))^2` for each transition. Local
+`compute_wm_loss()` instead computes
+`0.5 * mean_i (prediction_i - symlog(target_i))^2`.
+
+For CartPole's four-dimensional state, the local observation-grounding loss and
+its gradient are exactly `1 / (2 * 4) = 1/8` of the pinned equation for
+identical predictions and targets. This is not a logging-only reduction: the
+scaled term is added beside reward, continuation, dynamics KL, and
+representation KL before the shared world-model backward pass, so it weakens
+the gradient reaching the state encoder, recurrent model, posterior head, and
+decoder. Pixel reconstruction already uses a sum and is not affected.
+
+The completed corrected-optimizer canary makes the scale difference concrete.
+Across its 140 logged batches, the local state term averages `0.0271`, compared
+with reward `1.285`, continuation `0.181`, dynamics KL `1.016`, and total world-
+model loss `2.694`. The pinned aggregation would make the same recorded state
+errors average `0.217`. At update 1,000 the local state term is `0.0715`; the
+reference-equivalent value is `0.572`. Exact gradient interaction cannot be
+inferred from scalar loss alone, but the deterministic eightfold component
+gradient error is large enough to change shared representation optimization.
+
+This mismatch is more proximal than the remaining depth/normalization
+differences. Frozen supervision has repeatedly shown that the posterior latent
+contains useful but asymmetric value information, while online recovery
+targets fail and the corrected optimizer canary's continuation predictor loses
+failure ordering. Underweighting the only direct physical-state reconstruction
+target can allow KL and self-generated value objectives to dominate precisely
+the small recovery-state distinctions that CartPole control needs. It is still
+a hypothesis about learning outcome, not proof that stronger reconstruction
+will stabilize the actor.
+
+### Preregistered reference state-aggregation canary
+
+- **Hypothesis:** restoring the authored sum-of-squared symlog state objective
+  strengthens observation grounding enough for the corrected reference stack
+  to preserve failure-risk and recovery-value geometry instead of converging to
+  a near-constant continuation estimate and one-action critic bootstrap.
+- **Causal variable:** add an explicit state-loss semantic mode. New authored
+  runs use `reference_sum`; historical checkpoints/config snapshots without
+  the field infer `legacy_half_mean`. Change only the state-vector reduction
+  from half-mean to sum. Do not alter pixel, reward, continuation, KL, replay,
+  optimizer, actor/value architecture, batch, sequence, ratio, entropy, or
+  evaluation semantics.
+- **Mechanical gate:** focused tests must prove that a four-coordinate state
+  has exactly eight times the legacy loss and state-prediction gradient under
+  `reference_sum`; every non-state loss is bitwise or numerically unchanged;
+  authored Hydra selects the reference mode; old snapshots infer legacy mode;
+  resume rejects an unapproved semantic migration; and checkpoint snapshots
+  preserve the selected mode. Then run the full fast suite, compile, scoped
+  type gate, and one-update multiprocess CPU smoke.
+- **Frozen run:** repeat the clean seed-0, 3,500-update corrected reference-
+  optimizer command and fixed 20-episode evaluation schedule from run
+  `34df3ce8fa5045bfac79a3a92420a390`, changing only state-loss aggregation.
+  Retain batch 8, sequence 16, burn-in 4, replay ratio 16, one collector, and
+  the one-thread host resource cap.
+- **Behavioral gate:** reach mean return `450`; never fall below `300`
+  afterward; final at least `400`; best-to-final gap at most `100`.
+- **Boundary gate:** regardless of behavior, run the final 20-seed continuation
+  audit and five-seed, 64-sample online policy-target probe. Final posterior
+  and prior failure ROC AUC must each reach `0.8`. The policy target must have
+  at least 100 confident actionable rows, target/trusted-real balanced accuracy
+  at least `0.592`, and actor/target agreement at least `0.8`.
+- **Interpretation:** passing both gates selects state reconstruction scale as
+  the first sufficient repair in the corrected stack, subject to replication.
+  Improved continuation but failed value/behavior localizes the next boundary
+  downstream of observation grounding. Failure ends aggregation retries and
+  returns to the coupled encoder/posterior architecture audit.
+- **Stop rule:** one seed only. Do not add seeds or combine normalized MLPs,
+  posterior depth, reward-head depth, deterministic-state width, larger
+  batches, or longer sequences unless the preregistered gates pass.
