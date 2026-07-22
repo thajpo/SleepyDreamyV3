@@ -4480,3 +4480,101 @@ Interrupted manifests correctly record `status: interrupted` and evaluation
 history, but incorrectly retain `progress.train_step: 0` and `env_steps: 0`.
 Fix this bookkeeping issue separately from the learning experiment so it does
 not alter the scientific intervention.
+
+### Corrected-stack optimizer integration result
+
+The preregistered seed-0 run completed normally under
+`experiments/2026-07-22_cartpole_corrected_reference_optimizer_seed0_3500/`
+from clean source `ff9de4e7e4ac438355b6f046400fc56dc676a36b`.
+Its manifest run ID is `34df3ce8fa5045bfac79a3a92420a390` and its MLflow
+run ID is `ea5d8acdfe38448f900ca96d9009a320`. It consumed 3,500 learner
+updates and 21,490 environment transitions in 920.8 seconds, then recorded a
+`completed` lifecycle with the `max_train_steps` stop reason.
+
+The run used the exact preregistered bundle: reference RSSM and heads, stream
+replay, episode-coherent collection, replay-start continuation weighting,
+decoded-mean slow-value regularization, equal `4e-5` world-model/actor/critic
+rates, 1,000-update linear warmup, and replay-value representation gradients.
+Batch size remained 8, sequence length 16, burn-in 4, replay ratio 16, actor
+entropy `1e-3`, one collector, and 20 deterministic evaluation episodes every
+100 updates.
+
+The complete evaluation-return curve was:
+
+```text
+step:    100  200  300  400  500  600  700  800  900 1000 1100 1200
+return:  9.4 15.9 9.35 9.35 9.35 9.35 9.35 9.35 9.35 9.35 9.35 13.95
+
+step:   1300 1400 1500 1600 1700 1800 1900 2000 2100 2200 2300 2400
+return: 9.35 9.35 9.35 9.35 10.1  9.4 83.05 79.0 82.7 75.75 64.6 32.65
+
+step:   2500 2600 2700 2800 2900 3000 3100 3200 3300 3400 3500
+return: 24.95 20.1 17.6 20.7 25.15 16.3 40.8 30.5 36.35 154.4 272.5
+```
+
+The run never reached the required return of 450, ended at 272.5, and showed
+an unstable rise-collapse-recovery trajectory. The behavior gate therefore
+fails before considering any diagnostic. Best and final both point to update
+3,500; direct tensor comparison verified that encoder, world model, actor,
+online critic, and slow critic weights in `checkpoint_best.pt` and
+`checkpoint_final.pt` are identical. The required endpoint probes were
+therefore run once rather than duplicating identical weights.
+
+The 20-seed continuation audit under
+`experiments/2026-07-22_cartpole_corrected_reference_optimizer_continuation_probe/`
+observed mean return 258.9 across 5,178 transitions, with 16 physical failures
+and four time-limit truncations.
+
+| Continuation readout | Final 3,500 |
+|---|---:|
+| Posterior expected failure ROC AUC | **0.675** |
+| Posterior mode failure ROC AUC | **0.680** |
+| Prior expected failure ROC AUC | **0.603** |
+| Posterior terminal / live effective discount | **0.9895 / 0.9909** |
+| Prior terminal / live effective discount | **0.9898 / 0.9899** |
+| Posterior-to-prior RMS, all / terminal rows | 0.00117 / 0.00139 |
+| Balanced accuracy at half task discount | 0.500 |
+
+Unlike the legacy split-rate decoded-mean final checkpoint, whose posterior
+and prior failure AUCs were about 0.987 and 0.985, this bundle's continuation
+predictions are nearly constant and only weakly order failure risk. Transport
+remains small, but actual terminal transitions retain approximately 0.99
+effective discount instead of zero. Equal rates and replay-value gradients did
+not merely fail to solve the old critic geometry; in this seed they also
+coincide with worse learned survival discrimination.
+
+The five-seed, 64-sample online-critic policy-target audit under
+`experiments/2026-07-22_cartpole_corrected_reference_optimizer_policy_q_probe/`
+followed 1,777 actor states and found 223 actionable states. Returns were
+355.4 mean, 435 median, 119 minimum, and 500 maximum, with one of five episodes
+solved.
+
+| Policy/value readout | Final 3,500 |
+|---|---:|
+| Actor / trusted-real balanced accuracy | 0.502 |
+| One-step critic-bootstrap / trusted-real balanced accuracy | **0.500** |
+| Three-step full-Q / trusted-real balanced accuracy | **0.498** |
+| Policy target / trusted-real balanced accuracy, all actionable | 0.533 |
+| Actor / policy-target agreement, all states | 0.843 |
+| Mean absolute policy-target action delta | 0.105 |
+| Confident states / confident actionable states | 426 / **53** |
+| Confident actor / policy-target agreement | **0.979** |
+| Confident policy-target / trusted-real balanced accuracy | **0.567** |
+| One-step state MSE | 0.0616 |
+
+The one-step critic bootstrap prefers action 1 on all 1,777 states. The actor
+tracks statistically separated policy targets extremely well, but those
+targets remain below the `0.592` trusted-real gate and provide only 53
+confident actionable rows, below the required support floor of 100. Thus the
+value-boundary gate also fails: strong actor/target agreement cannot rescue a
+near-chance and under-supported target.
+
+This is a decisive negative canary, not a reason to add seeds. The corrected
+reference-optimizer bundle improves the endpoint over the older reference
+optimizer canary (roughly 170 final) but remains materially worse than the
+legacy split-rate decoded-mean peak of 409, never solves CartPole, and does not
+stabilize recovery. Per the preregistered stop rule, seeds 1 and 2 are cancelled
+and optimizer-contract retries end here. The next bounded decision must audit
+the model or target architecture that creates the replay/recovery latent and
+value geometry; another learning-rate, warmup, or target-smoothing change is
+not evidence-selected.
