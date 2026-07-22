@@ -474,9 +474,9 @@ class EpisodeReplayBuffer:
             )
         return [self._sample_stream_subsequence(item) for item in selected]
 
-    def sample(self, batch_size, recent_fraction=0.2):
+    def sample(self, batch_size, recent_fraction=0.0):
         """
-        Sample a batch of fixed-length subsequences with recent bias.
+        Sample fixed-length subsequences, optionally with explicit recent bias.
 
         Blocks until the configured replay population can provide a sequence.
         Samples recent_fraction of the batch from starts in newer episodes.
@@ -486,7 +486,7 @@ class EpisodeReplayBuffer:
 
         Args:
             batch_size: Number of subsequences to sample
-            recent_fraction: Fraction of batch to sample from recent episodes (default 0.2)
+            recent_fraction: Fraction of batch forced from recent episodes (default 0)
 
         Returns:
             List of (pixels, states, actions, rewards, is_last, is_terminal,
@@ -549,7 +549,7 @@ class EpisodeReplayBuffer:
         device,
         use_pixels=False,
         target_size=None,
-        recent_fraction=0.2,
+        recent_fraction=0.0,
     ) -> EnvData:
         """
         Samples a batch and returns an EnvData namedtuple with ready-to-use PyTorch tensors.

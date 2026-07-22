@@ -5363,3 +5363,64 @@ starts and whether posterior value ordering changes because those histories
 leave the sampled replay distribution or because the scalar value target moves
 on histories that remain represented. Keep the authored actor-unimix default at
 one percent; retain the configuration and telemetry as diagnostic machinery.
+
+### Preregistered uniform-replay conformance canary
+
+The replay/history-support audit found one remaining source divergence with a
+mechanism that matches the fixed-history failure. Pinned DreamerV3 commit
+`e3f0224` configures its replay selector with `uniform: 1.0` and
+`recency: 0.0`. Its separate online queue can deliver newly completed,
+non-overlapping sequences, but it does not reserve a fixed fraction of every
+batch for the newest fifth of replay. The local authored config instead sets
+`recent_fraction=0.2`. With the frozen batch size of eight, one row is forced
+from the newest 20 percent of episodes and the other seven are uniform. If
+valid starts are distributed proportionally across that newest fifth, about
+30 percent of sampled starts come from it rather than the 20 percent expected
+under uniform replay: a 1.5-fold overweighting of the current policy corridor.
+
+This divergence can explain the otherwise paired observations that the model
+becomes highly accurate on its current solved trajectory while becoming poor
+on older, physically reachable recovery histories. It is not yet causal
+evidence. All episodes in the matched run fit in replay, physical boundary
+coverage did not disappear, and a 1.5-fold age bias may be too small to explain
+the instability.
+
+- **Hypothesis:** explicit recency bias strengthens the closed-loop feedback
+  between the current actor, its induced narrow trajectory corridor, and the
+  model/value targets. Uniform replay will retain recovery-history geometry
+  longer and reduce post-solve collapse.
+- **Causal variable:** set only `recent_fraction` from `0.2` to `0.0`. Make
+  zero recency the authored and helper default while retaining the existing
+  opt-in recent sampler for experiments. Do not change replay capacity,
+  collection pacing, sequence weighting, actor support, model/loss equations,
+  optimizer, or evaluation.
+- **Exact run contract:** repeat the matched one-percent seed-0 baseline for
+  3,500 updates with `d_hidden=128`, four recurrent blocks, batch 8, sequence
+  length 16, burn-in 4, replay ratio 16, replay buffer 512, minimum buffer 16,
+  one collector, stream replay, 15-step dreams, reference RSSM/observation
+  posterior/optimizer contract, equal `4e-5` rates, 1,000-update optimizer
+  warmup, no actor warmup, actor unimix `0.01`, actor entropy `0.001`, online
+  value targets, evaluation every 100 updates over the fixed 20-episode cohort,
+  and checkpoints every 500 updates. The source must be the clean commit that
+  contains this preregistration and the default correction.
+- **Mechanical gate:** test that zero recency samples every valid stream start
+  with uniform probability weights, that a nonzero explicit fraction still
+  selects the newest pool, and that Hydra projects the authored zero into the
+  runtime config. Then run focused replay/config tests, the full fast suite,
+  compile, scoped Pyright, and the one-update multiprocess CPU smoke.
+- **Behavioral gate:** reach mean return 475 and never fall below 300
+  afterward; final return at least 400; best-to-final gap at most 100. Compare
+  the complete curve with the matched `recent_fraction=0.2` baseline, which
+  first reached 475 at update 2,100 and remained solved through final. One seed
+  can reject the mechanism but cannot establish general stability.
+- **Boundary gate:** regardless of behavior, rerun the frozen update-2,000
+  recovery-value diagnostic against update 2,500 and final. Require at least
+  100 actionable states for a categorical claim. Uniform replay is selected as
+  a proximal history-support correction only if posterior-critic or full-dream
+  balanced accuracy exceeds `0.60` without a constant-class solution, or if
+  the actor/critic retains both trusted action classes substantially better
+  than the matched baseline while passing the behavioral gate.
+- **Stop rule:** one seed and its fixed-history diagnostic. Do not tune a
+  smaller recency fraction, enlarge replay, launch more seeds, or start Pong
+  from this result. A failure redirects the investigation from replay age to
+  policy-conditioned latent/value generalization.

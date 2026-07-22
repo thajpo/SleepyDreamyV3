@@ -189,6 +189,30 @@ def test_stream_enumerates_every_start_and_repeats_interior_terminal(monkeypatch
     assert terminal_appearances == replay.sequence_length
 
 
+def test_stream_default_sampling_is_uniform_over_every_valid_start(monkeypatch):
+    replay = EpisodeReplayBuffer(
+        data_queue=None,
+        max_episodes=10,
+        min_episodes=1,
+        sequence_length=3,
+        sequence_mode="stream",
+    )
+    replay.add_episode((*_episode(3, marker=1.0), 0, 1))
+    replay.add_episode((*_episode(5, marker=2.0), 0, 2))
+    candidates = replay._stream_start_candidates()
+    calls = []
+
+    def choose(population, *, weights, k):
+        calls.append((list(population), list(weights), k))
+        return [population[-1]] * k
+
+    monkeypatch.setattr("dreamer.runtime.replay_buffer.random.choices", choose)
+
+    replay.sample(batch_size=4)
+
+    assert calls == [(candidates, [item[2] for item in candidates], 4)]
+
+
 def test_stream_crosses_reset_with_aligned_fields_and_unit_weights(monkeypatch):
     replay = EpisodeReplayBuffer(
         data_queue=None,

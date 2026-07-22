@@ -168,7 +168,7 @@ train:
   # Replay ratio gating (DreamerV3 paper)
   replay_ratio: 1.0  # replayed non-burn-in transitions per raw env frame
   action_repeat: 1   # env frames per action
-  recent_fraction: 0.2  # fraction of batch from newest episodes
+  recent_fraction: 0.0  # pinned DreamerV3 uses uniform replay (recency is opt-in)
 
 # Hydra settings
 hydra:

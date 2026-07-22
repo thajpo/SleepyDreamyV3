@@ -34,6 +34,7 @@ def test_hydra_yaml_defines_every_runtime_field():
     assert runtime_config.actor_unimix == 0.01
     assert runtime_config.weight_imagination_starts is True
     assert runtime_config.state_loss_mode == "reference_sum"
+    assert runtime_config.recent_fraction == 0.0
     assert runtime_config.wm_lr == runtime_config.actor_lr
     assert runtime_config.actor_lr == runtime_config.critic_lr
     validate_config(runtime_config)
