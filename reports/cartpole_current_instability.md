@@ -2793,6 +2793,57 @@ start-continuation multiplier or class balancing. The next intervention must
 come from a fresh source/gradient audit rather than treating the near-pass as a
 success.
 
+#### Preregistered sequence-loss reduction canary
+
+The next gradient-path audit found that local losses are reduced differently
+for reporting and optimization. Each per-row world-model loss already averages
+over the batch and is accumulated over all `T` replay rows. Each imagined
+actor/critic loss averages over batch and imagination horizon and is accumulated
+over the `K = T - burn_in` replay starts. `core.py` backpropagates those sums
+directly. Only the later logger divides by `K`, so the dashboard displays an
+apparent mean that the optimizer never receives. The replay-auxiliary helper
+and its test explicitly state that the caller will divide the accumulated loss,
+but no such caller exists.
+
+Reference commit `e3f0224` takes the mean over batch, replay starts, and
+imagination time before its single optimizer. Under the frozen `T=16`,
+`burn_in=4` contract, local world-model gradients are therefore scaled by 16
+and actor/critic gradients by 12 relative to the authored reduction. This does
+not imply 16x or 12x parameter updates: LaProp's per-coordinate RMS transform
+is invariant to a fixed positive gradient multiplier up to epsilon. The
+remaining direct mechanism is AGC, which runs *before* LaProp. Multiplication
+can move a parameter tensor across AGC's `0.3 * ||parameter||` threshold and
+thereby change its clipped gradient history; the hidden reduction also makes
+that behavior depend on sequence length.
+
+- **Hypothesis:** backpropagating sequence sums causes avoidable, sequence-
+  length-dependent AGC clipping and contributes to target/policy oscillation.
+  Applying the authored means before clipping will reduce late CartPole
+  collapse.
+- **Causal variable:** divide the accumulated world-model objective by all `T`
+  replay rows and the actor and critic objectives by the `K` post-burn-in
+  imagination starts before backward. Preserve replay auxiliary coefficients
+  at their authored values after this division, normalize the opt-in replay
+  representation diagnostic consistently, and stop dividing the already-mean
+  totals in scalar/progress logging. Do not change loss contents, replay
+  sampling, continuation weights, learning rates, AGC factor, LaProp, model
+  architecture, or benchmark configuration.
+- **Mechanical gate:** focused tests must prove that the returned objectives
+  and their gradients equal arithmetic sequence means, replay auxiliary scale
+  remains `0.3`, and logging does not divide them a second time. Focused/full
+  tests, compile/type gates, and a one-update process smoke must pass.
+- **Frozen run:** repeat seed 0 for 3,500 updates with the exact continuation-
+  coverage configuration, fixed evaluation cohort, and one-thread host
+  resource cap.
+- **Behavioral gate:** reach mean return `450`; never fall below `300`
+  afterward; final at least `400`; best-to-final gap at most `100`.
+- **Boundary gate:** only if behavior passes, rerun the final-policy fixed-
+  history comparison. Final Q/real accuracy and correlation must not regress
+  below `0.592` and `0.088`, and actor/Q agreement must remain above `0.8`.
+- **Stop rule:** one seed only. Failure rejects sequence-sum reduction as a
+  sufficient cause and does not authorize stacking AGC changes, learning-rate
+  warmup, optimizer unification, or continuation class balancing.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
