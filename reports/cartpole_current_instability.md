@@ -2992,6 +2992,53 @@ world-model objective scale.
   sufficient cause and does not authorize learning-rate, optimizer, start-
   continuation, or architecture changes.
 
+#### Balanced-continuation canary result
+
+The mechanical gate passes at source commit `dcaf998`. The focused balance,
+checkpoint, forward, and trainer tests passed (`37`); the full fast suite passed
+(`150`); compile and the supported scoped type gate passed; and a balance-enabled
+one-update CPU process smoke exited normally with its collector stopped. The
+trainer now applies the adaptive weights only to continuation BCE, reports the
+batch/EMA prevalence and class scales, and persists the EMA across checkpoints.
+The option remains disabled by default.
+
+The frozen seed-0 run completed normally under
+`experiments/2026-07-22_cartpole_balanced_continuation_seed0_3500/`, with manifest
+run ID `00d4d04df8d54214a672cfc3f948fb0f` and MLflow run ID
+`a52e7c1334e3402ebdc39dde445d807d`. It used 3,500 learner updates, 21,392
+environment steps, and 910.6 seconds on ROCm. The manifest records clean source
+`dcaf998`, `max_train_steps`, final/best/periodic checkpoints, and successful
+collector shutdown under the one-thread host resource cap.
+
+The behavior gate fails decisively. Evaluation stays at the 9.35--9.40 floor
+through update 1,400, rises to `120.65` at 1,600, and then mostly occupies a
+subsolved 160--225 band. The best evaluation is `271.15` at update 3,400 and the
+final evaluation is `159.45`, for a best-to-final gap of `111.70`. It never
+reaches 450, so the conditional fixed-history Q probe is not run.
+
+The preregistered deterministic continuation probe is retained under
+`experiments/2026-07-22_cartpole_balanced_continuation_probe/`. At the final
+checkpoint, seeds 17--36 average return `166.0` with no truncations. Posterior
+terminal continuation probability is `0.221`, terminal recall at the 0.5 cutoff
+is `0.95`, and balanced accuracy is `0.772`, so the narrow continuation gate
+passes. However, only `59.4%` of 3,300 live rows are classified live. At the
+best checkpoint, terminal probability is `0.118` and recall is `1.0`, but only
+`30.5%` of 5,723 live rows are classified live and balanced accuracy is `0.653`.
+The mean posterior continuation prediction is only `0.655` at final and `0.392`
+at best, versus the live target `0.997`.
+
+This rejects adaptive class-balanced BCE as a sufficient or semantically valid
+continuation fix. It solves the rare-class cutoff problem by changing the
+effective class prior: the raw sigmoid becomes a score calibrated to a
+50/50-weighted training distribution, not the real probability of continuing.
+Using that score directly as the imagination discount makes common live states
+look likely to terminate and shortens imagined credit assignment. The result
+therefore does not support enabling `balance_continuation` by default. Any
+follow-up must preserve or explicitly recover the natural-prior probability
+used for discounting; it cannot treat balanced classification accuracy alone as
+calibration evidence. The behavior failure stops this seed and does not
+authorize the Q probe or a broad sweep.
+
 ## Reliability follow-up
 
 Interrupted manifests correctly record `status: interrupted` and evaluation
