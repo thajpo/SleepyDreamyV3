@@ -5119,3 +5119,122 @@ the missing cells:
   generally and the closed-loop phase change belongs to the trained policy.
 
 The original no-training stop rule remains in force.
+
+### Stochastic policy-extraction result
+
+The posterior-sampled cells complete the four-way extraction comparison. At
+update 2,500, posterior sampling with action argmax scored mean `499.75`
+(range `475--500`, solved fraction `1.00`), while sampling both the posterior
+and action scored mean `494.52` (range `406--500`, solved fraction `0.89`). At
+updates 3,000 and 3,500, all four extraction combinations scored exactly 500
+on all 100 reset seeds. At update 2,000, all combinations remained unsolved:
+means ranged from `143.55` to `159.17` and solved fraction was zero.
+
+The collection/reference stochastic semantics therefore expose some
+near-boundary brittleness at update 2,500, but do not create the apparent
+solved phase. Sampling neither removes the update-2,000-to-2,500 phase change
+nor destabilizes the later checkpoints. Evaluation extraction is rejected as
+the main instability mechanism. The fixed-history result remains the stronger
+finding: the later policy is robust inside its induced trajectory corridor but
+its actor and learned action values are wrong on older reachable recovery
+histories.
+
+### Preregistered recovery-value boundary diagnostic
+
+- **Question:** on the fixed update-2,000 recovery histories, at which value
+  boundary does the update-2,500/final policy first lose the correct action
+  ordering: posterior critic, one-step prior transport, longer imagination, or
+  actor fitting?
+- **Frozen evidence:** drive five deterministic histories with update 2,000 on
+  reset seeds 17--21. Evaluate target checkpoints 2,000, 2,500, and final 3,500
+  on the identical observations and preceding source actions. No weights or
+  optimizer state change.
+- **Real policy target:** from every fixed-history state, inject the physical
+  CartPole state into a fresh simulator, force action 0 or 1, and then follow
+  the target checkpoint's deterministic actor for the remainder of a 30-step
+  branch. Preserve the target checkpoint's recurrent state at the branch
+  point. The two realized survival returns form a policy-specific action
+  preference, rather than the heuristic-controller label used by the earlier
+  probe.
+- **Boundary readouts:** compare the real policy-specific preference with (1)
+  the current actor, (2) actual first reward plus the critic evaluated after
+  the real next observation/posterior, (3) the model-predicted first reward,
+  continuation, and critic after a sampled one-step prior, and (4) the existing
+  sampled full-horizon policy lambda-return. Report balanced accuracy, delta
+  correlation, preference histograms, actor/target agreement, and position
+  strata. Use 64 model samples and require at least 100 real-policy-actionable
+  states for a categorical interpretation.
+- **Interpretation:** a bad posterior-critic ordering selects value learning or
+  value representation as the first broken boundary. A useful posterior
+  ordering that is lost by the one-step prior selects dynamics/reward/
+  continuation transport. A useful prior ordering lost only by full dreams
+  selects accumulated imagination error. A useful full-dream target that the
+  actor does not follow selects actor fitting. If several boundaries are
+  already wrong, classify the earliest one rather than proposing a bundled
+  fix.
+- **Stop rule:** one read-only diagnostic over the three existing checkpoints.
+  Do not launch training or alter an objective from this measurement alone.
+  Multi-seed replication and broad recovery-coverage benchmarks remain TODOs.
+
+### Recovery-value boundary result
+
+The tested read-only probe is retained under
+`experiments/2026-07-22_cartpole_reference_observation_posterior_recovery_value_boundary/`.
+It evaluated all three checkpoints on the same 760 update-2,000 history states.
+The real target is stricter than the earlier heuristic label: after forcing
+each candidate first action, the target checkpoint's own actor controls the
+real simulator for the rest of a 30-step branch.
+
+Only update 2,500 reaches the preregistered 100-actionable-state support floor.
+It contains 149 actionable states: real policy branches prefer action 1 on 145
+and action 0 on four. Every measured learned boundary chooses action 0 on all
+149 states:
+
+| Update 2,500 boundary | Raw accuracy | Balanced accuracy | Mean learned action-1 minus action-0 margin |
+|---|---:|---:|---:|
+| Current actor | 0.027 | 0.500 | -- |
+| Critic after real next observation/posterior | 0.027 | 0.500 | -1.958 |
+| One-step sampled prior reward/continue/critic | 0.027 | 0.500 | -2.098 |
+| Full sampled policy lambda-return | 0.027 | 0.500 | -3.442 |
+
+The corresponding real action-1 minus action-0 branch margin is positive
+`1.503` steps on average. Thus the balanced score of `0.5` is not weakly useful
+ranking hidden by class imbalance; it is a constant wrong classifier on 145 of
+149 actionable states. All 149 full-dream preferences are statistically
+separated, and actor/full-target agreement is `0.998` over all 627 separated
+states. The target is confident and the actor faithfully expresses it.
+
+The first broken boundary is already the posterior critic. It receives the
+real next observation after the forced action, so one-step prior transition
+error is not required to produce the wrong ordering. The learned reward-action
+difference is effectively zero (`-0.0058`), as CartPole requires. The one-step
+prior's value difference (`-1.321`) and smaller continuation difference
+(`-0.0560`) instead reinforce the wrong action. Longer imagination increases
+the magnitude but is downstream of the value error.
+
+Policy support has collapsed on the same cohort. Among the 145 states where
+the real branch prefers action 1, the one-percent-unimixed actor assigns action
+1 mean probability `0.0168` and median probability `0.0137`; `23.4%` receive
+less than one-percent probability. The four action-0 labels receive mean
+probability `0.973`. At final, the support floor is not met (41 actionable
+states), but the same pattern is descriptive: all boundaries choose action 0,
+and 18 of 23 action-1 labels receive less than one-percent actor probability.
+
+This identifies the proximal instability loop rather than a new scalar-loss
+bug. Once a narrow closed-loop orbit makes one action dominant on a recovery
+history, that counterfactual action becomes rare in actor-generated dreams.
+The value target is then trained mainly on the induced action/state corridor,
+the posterior critic becomes confidently wrong after the rare alternative,
+and actor/value agreement reinforces the corridor. The fixed-history decoder
+result and this real-posterior critic result make one-step dynamics the wrong
+first intervention.
+
+The diagnostic does not prove why the posterior critic lacks counterfactual
+support. All 400 collected episodes still fit within the configured 512-
+episode buffer, so FIFO eviction is not sufficient. Candidate causes include
+uniform-window dilution by long solved episodes, low alternative-action
+probability inside recovery starts, and value generalization across
+policy-dependent latent histories. Distinguishing those requires retained
+replay/imagination support data that the completed run does not contain. Per
+the stop rule, no training change is selected from this result alone; a
+recovery-support benchmark and multi-seed replication remain explicit TODOs.
