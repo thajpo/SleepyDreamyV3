@@ -5608,3 +5608,44 @@ function. Before inventing another grounding loss, continue the pinned-source
 audit for objective or numerical divergences adjacent to the RSSM/value target;
 if none are material, classify the behavior as model-based target
 extrapolation rather than an indexing or replay bug.
+
+### Preregistered RMSNorm-epsilon materiality audit
+
+The continuing pinned-source audit found one remaining numerical mismatch in
+the reference RSSM path. Official `embodied/jax/nets.py::Norm` uses
+`eps=1e-4`; local vector-encoder and posterior norms already specify that
+value, but the three recurrent input norms, grouped recurrent hidden norm, two
+prior-head norms, and continuation-head norm leave `torch.nn.RMSNorm.eps` as
+`None`. On float32 inputs PyTorch then uses machine epsilon (approximately
+`1.19e-7`), about 839 times smaller. RMSNorm has no epsilon entry in a
+checkpoint state dictionary, so both the solved and collapsed checkpoints are
+silently evaluated with this local numerical choice.
+
+- **Question:** is this source mismatch numerically active on the fixed
+  recovery histories, or are the normalized activations large enough that the
+  two epsilons are effectively equivalent?
+- **Frozen data:** reuse the update-2,000 source actor and seeds 17--36 from the
+  representability diagnostic. Compare the uniform-replay solved best
+  checkpoint at update 2,300 and collapsed final checkpoint at update 3,500.
+  Feed identical real observations and source actions to two copies of each
+  target: the checkpoint-faithful local copy and a read-only copy in which only
+  default-valued world-model RMSNorm epsilons are changed to `1e-4`.
+- **Primary readouts:** for every affected norm, record input mean-square and
+  the same-input relative output-scale change implied by the epsilon swap.
+  Across the accumulated recurrent histories, record prior/posterior category
+  disagreement, posterior-feature RMS difference, actor action/probability
+  change, online-critic value change, reward prediction change, and
+  continuation-probability change.
+- **Materiality gate:** require at least one affected norm to have a 95th-
+  percentile same-input scale change of `1%`, plus at least one downstream
+  threshold: `1%` prior or posterior categorical disagreement, `1%` actor
+  action disagreement, actor-probability L1 p95 of `0.02`, critic-value
+  absolute difference p95 of `0.1`, or continuation-probability absolute
+  difference p95 of `0.01`. Passing authorizes a checkpoint-safe isolated
+  epsilon conformance implementation and one frozen canary; it does not show
+  that epsilon caused collapse. Failing rejects epsilon as the next training
+  intervention.
+- **Stop rule:** one read-only pass over both checkpoints. Do not change model
+  initialization or launch training first. Preserve per-module and downstream
+  summaries, document the decision, and continue the value-target audit if the
+  gate fails.
