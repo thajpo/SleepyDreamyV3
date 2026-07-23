@@ -5770,3 +5770,85 @@ smoke composed stream plus online replay, consumed its startup population,
 published model version zero, stopped the collector, and exited normally. No
 long run has started during the mechanical gate; the frozen seed-0 canary above
 is the next experiment.
+
+The first long-run launch created MLflow run
+`2142b7042f9348f09ee8ed1a84e69987` and was manually interrupted before trainer
+initialization because Hydra selected its timestamp-default output directory
+instead of the preregistered evidence path. It performed no training and is not
+an experimental result. The retained launch artifact is
+`experiments/2026-07-22_211047_CartPole-v1/`. The contract was immediately
+relaunched with only an explicit `hydra.run.dir` override; this changes evidence
+placement, not training semantics.
+
+#### Online-FIFO canary result
+
+The corrected launch completed normally under
+`experiments/2026-07-22_cartpole_online_replay_seed0_3500/`. Its manifest run
+ID is `39055265269647e7b3a2dba666936886` (MLflow
+`470622ee09e04707af8ebe95964e927c`) and records clean source `9b5b479`, ROCm
+6.4, 3,500 updates, 21,468 environment steps, 1,144.57 seconds, maximum-step
+completion, final/best/periodic checkpoints, and normal process completion.
+The final logged cumulative online fraction is `4.822%`, inside the
+preregistered `3--7%` range. The descriptor queue was empty at every logged
+sample and no descriptor was dropped. Collector and trainer memory remained
+flat over the run.
+
+The complete evaluation curve is:
+
+```text
+100: 9.40, 200: 9.40, 300: 11.40, 400: 9.35,
+500: 9.35, 600: 9.35, 700: 9.35, 800: 9.35,
+900: 9.35, 1000: 9.40, 1100: 44.90, 1200: 93.95,
+1300: 76.50, 1400: 233.15, 1500: 114.05, 1600: 195.75,
+1700: 106.75, 1800: 129.60, 1900: 130.10, 2000: 192.20,
+2100: 500.00, 2200: 500.00, 2300: 500.00, 2400: 500.00,
+2500: 500.00, 2600: 500.00, 2700: 500.00, 2800: 500.00,
+2900: 500.00, 3000: 500.00, 3100: 500.00, 3200: 500.00,
+3300: 303.35, 3400: 219.45, 3500: 74.30
+```
+
+Online FIFO preserves the solved phase substantially longer but fails the
+preregistered stability gate. It reaches 475 at update 2,100 and stays at 500
+through 3,200, whereas uniform replay first reaches 500 at 2,300 and is already
+below 300 at 2,500. However, the online run falls below 300 at 3,400, finishes
+at `74.30`, and has a best-to-final gap of `425.70`. The mechanism therefore
+delays visible collapse by roughly 900 updates in this controlled seed; one
+seed does not establish that delay as a general effect. It does reject the
+missing online FIFO as a sufficient stability correction.
+
+The preregistered fixed-history probe is retained under
+`experiments/2026-07-22_cartpole_online_replay_recovery_value_boundary/`. It
+uses the same 760 update-2,000 source-history states as the uniform result.
+At the solved update-2,500 checkpoint, 142 states are actionable: real policy
+branches prefer action 1 on 141 and action 0 on one, while the actor,
+real-next-observation posterior critic, and full dream all choose action 0 on
+all 142. Their balanced accuracies are all `0.500`; the one-step prior chooses
+action 1 twice and scores `0.507`. Thus general recovery ordering is already
+wrong while on-corridor evaluation is exactly 500. The actor retains more soft
+support than in the matched uniform checkpoint--preferred-action probability
+has mean `0.0241`, median `0.0139`, and is below 1% on `14.1%` of actionable
+states--but its deterministic choice and learned value target are already
+wrong throughout the actionable cohort.
+
+At final, 624 states are actionable. Real branches prefer action 1 on 615 and
+action 0 on nine, while the actor chooses action 0 on 623, the posterior and
+one-step prior critics choose it on 620, and full dreams choose it on 619.
+Balanced accuracies are actor `0.501`, posterior `0.391`, prior `0.391`, and
+full dream `0.391`; full-dream margin correlation with the real margin is
+`-0.286`. Actor preferred-action probability has median `0.00500` and is below
+1% on `98.1%` of actionable states. Among 744 statistically confident full-
+dream states, actor/target agreement is `0.9987`.
+
+The FIFO changes when the failure reaches behavior, not the first broken
+boundary. Prompt fresh sequences keep the current policy corridor viable for
+longer, but the posterior critic is already a constant wrong classifier on
+older reachable recovery states during the solved phase. At final the same
+wrong value/dream ordering and near-constant actor have spread into live
+behavior. Actor fitting, one-step model transport, replay queue operation, and
+irrecoverable posterior representation loss remain downstream or rejected:
+the actor accurately expresses its confident imagined target, and the earlier
+fresh-head diagnostic showed that target latents retain recovery information.
+The evidence-selected next direction remains the construction and optimization
+of the online policy-conditioned value target. Do not tune online fraction,
+add recency, expand replay, or launch additional FIFO seeds before auditing
+that boundary against the pinned implementation.
