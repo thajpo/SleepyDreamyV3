@@ -5424,3 +5424,79 @@ the instability.
   smaller recency fraction, enlarge replay, launch more seeds, or start Pong
   from this result. A failure redirects the investigation from replay age to
   policy-conditioned latent/value generalization.
+
+### Uniform-replay conformance canary result
+
+The mechanical gate passes at clean source `94c5995`. Zero recency is now the
+authored and helper default, while the existing opt-in recent sampler remains
+available. Focused replay/config tests passed (`45`), the full fast suite
+passed (`225`), compile and scoped Pyright passed, and the one-update
+multiprocess CPU smoke completed with normal collector shutdown. The new
+stream test proves that default sampling makes one weighted choice over every
+valid start rather than reserving part of the batch for the newest pool.
+
+The preregistered run completed normally under
+`experiments/2026-07-22_cartpole_uniform_replay_seed0_3500/`. Its run ID is
+`bb2673d9f5ac4b2dba0bdaf507b031c2` (MLflow
+`73276146cd2c4a58a3687cb17e864535`), and its manifest records clean source
+`94c5995`, ROCm 6.4, 3,500 updates, 1,269.50 seconds, maximum-step completion,
+final/best/periodic checkpoints, and normal collector shutdown.
+
+Uniform replay preserves acquisition but fails the stability gate more
+severely than the matched recent-biased baseline. The complete non-floor
+evaluation curve is:
+
+```text
+1100: 81.80, 1200: 101.40, 1300: 65.95, 1400: 98.30,
+1500: 142.75, 1600: 99.35, 1700: 251.20, 1800: 240.10,
+1900: 180.80, 2000: 191.65, 2100: 262.20, 2200: 202.35,
+2300: 500.00, 2400: 318.30, 2500: 189.30, 2600: 130.40,
+2700: 120.05, 2800: 136.85, 2900: 153.50, 3000: 126.20,
+3100: 113.60, 3200: 67.75, 3300: 26.45, 3400: 19.80,
+3500: 19.85
+```
+
+It first reaches 475 at update 2,300, then drops below 300 at update 2,500.
+Final return is `19.85`, and the best-to-final gap is `480.15`. The matched
+`recent_fraction=0.2` baseline solved two evaluations earlier and retained
+return 500 through final. This one-seed comparison does not establish that
+recency is beneficial; it decisively rejects explicit recency as necessary for
+the collapse and rejects uniform replay as a sufficient stability correction.
+
+The frozen recovery-history probe is retained under
+`experiments/2026-07-22_cartpole_uniform_replay_recovery_value_boundary/`.
+Update 2,500 narrowly misses the 100-actionable-state interpretation floor
+with 96 rows: real branches prefer action 1 on 80 and action 0 on 16, while the
+actor, real-next-observation posterior critic, sampled one-step prior critic,
+and full dream target all choose action 0 on all 96. On the action-1 rows, mean
+actor probability for the trusted action is `0.00810`, mean real branch margin
+is `+1.575` steps, posterior-critic margin is `-5.548`, and full-dream margin is
+`-1.341`.
+
+The final checkpoint supplies ample support for a categorical conclusion:
+
+| Final boundary | Action 0 / 1 choices on 656 actionable rows | Balanced accuracy |
+|---|---:|---:|
+| Real 30-step branches | 2 / 654 | -- |
+| Actor | 656 / 0 | 0.500 |
+| Posterior critic after real next observation | 652 / 4 | 0.503 |
+| One-step sampled prior critic | 652 / 4 | 0.503 |
+| Full sampled policy lambda-return | 651 / 5 | 0.504 |
+
+On the 654 action-1 rows, the actor assigns action 1 mean probability
+`0.00715`; the real margin is `+2.555` steps, while posterior-critic and full-
+dream margins are `-2.885` and `-1.055`. Among 574 confident actionable full-
+dream rows, balanced accuracy is `0.0` and actor/target agreement is `1.0`.
+This is not noisy class balance: the imagined target confidently selects the
+opposite of the trusted action and the actor expresses it exactly.
+
+The evidence rejects replay age as the proximal cause. Old histories remain
+eligible under fully uniform sampling, yet the posterior critic still reverses
+real action ordering after receiving the real next observation. The remaining
+boundary is policy-conditioned latent/value generalization: either the same
+physical recovery situation occupies incompatible latent coordinates under
+different behavior histories, or the scalar value objective assigns moving,
+self-consistent targets to those coordinates. The next diagnostic must
+separate representation-coordinate drift from value-target drift without
+another end-to-end training intervention. Replay fraction/capacity, actor
+support, entropy, and Pong remain frozen.
