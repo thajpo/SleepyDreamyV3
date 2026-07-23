@@ -5649,3 +5649,33 @@ silently evaluated with this local numerical choice.
   initialization or launch training first. Preserve per-module and downstream
   summaries, document the decision, and continue the value-target audit if the
   gate fails.
+
+### RMSNorm-epsilon materiality result
+
+The audit implementation is clean source `e7e5713`. Three focused equation and
+gate tests, a real-checkpoint smoke, the full `231`-test fast suite, compile,
+and direct script Pyright passed. The retained result is
+`experiments/2026-07-22_cartpole_rmsnorm_epsilon_materiality/`. Both targets
+received the same 3,104 states from 20 update-2,000 source-policy episodes
+(seeds 17--36, mean return `155.2`), and all seven expected default-epsilon
+norms were observed and changed only in the read-only comparison copy.
+
+| Target | Largest per-module local scale-change p95 | Prior / posterior category disagreement | Actor action disagreement | Actor probability L1 p95 | Critic absolute delta p95 | Continuation absolute delta p95 |
+|---|---:|---:|---:|---:|---:|---:|
+| Solved best, step 2,300 | 0.162% | 0.291% / 0.601% | 0.290% | 0.0233 | 0.312 | 0.00703 |
+| Collapsed final, step 3,500 | 0.224% | 0.063% / 0.061% | 0.000% | 0.000006 | 0.0237 | 0.000138 |
+
+No norm had an input mean-square at or below `1e-4`. Rare recurrent inputs can
+still be sensitive: the largest single-row local scale change was about `7.8%`,
+and at the solved checkpoint a few categorical boundary flips accumulate into
+downstream actor-probability and critic-value p95 crossings. That does not pass
+the preregistered conjunction because the local effect is below `1%` at p95.
+More importantly, the collapsed checkpoint is substantially *less* sensitive:
+it changes no deployed actions and misses every downstream threshold.
+
+The materiality gate therefore fails for both targets. The epsilon is a real
+replication discrepancy and should be corrected in a future checkpointed
+architecture cleanup, but it is rejected as the next training intervention
+and does not explain the observed collapse. No epsilon canary is launched. The
+investigation returns to the source equations that construct and optimize the
+online policy-conditioned value target.
