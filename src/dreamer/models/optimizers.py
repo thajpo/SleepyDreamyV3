@@ -1,5 +1,8 @@
 """Custom optimizers for DreamerV3 training."""
 
+from collections.abc import Callable
+from typing import overload
+
 import torch
 from torch.optim import Optimizer
 
@@ -10,13 +13,17 @@ class LaProp(Optimizer):
 
     The paper describes this as "RMSProp followed by momentum":
       1. Compute second moment via EMA: v_t = β₂ * v_{t-1} + (1-β₂) * g_t²
-      2. Normalize gradient: g_norm = g / sqrt(v_t + ε)
-      3. Apply momentum to normalized gradient: m_t = β₁ * m_{t-1} + (1-β₁) * g_norm
-      4. Update: θ -= lr * m_t
+      2. Bias-correct it: v_hat = v_t / (1-β₂ᵗ)
+      3. Normalize gradient: g_norm = g / (sqrt(v_hat) + ε)
+      4. Apply momentum: m_t = β₁ * m_{t-1} + (1-β₁) * g_norm
+      5. Bias-correct momentum and update: θ -= lr * m_t / (1-β₁ᵗ)
 
     Key insight: the momentum is applied to the NORMALIZED gradient, not the
     raw gradient. This means the first moment tracks a smoothed version of
     the gradient direction (unit-scale), not the raw gradient magnitude.
+
+    Set ``bias_correction=False`` only to reproduce historical checkpoints'
+    uncorrected second-moment normalization and momentum update.
 
     Used in DreamerV3 with β₁=0.9, β₂=0.999, ε=1e-20, AGC=0.3.
     """
@@ -28,6 +35,7 @@ class LaProp(Optimizer):
         betas: tuple = (0.9, 0.999),
         eps: float = 1e-20,
         weight_decay: float = 0.0,
+        bias_correction: bool = True,
     ):
         if lr < 0.0:
             raise ValueError(f"Invalid learning rate: {lr}")
@@ -38,15 +46,23 @@ class LaProp(Optimizer):
         if not 0.0 <= betas[1] < 1.0:
             raise ValueError(f"Invalid beta parameter at index 1: {betas[1]}")
 
+        self.bias_correction = bool(bias_correction)
         defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
         super().__init__(params, defaults)
 
+    @overload
+    def step(self, closure: None = None) -> None: ...
+
+    @overload
+    def step(self, closure: Callable[[], float]) -> float: ...
+
     @torch.no_grad()
-    def step(self, closure=None) -> None:
+    def step(self, closure: Callable[[], float] | None = None) -> float | None:
         """Perform a single optimization step."""
+        loss = None
         if closure is not None:
             with torch.enable_grad():
-                closure()
+                loss = closure()
 
         for group in self.param_groups:
             lr = group["lr"]
@@ -81,17 +97,29 @@ class LaProp(Optimizer):
                 # v_t = β₂ * v_{t-1} + (1-β₂) * g_t²
                 exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
 
-                # Compute normalized gradient (RMSProp-style)
-                # No bias correction on second moment — matches source's scale_by_rms
-                denom = exp_avg_sq.sqrt().add_(eps)
+                # Match DreamerV3's scale_by_rms: normalize by the bias-corrected
+                # second moment. Without this correction, the first normalized
+                # gradient is amplified by 1 / sqrt(1 - beta2).
+                if self.bias_correction:
+                    bias_correction2 = 1 - beta2 ** state["step"]
+                    denom = (exp_avg_sq / bias_correction2).sqrt().add_(eps)
+                else:
+                    denom = exp_avg_sq.sqrt().add_(eps)
                 normalized_grad = grad / denom
 
                 # Momentum on the normalized gradient (not the raw gradient)
                 # m_t = β₁ * m_{t-1} + (1-β₁) * g_norm
                 exp_avg.mul_(beta1).add_(normalized_grad, alpha=1 - beta1)
 
-                # Update parameters
-                p.add_(exp_avg, alpha=-lr)
+                # Match DreamerV3's scale_by_momentum: bias-correct the momentum
+                # accumulator before applying the learning rate.
+                if self.bias_correction:
+                    bias_correction1 = 1 - beta1 ** state["step"]
+                    p.add_(exp_avg, alpha=-(lr / bias_correction1))
+                else:
+                    p.add_(exp_avg, alpha=-lr)
+
+        return loss
 
 
 def adaptive_gradient_clipping(parameters, clip_factor: float = 0.3, eps: float = 1e-3):

@@ -28,6 +28,65 @@ def symexp(x):
     return torch.sign(x) * (torch.exp(torch.abs(x)) - 1)
 
 
+def symexp_twohot_bins(
+    start: float,
+    end: float,
+    num_bins: int,
+    *,
+    device=None,
+    dtype=torch.float32,
+) -> torch.Tensor:
+    """Build DreamerV3 two-hot bins with exact symmetry when requested.
+
+    Constructing a symmetric range with one full ``linspace`` can leave its
+    center and mirrored pairs slightly asymmetric in float32. The reference
+    implementation builds the non-positive half and mirrors it, which also
+    lets :func:`twohot_expectation` cancel uniform predictions exactly.
+    """
+    if num_bins < 2:
+        raise ValueError("num_bins must be at least 2")
+    if float(end) <= float(start):
+        raise ValueError("end must be greater than start")
+    if float(start) == -float(end):
+        if num_bins % 2 == 1:
+            half = torch.linspace(
+                start, 0.0, (num_bins - 1) // 2 + 1, device=device, dtype=dtype
+            )
+            half = symexp(half)
+            return torch.cat((half, -half[:-1].flip(0)), dim=0)
+        center_offset = float(start) / float(num_bins - 1)
+        half = torch.linspace(
+            start, center_offset, num_bins // 2, device=device, dtype=dtype
+        )
+        half = symexp(half)
+        return torch.cat((half, -half.flip(0)), dim=0)
+    return symexp(
+        torch.linspace(start, end, num_bins, device=device, dtype=dtype)
+    )
+
+
+def twohot_expectation(logits: torch.Tensor, bins: torch.Tensor) -> torch.Tensor:
+    """Decode two-hot logits with cancellation-safe paired summation.
+
+    The arithmetic is the same weighted expectation as ``sum(probs * bins)``.
+    Pairing the negative and positive halves avoids catastrophic cancellation
+    for DreamerV3's wide symmetric support and guarantees an exactly zero
+    prediction for uniform logits over exactly symmetric bins.
+    """
+    if bins.ndim != 1 or logits.shape[-1] != bins.numel():
+        raise ValueError("bins must be 1D and match the logits' final dimension")
+    probs = F.softmax(logits, dim=-1)
+    midpoint = bins.numel() // 2
+    if bins.numel() % 2 == 1:
+        center = probs[..., midpoint] * bins[midpoint]
+        negative = (probs[..., :midpoint] * bins[:midpoint]).flip(-1)
+        positive = probs[..., midpoint + 1 :] * bins[midpoint + 1 :]
+        return center + (negative + positive).sum(dim=-1)
+    negative = (probs[..., :midpoint] * bins[:midpoint]).flip(-1)
+    positive = probs[..., midpoint:] * bins[midpoint:]
+    return (negative + positive).sum(dim=-1)
+
+
 def unimix_logits(logits, unimix_ratio=0.01):
     """
     Apply unimix to categorical logits (DreamerV3 Section 4).

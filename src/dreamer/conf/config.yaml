@@ -1,15 +1,19 @@
 # DreamerV3 Default Configuration
-# Override with: uv run dreamer-train +env=cartpole_state_only
-# Sweep with: uv run dreamer-train --multirun train.actor_lr=1e-5,3e-5,1e-4
+# Override with: uv run dreamer-train env=cartpole_state_only
+# Bounded sweep example:
+# uv run dreamer-train --multirun general.seed=0 train.actor_entropy_coef=3e-4,1e-3
 
 defaults:
   - _self_
   - env: cartpole_state_only  # default environment
   - override /hydra/launcher: basic
 
-# Optional checkpoint used to resume a run. This orchestration field is not
-# part of the flattened model/training Config snapshot.
+# Optional checkpoint and semantic-migration control. These orchestration
+# fields are not part of the flattened model/training Config snapshot.
 checkpoint_path: null
+# Preserve checkpoint model, continuation/value, and replay semantics unless
+# migration is explicit.
+allow_resume_semantic_migration: false
 
 # General settings
 general:
@@ -20,6 +24,7 @@ general:
   dry_run: false  # Skip MLflow/checkpoints for smoke tests
   experiment_name: null  # MLflow experiment name (null = auto from env name)
   log_profile: lean  # lean, full
+  research_gradient_diagnostics: false  # read-only replay/WM gradient alignment
   seed: 0
 
 # Environment (overridden by env/*.yaml)
@@ -40,6 +45,10 @@ environment:
 models:
   d_hidden: 64
   num_latents: 32
+  rssm_core: reference  # grouped normalized recurrent core from pinned DreamerV3
+  continue_head_layers: 1  # reference conhead: one RMSNorm/SiLU hidden layer
+  vector_encoder_mode: reference  # normalize and activate all vector MLP layers
+  posterior_head_layers: 1  # one normalized observation-mixing layer before logits
   encoder:
     cnn:
       stride: 2
@@ -65,23 +74,30 @@ train:
   # Learning rates (paper: 4e-5 with LaProp)
   wm_lr: 4e-5
   actor_lr: 4e-5
-  critic_lr: 3e-5
+  critic_lr: 4e-5
+  optimizer_contract: reference
+  laprop_bias_correction: true
+  optimizer_warmup_steps: 1000
   weight_decay: 0.0
-  critic_ema_decay: 0.98        # critic target network polyak decay
+  critic_ema_decay: 0.98        # slow-critic Polyak decay
   critic_ema_regularizer: 1.0   # scale of critic EMA regularization loss
+  critic_ema_target: mean_twohot # re-encode the slow critic's decoded scalar
+  critic_slow_target: false     # reference uses online value for returns/baseline
   critic_replay_scale: 0.3      # replay critic loss scale (βrepval)
-  critic_real_return_scale: 0.0 # direct replay Monte Carlo return scale
+  critic_real_return_scale: 0.0 # full-episode replay return-to-go loss scale
   q_critic_scale: 0.0           # explicit Q(s,a) critic loss scale
   q_actor_temperature: 0.25
 
   # RL settings
+  # With contdisc=true, gamma must match 1 - 1 / horizon.
   gamma: 0.997  # paper: discount horizon 1/(1-γ)=333
   lam: 0.95
   horizon: 333
   contdisc: true
   num_dream_steps: 15
+  actor_unimix: 0.01       # uniform mixture for actor actions only
   actor_entropy_coef: 3e-4  # paper: η=3e-4
-  normalize_advantages: true
+  normalize_advantages: false  # reference advnorm is none; use only return-percentile scale
   actor_loss_mode: reinforce  # reinforce, enumerate, qcritic, mpc_teacher
   actor_enum_horizon: 3       # used when actor_loss_mode=enumerate
   actor_enum_temperature: 0.25
@@ -95,12 +111,19 @@ train:
   mpc_teacher_margin_min: 0.0
   mpc_teacher_normalize_values: true
   terminal_reward_penalty: 0.0
+  balance_continuation: false  # false preserves the natural continuation prior
+  continuation_balance_rate: 0.01  # terminal-prevalence EMA rate when enabled
+  # Weight the whole imagined loss trajectory by continuation at its replay start.
+  weight_imagination_starts: true
 
   # Loss coefficients (DreamerV3 paper: βpred=1, βdyn=1, βrep=0.1)
   beta_dyn: 1.0
   beta_rep: 0.1
   beta_pred: 1.0
-  free_bits_straight_through: true
+  # Reference vector heads sum squared error across observation event dimensions.
+  state_loss_mode: reference_sum
+  # Match DreamerV3: stop KL gradients once the one-nat free-bits budget is met.
+  free_bits_straight_through: false
   prior_state_pred_scale: 0.0
 
   # Reward bins (symexp range)
@@ -110,9 +133,9 @@ train:
 
   # Training phases
   wm_ac_ratio: 1  # WM updates per AC update (e.g., 4 = train WM 4x more than AC)
-  actor_warmup_steps: 0  # WM-only updates before actor/critic training starts
+  actor_warmup_steps: 0  # delay actor updates/publishing; critic still trains
 
-  # Cosine LR decay (applies to all optimizers after warmup)
+  # Cosine LR decay (applies to all optimizers after the shared warmup)
   lr_cosine_decay: false
   lr_cosine_min_factor: 0.1  # Decay to 10% of base LR
 
@@ -139,11 +162,15 @@ train:
   min_buffer_episodes: 64
   steps_per_weight_sync: 5
   replay_burn_in: 8
+  # Reference-style same-collector windows may cross consecutive episode resets.
+  replay_sequence_mode: stream
+  # Present each new non-overlapping stream sequence once before uniform replay.
+  online_replay: true
 
   # Replay ratio gating (DreamerV3 paper)
-  replay_ratio: 1.0  # target train steps per env step
+  replay_ratio: 1.0  # replayed non-burn-in transitions per raw env frame
   action_repeat: 1   # env frames per action
-  recent_fraction: 0.2  # fraction of batch from newest episodes
+  recent_fraction: 0.0  # pinned DreamerV3 uses uniform replay (recency is opt-in)
 
 # Hydra settings
 hydra:

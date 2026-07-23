@@ -113,6 +113,9 @@ def initialize_world_model(device, cfg, batch_size=1):
     models_config = SimpleNamespace(
         d_hidden=cfg.d_hidden,
         num_latents=cfg.num_latents,
+        rssm_core=cfg.rssm_core,
+        continue_head_layers=cfg.continue_head_layers,
+        posterior_head_layers=cfg.posterior_head_layers,
         encoder=encoder_config,
         rnn=SimpleNamespace(n_blocks=cfg.rnn_n_blocks),
     )
@@ -129,6 +132,7 @@ def initialize_world_model(device, cfg, batch_size=1):
             d_hidden=cfg.d_hidden,
             n_observations=cfg.n_observations,
             num_latents=cfg.num_latents,
+            vector_encoder_mode=cfg.vector_encoder_mode,
         ).to(device)
     else:
         encoder = StateOnlyEncoder(
@@ -136,6 +140,7 @@ def initialize_world_model(device, cfg, batch_size=1):
             d_hidden=cfg.d_hidden,
             n_observations=cfg.n_observations,
             num_latents=cfg.num_latents,
+            vector_encoder_mode=cfg.vector_encoder_mode,
         ).to(device)
 
     world_model = RSSMWorldModel(

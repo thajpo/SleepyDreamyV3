@@ -37,3 +37,4 @@ mlflow.db
 multirun/
 saved_models/
 inspection/
+reports/profiling/*.json

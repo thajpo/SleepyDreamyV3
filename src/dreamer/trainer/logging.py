@@ -26,15 +26,33 @@ class StepMetrics:
     dreamed_rewards: list[torch.Tensor] = field(default_factory=list)
     dreamed_values: list[torch.Tensor] = field(default_factory=list)
     actor_entropy: list[torch.Tensor] = field(default_factory=list)
+    actor_min_action_probability: list[torch.Tensor] = field(default_factory=list)
+    actor_non_modal_probability: list[torch.Tensor] = field(default_factory=list)
+    actor_non_modal_sample_fraction: list[torch.Tensor] = field(default_factory=list)
     actor_enum_margin: list[torch.Tensor] = field(default_factory=list)
     actor_mpc_margin: list[torch.Tensor] = field(default_factory=list)
     actor_mpc_mask_frac: list[torch.Tensor] = field(default_factory=list)
     actor_q_margin: list[torch.Tensor] = field(default_factory=list)
+    replay_states: list[torch.Tensor] = field(default_factory=list)
+    replay_state_reconstructions: list[torch.Tensor] = field(default_factory=list)
+    replay_state_masks: list[torch.Tensor] = field(default_factory=list)
     replay_posterior_states: list[torch.Tensor] = field(default_factory=list)
     replay_value_annotations: list[torch.Tensor] = field(default_factory=list)
+    continue_terminal_weights: list[torch.Tensor] = field(default_factory=list)
+    continue_terminal_probs: list[torch.Tensor] = field(default_factory=list)
+    continue_live_probs: list[torch.Tensor] = field(default_factory=list)
+    continue_balance_batch_fraction: Optional[float] = None
+    continue_balance_ema: Optional[float] = None
+    continue_balance_terminal_scale: Optional[float] = None
+    continue_balance_live_scale: Optional[float] = None
     replay_loss: Optional[torch.Tensor] = None
     replay_ema_reg: Optional[torch.Tensor] = None
     replay_mc_loss: Optional[torch.Tensor] = None
+    replay_online_fraction: Optional[float] = None
+    replay_online_fraction_cumulative: Optional[float] = None
+    replay_online_queue_size: Optional[int] = None
+    replay_online_descriptors_dropped: Optional[int] = None
+    gradient_alignment: dict[str, float] = field(default_factory=dict)
     viz_data: Optional[dict[str, torch.Tensor]] = None
 
 
@@ -73,8 +91,62 @@ def collect_viz_data(
     if use_pixels and "pixels" in obs_t:
         metrics.viz_data["obs_pixels"] = obs_t["pixels"]
         metrics.viz_data["obs_pixels_original"] = batch.pixels_original[:, t_step]
-        metrics.viz_data["reconstruction_pixels"] = obs_reconstruction.get("pixels")
+        reconstruction_pixels = obs_reconstruction.get("pixels")
+        if reconstruction_pixels is not None:
+            metrics.viz_data["reconstruction_pixels"] = reconstruction_pixels
     metrics.viz_data["posterior_probs"] = F.softmax(posterior_logits, dim=-1).detach()
+
+
+def summarize_cartpole_replay_state_metrics(metrics: StepMetrics) -> dict[str, float]:
+    """Summarize physical-state coverage and reconstruction on valid replay rows."""
+    if not (
+        metrics.replay_states
+        and metrics.replay_state_reconstructions
+        and metrics.replay_state_masks
+    ):
+        return {}
+
+    states = torch.cat(metrics.replay_states, dim=0)
+    reconstructions = torch.cat(metrics.replay_state_reconstructions, dim=0)
+    masks = torch.cat(metrics.replay_state_masks, dim=0).bool()
+    if states.shape != reconstructions.shape or states.shape[-1] != 4:
+        return {}
+    if masks.shape[0] != states.shape[0] or not masks.any():
+        return {}
+
+    states = states[masks]
+    reconstructions = reconstructions[masks]
+    squared_error = (reconstructions - states) ** 2
+    abs_x = states[:, 0].abs()
+    result = {
+        "research/cartpole/replay_abs_x/mean": abs_x.mean().item(),
+        "research/cartpole/replay_abs_x/p90": torch.quantile(abs_x, 0.90).item(),
+        "research/cartpole/replay_abs_x/max": abs_x.max().item(),
+    }
+    for state_index, state_name in enumerate(
+        ("x", "x_dot", "theta", "theta_dot")
+    ):
+        result[f"research/cartpole/decoder_mse/{state_name}"] = squared_error[
+            :, state_index
+        ].mean().item()
+
+    position_bins = (
+        (0.0, 0.5, "0_0p5"),
+        (0.5, 1.0, "0p5_1p0"),
+        (1.0, 1.5, "1p0_1p5"),
+        (1.5, 2.0, "1p5_2p0"),
+        (2.0, float("inf"), "2p0_plus"),
+    )
+    for lower, upper, label in position_bins:
+        in_bin = (abs_x >= lower) & (abs_x < upper)
+        result[f"research/cartpole/replay_abs_x_fraction/{label}"] = (
+            in_bin.float().mean().item()
+        )
+        if in_bin.any():
+            result[f"research/cartpole/decoder_x_mse/{label}"] = squared_error[
+                in_bin, 0
+            ].mean().item()
+    return result
 
 
 def log_step_metrics(
@@ -114,9 +186,11 @@ def log_step_metrics(
             norm = 1.0 / sequence_length
             wm_cpu = {k: v.item() for k, v in metrics.wm_components.items()}
 
-            m["loss/wm/total"] = total_wm_loss.item() * norm
-            m["loss/actor/total"] = total_actor_loss.item() * norm
-            m["loss/critic/total"] = total_critic_loss.item() * norm
+            # ForwardResult totals are already reduced over their sequence
+            # axes. Component accumulators remain sums over post-burn-in rows.
+            m["loss/wm/total"] = total_wm_loss.item()
+            m["loss/actor/total"] = total_actor_loss.item()
+            m["loss/critic/total"] = total_critic_loss.item()
 
             if metrics.replay_loss is not None:
                 m["loss/critic/replay"] = float(metrics.replay_loss.item())
@@ -124,6 +198,22 @@ def log_step_metrics(
                 m["loss/critic/replay_ema_reg"] = float(metrics.replay_ema_reg.item())
             if metrics.replay_mc_loss is not None:
                 m["loss/critic/replay_mc_return"] = float(metrics.replay_mc_loss.item())
+            if metrics.replay_online_fraction is not None:
+                m["replay/online_sequence_fraction"] = float(
+                    metrics.replay_online_fraction
+                )
+            if metrics.replay_online_fraction_cumulative is not None:
+                m["replay/online_sequence_fraction_cumulative"] = float(
+                    metrics.replay_online_fraction_cumulative
+                )
+            if metrics.replay_online_queue_size is not None:
+                m["replay/online_queue_size"] = float(
+                    metrics.replay_online_queue_size
+                )
+            if metrics.replay_online_descriptors_dropped is not None:
+                m["replay/online_descriptors_dropped"] = float(
+                    metrics.replay_online_descriptors_dropped
+                )
 
             pixel = wm_cpu["prediction_pixel"] * norm
             state = wm_cpu["prediction_vector"] * norm
@@ -138,9 +228,49 @@ def log_step_metrics(
             if has_vector_obs:
                 m["wm/decoder/state_loss"] = state
                 m["wm/prior/state_loss"] = prior_state
+                if config.environment_name == "CartPole-v1":
+                    m.update(summarize_cartpole_replay_state_metrics(metrics))
 
             m["wm/reward_head/loss"] = reward
             m["wm/continue_head/loss"] = cont
+            terminal_rows = sum(
+                tensor.numel() for tensor in metrics.continue_terminal_probs
+            )
+            live_rows = sum(tensor.numel() for tensor in metrics.continue_live_probs)
+            continuation_rows = terminal_rows + live_rows
+            if continuation_rows:
+                m["research/continue/batch_has_terminal"] = float(terminal_rows > 0)
+                m["research/continue/batch_sampled_terminal_fraction"] = (
+                    terminal_rows / continuation_rows
+                )
+            if metrics.continue_terminal_weights:
+                terminal_weights = torch.cat(metrics.continue_terminal_weights)
+                terminal_probs = torch.cat(metrics.continue_terminal_probs)
+                m["research/continue/terminal_weight"] = (
+                    terminal_weights.mean().item()
+                )
+                m["research/continue/terminal_probability"] = (
+                    terminal_probs.mean().item()
+                )
+            if metrics.continue_live_probs:
+                live_probs = torch.cat(metrics.continue_live_probs)
+                m["research/continue/live_probability"] = live_probs.mean().item()
+            if metrics.continue_balance_ema is not None:
+                assert metrics.continue_balance_batch_fraction is not None
+                assert metrics.continue_balance_terminal_scale is not None
+                assert metrics.continue_balance_live_scale is not None
+                m["research/continue/batch_terminal_fraction"] = float(
+                    metrics.continue_balance_batch_fraction
+                )
+                m["research/continue/terminal_fraction_ema"] = float(
+                    metrics.continue_balance_ema
+                )
+                m["research/continue/terminal_class_scale"] = float(
+                    metrics.continue_balance_terminal_scale
+                )
+                m["research/continue/live_class_scale"] = float(
+                    metrics.continue_balance_live_scale
+                )
             m["wm/rssm/kl_dynamics"] = dyn
             m["wm/rssm/kl_representation"] = rep
 
@@ -176,6 +306,15 @@ def log_step_metrics(
             m["actor/entropy/mean"] = ae.mean().item()
             if is_full:
                 m["actor/entropy/std"] = ae.std().item()
+        if metrics.actor_min_action_probability:
+            values = torch.stack(metrics.actor_min_action_probability)
+            m["actor/support/min_action_probability_mean"] = values.mean().item()
+        if metrics.actor_non_modal_probability:
+            values = torch.stack(metrics.actor_non_modal_probability)
+            m["actor/support/non_modal_probability_mean"] = values.mean().item()
+        if metrics.actor_non_modal_sample_fraction:
+            values = torch.stack(metrics.actor_non_modal_sample_fraction)
+            m["actor/support/non_modal_sample_fraction"] = values.mean().item()
         if metrics.actor_enum_margin:
             margins = torch.stack(metrics.actor_enum_margin)
             m["actor/enum_q_margin/mean"] = margins.mean().item()
@@ -204,6 +343,8 @@ def log_step_metrics(
                 m["train/lr/critic"] = critic_optimizer.param_groups[0]["lr"]
             if wm_ac_ratio_cosine and get_current_wm_ac_ratio:
                 m["train/wm_ac_ratio"] = get_current_wm_ac_ratio()
+
+        m.update(metrics.gradient_alignment)
 
         logger.log_scalars(m, step)
 
@@ -269,15 +410,14 @@ def log_progress(
     elapsed_total: float,
 ):
     """Log training progress to stdout and MLflow (throughput, ETA, env stats)."""
-    norm = max(1, seq_len)
     eta_hours = (max_steps - step) / steps_per_sec / 3600 if steps_per_sec > 0 else 0
 
     print(
         f"Step {step}/{max_steps} | "
         f"{steps_per_sec:.2f} steps/s | ETA: {eta_hours:.1f}h | "
-        f"WM: {total_wm_loss.item() / norm:.4f} | "
-        f"Actor: {total_actor_loss.item() / norm:.4f} | "
-        f"Critic: {total_critic_loss.item() / norm:.4f}"
+        f"WM: {total_wm_loss.item():.4f} | "
+        f"Actor: {total_actor_loss.item():.4f} | "
+        f"Critic: {total_critic_loss.item():.4f}"
     )
 
     m = {

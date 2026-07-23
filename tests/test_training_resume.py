@@ -68,7 +68,86 @@ def test_installed_cli_checkpoint_resume_contract(tmp_path):
     assert resumed_checkpoint["run_id"] == resumed_manifest["run_id"]
 
 
-def test_each_collector_receives_the_initial_model_update(tmp_path):
+def test_cli_resume_restores_checkpoint_model_and_target_semantics(tmp_path):
+    original_dir = tmp_path / "historical_semantics"
+    resumed_dir = tmp_path / "resumed_semantics"
+    original = _run_training(
+        original_dir,
+        extra_overrides=[
+            "models.rssm_core=legacy",
+            "models.continue_head_layers=0",
+            "models.vector_encoder_mode=legacy",
+            "models.posterior_head_layers=0",
+            "train.critic_slow_target=true",
+            "train.replay_sequence_mode=episode",
+            "train.online_replay=false",
+            "train.state_loss_mode=legacy_half_mean",
+        ],
+    )
+    assert original.returncode == 0, original.stdout + original.stderr
+
+    original_checkpoint = original_dir / "checkpoints" / "checkpoint_final.pt"
+    resumed = _run_training(resumed_dir, checkpoint=original_checkpoint)
+    assert resumed.returncode == 0, resumed.stdout + resumed.stderr
+
+    resumed_config = json.loads((resumed_dir / "config.json").read_text())
+    resumed_checkpoint = torch.load(
+        resumed_dir / "checkpoints" / "checkpoint_final.pt",
+        map_location="cpu",
+        weights_only=False,
+    )
+
+    assert resumed_config["rssm_core"] == "legacy"
+    assert resumed_config["continue_head_layers"] == 0
+    assert resumed_config["vector_encoder_mode"] == "legacy"
+    assert resumed_config["posterior_head_layers"] == 0
+    assert resumed_config["critic_slow_target"] is True
+    assert resumed_config["replay_sequence_mode"] == "episode"
+    assert resumed_config["online_replay"] is False
+    assert resumed_config["state_loss_mode"] == "legacy_half_mean"
+    assert "continue_predictor.weight" in resumed_checkpoint["world_model"]
+    assert "posterior_head.weight" in resumed_checkpoint["world_model"]
+    assert "MLP.mlp.1.weight" not in resumed_checkpoint["encoder"]
+    assert "_W_ir" in resumed_checkpoint["world_model"]
+    assert resumed_checkpoint["config_snapshot"]["rssm_core"] == "legacy"
+    assert resumed_checkpoint["config_snapshot"]["continue_head_layers"] == 0
+    assert resumed_checkpoint["config_snapshot"]["vector_encoder_mode"] == "legacy"
+    assert resumed_checkpoint["config_snapshot"]["posterior_head_layers"] == 0
+    assert resumed_checkpoint["config_snapshot"]["critic_slow_target"] is True
+    assert resumed_checkpoint["config_snapshot"]["replay_sequence_mode"] == "episode"
+    assert resumed_checkpoint["config_snapshot"]["online_replay"] is False
+    assert (
+        resumed_checkpoint["config_snapshot"]["state_loss_mode"]
+        == "legacy_half_mean"
+    )
+
+
+def test_cli_resume_preserves_actor_warmup(tmp_path):
+    original_dir = tmp_path / "actor_warmup"
+    resumed_dir = tmp_path / "resumed_actor_warmup"
+    original = _run_training(
+        original_dir,
+        extra_overrides=["train.actor_warmup_steps=3"],
+    )
+    assert original.returncode == 0, original.stdout + original.stderr
+
+    original_checkpoint = original_dir / "checkpoints" / "checkpoint_final.pt"
+    resumed = _run_training(resumed_dir, checkpoint=original_checkpoint)
+    assert resumed.returncode == 0, resumed.stdout + resumed.stderr
+
+    resumed_config = json.loads((resumed_dir / "config.json").read_text())
+    resumed_checkpoint = torch.load(
+        resumed_dir / "checkpoints" / "checkpoint_final.pt",
+        map_location="cpu",
+        weights_only=False,
+    )
+
+    assert resumed_config["actor_warmup_steps"] == 3
+    assert resumed_checkpoint["actor_optimizer"]["state"] == {}
+    assert resumed_checkpoint["critic_optimizer"]["state"] != {}
+
+
+def test_initial_model_update_is_published_to_each_collector(tmp_path):
     result = _run_training(
         tmp_path / "multi_collector",
         extra_overrides=[
@@ -80,6 +159,45 @@ def test_each_collector_receives_the_initial_model_update(tmp_path):
 
     assert result.returncode == 0, result.stdout + result.stderr
     output = result.stdout + result.stderr
-    assert "model_weights_loaded collector_id=0 version=0" in output
-    assert "model_weights_loaded collector_id=1 version=0" in output
+    # A one-update run may finish before both newly spawned collectors consume
+    # their mailboxes. Publication is the deterministic integration boundary;
+    # tests/test_model_broadcast.py verifies the contents of every mailbox.
+    assert (
+        "model_weights_published version=0 delivered=[0, 1] replaced=[] pending=[]"
+        in output
+    )
     assert "model_weights_published version=1" not in output
+
+
+def test_actor_and_critic_train_from_first_update(tmp_path):
+    output_dir = tmp_path / "joint_training"
+    result = _run_training(output_dir)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    checkpoint = torch.load(
+        output_dir / "checkpoints" / "checkpoint_final.pt",
+        map_location="cpu",
+        weights_only=False,
+    )
+
+    assert checkpoint["actor_optimizer"]["state"] != {}
+    assert checkpoint["critic_optimizer"]["state"] != {}
+
+
+def test_wm_ac_ratio_still_skips_actor_and_critic_together(tmp_path):
+    output_dir = tmp_path / "wm_only_ratio_step"
+    result = _run_training(
+        output_dir,
+        extra_overrides=["train.wm_ac_ratio=2"],
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    checkpoint = torch.load(
+        output_dir / "checkpoints" / "checkpoint_final.pt",
+        map_location="cpu",
+        weights_only=False,
+    )
+
+    assert checkpoint["actor_optimizer"]["state"] == {}
+    assert checkpoint["critic_optimizer"]["state"] == {}
+    assert checkpoint["wm_optimizer"]["state"] != {}

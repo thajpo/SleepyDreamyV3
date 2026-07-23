@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass
 from typing import NamedTuple, Optional
 import torch
 import torch.nn.functional as F
-from queue import Full
+from queue import Empty, Full
 import mlflow
 import numpy as np
 import os
@@ -15,11 +15,12 @@ import time
 
 from .logging import create_step_metrics, log_step_metrics, log_progress
 from .forward import dreamer_step
-from ..runtime.replay_buffer import EpisodeReplayBuffer, EnvData
+from .gradient_diagnostics import measure_gradient_alignment
+from ..runtime.replay_buffer import EpisodeReplayBuffer
 from .checkpoints import save_checkpoint, load_checkpoint
 from ..models import (
     symlog,
-    symexp,
+    symexp_twohot_bins,
     resize_pixels_to_target,
     initialize_actor,
     initialize_critic,
@@ -44,6 +45,11 @@ def seed_everything(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def evaluation_episode_seed(training_seed: int, episode_index: int) -> int:
+    """Return a stable per-episode seed shared by every checkpoint in a run."""
+    return int(training_seed) + 1_000_000 + int(episode_index)
 
 
 @dataclass(frozen=True)
@@ -105,10 +111,11 @@ class WorldModelTrainer:
         seed_everything(int(getattr(config, "seed", 0)) + 2000)
 
         # EMA For Actor Critic
-        self.S = 0.0
-        self.ret_lo = None
-        self.ret_hi = None
+        self.S = 1.0
+        self.ret_lo = 0.0
+        self.ret_hi = 0.0
         self.retnorm_rate = 0.01
+        self.continuation_terminal_ema = 0.5
 
         # Model Init
         self.actor = initialize_actor(self.device, config)
@@ -121,14 +128,13 @@ class WorldModelTrainer:
         b_start = config.b_start
         b_end = config.b_end
         num_bins = int(getattr(self.critic.mlp[-1], "out_features"))
-        beta_range = torch.linspace(
-            start=b_start,
-            end=b_end,
-            steps=num_bins,
+        self.B = symexp_twohot_bins(
+            b_start,
+            b_end,
+            num_bins,
             device=self.device,
             dtype=torch.float32,
         )
-        self.B = symexp(beta_range)
 
         if config.compile_models and hasattr(torch, "compile"):
             try:
@@ -151,6 +157,7 @@ class WorldModelTrainer:
             self.wm_params,
             lr=config.wm_lr,
             weight_decay=config.weight_decay,
+            bias_correction=config.laprop_bias_correction,
         )
         self.critic_params = list(self.critic.parameters()) + list(
             self.q_critic.parameters()
@@ -159,14 +166,17 @@ class WorldModelTrainer:
             self.critic_params,
             lr=config.critic_lr,
             weight_decay=config.weight_decay,
+            bias_correction=config.laprop_bias_correction,
         )
         self.actor_optimizer = LaProp(
             self.actor.parameters(),
             lr=config.actor_lr,
             weight_decay=config.weight_decay,
+            bias_correction=config.laprop_bias_correction,
         )
 
-        # distinct critic target network for stability (DreamerV3)
+        # Slow critics regularize online critics; historical configs may also
+        # select them as lambda-return and policy-baseline targets.
         self.critic_ema = copy.deepcopy(self.critic)
         for param in self.critic_ema.parameters():
             param.requires_grad = False
@@ -178,15 +188,20 @@ class WorldModelTrainer:
         self.data_queue = data_queue
         self.model_queues = list(model_queues)
 
-        # Replay buffer: background thread drains queue, sample() returns instantly
+        # Replay buffer: background thread drains the queue for synchronous sampling
         self.replay_buffer = EpisodeReplayBuffer(
             data_queue=data_queue,
             max_episodes=config.replay_buffer_size,
             min_episodes=config.min_buffer_episodes,
             sequence_length=config.sequence_length,
+            gamma=config.gamma,
+            compute_future_returns=config.critic_real_return_scale > 0.0,
+            throttle_collection=True,
+            sequence_mode=config.replay_sequence_mode,
+            online_replay=config.online_replay,
         )
 
-        self.batch_size = config.batch_size  # needed by get_data_from_buffer
+        self.batch_size = config.batch_size
         self.replay_buffer.start()
         print(f"Replay buffer started (max={config.replay_buffer_size} episodes)")
 
@@ -257,11 +272,15 @@ class WorldModelTrainer:
                 self.S,
                 self.ret_lo,
                 self.ret_hi,
+                self.continuation_terminal_ema,
             )
             self.train_step = chk["step"]
-            self.S = chk["return_scale"]
-            self.ret_lo = chk["ret_lo"]
-            self.ret_hi = chk["ret_hi"]
+            self.S = float(chk["return_scale"])
+            self.ret_lo = float(chk["ret_lo"] or 0.0)
+            self.ret_hi = float(chk["ret_hi"] or 0.0)
+            self.continuation_terminal_ema = float(
+                chk["continuation_terminal_ema"]
+            )
             self.best_eval_score = chk["best_eval_score"]
             self.best_eval_step = chk["best_eval_step"]
             checkpoint_metric = chk["best_eval_metric"]
@@ -276,56 +295,11 @@ class WorldModelTrainer:
                 / denom
             )
 
-    def get_data_from_buffer(self) -> EnvData | None:
-        """Sample batch from replay buffer. Returns EnvData or None if empty."""
-        raw_batch = self.replay_buffer.sample(self.batch_size)
-
-        batch_pixels = []
-        batch_pixels_original = []
-        batch_states = []
-        batch_actions = []
-        batch_rewards = []
-        batch_is_last = []
-        batch_is_terminal = []
-        batch_mask = []
-
-        for pixels, states, actions, rewards, is_last, is_terminal, mask in raw_batch:
-            if self.use_pixels and pixels is not None:
-                target_size = self.config.encoder_cnn_target_size
-                pixels_tensor = torch.from_numpy(pixels).permute(0, 3, 1, 2)
-                batch_pixels_original.append(pixels_tensor)
-                if pixels_tensor.shape[-2:] != target_size:
-                    pixels_tensor = resize_pixels_to_target(pixels_tensor, target_size)
-                batch_pixels.append(pixels_tensor)
-
-            batch_states.append(torch.from_numpy(states))
-            batch_actions.append(torch.from_numpy(actions))
-            batch_rewards.append(torch.from_numpy(rewards))
-            batch_is_last.append(torch.from_numpy(is_last))
-            batch_is_terminal.append(torch.from_numpy(is_terminal))
-            batch_mask.append(torch.from_numpy(mask))
-
-        if self.use_pixels and batch_pixels:
-            pixels_out = torch.stack(batch_pixels).to(self.device).float()
-            pixels_original_out = (
-                torch.stack(batch_pixels_original).to(self.device).float()
-            )
-        else:
-            pixels_out = None
-            pixels_original_out = None
-
-        states_out = torch.stack(batch_states).to(self.device)
-
-        return EnvData(
-            states=states_out,
-            actions=torch.stack(batch_actions).to(self.device),
-            rewards=torch.stack(batch_rewards).to(self.device),
-            is_last=torch.stack(batch_is_last).to(self.device),
-            is_terminal=torch.stack(batch_is_terminal).to(self.device),
-            mask=torch.stack(batch_mask).to(self.device),
-            pixels=pixels_out,
-            pixels_original=pixels_original_out,
-        )
+        if (
+            self.train_step < self.config.max_train_steps
+            and self.train_step >= self.config.actor_warmup_steps
+        ):
+            self.send_models_to_collectors(self.train_step)
 
     def prevent_stale_training(self) -> bool:
         """Gate training speed to match environment data collection rate.
@@ -340,27 +314,31 @@ class WorldModelTrainer:
             self.config.sequence_length - 1,
         )
         effective_seq_for_gate = max(1, self.config.sequence_length - effective_burn_in)
+        env_steps_per_update = (
+            self.batch_size
+            * effective_seq_for_gate
+            * self.config.action_repeat
+        )
         target_train_steps = int(
             env_steps
             * self.config.replay_ratio
-            / (self.batch_size * effective_seq_for_gate * self.config.action_repeat)
+            / env_steps_per_update
         )
         if self.train_step >= target_train_steps and env_steps > 0:
+            next_update_steps = math.ceil(
+                (self.train_step + 1)
+                * env_steps_per_update
+                / self.config.replay_ratio
+            )
+            self.replay_buffer.allow_env_steps_until(
+                max(0, next_update_steps - self._resume_env_steps_offset)
+            )
             time.sleep(0.01)  # Brief wait for more data
             return True
         return False
 
     def train_models(self):
         """Main training loop: sample → forward → backward → log → eval → checkpoint."""
-        # Keep fresh runs in random-action collection during WM warmup. Once
-        # warmup is over, send policy weights so the collector switches to the
-        # learned actor. Resumed checkpoints beyond warmup still sync at startup.
-        if (
-            self.train_step < self.config.max_train_steps
-            and self.train_step >= self.config.actor_warmup_steps
-        ):
-            self.send_models_to_collectors(self.train_step)
-
         stop_reason = "max_train_steps"
         while self.train_step < self.config.max_train_steps:
             if self.prevent_stale_training():
@@ -369,8 +347,9 @@ class WorldModelTrainer:
                 time.sleep(0.01)
                 continue
 
-            # Apply cosine LR schedule (if enabled)
-            if self.config.lr_cosine_decay:
+            # Apply the authored LR schedule. Reference runs ramp every module
+            # together; historical runs retain their constant/cosine behavior.
+            if self.config.lr_cosine_decay or self.config.optimizer_warmup_steps:
                 self.apply_lr_schedule()
 
             # Data loading
@@ -379,6 +358,7 @@ class WorldModelTrainer:
                 self.device,
                 use_pixels=self.use_pixels,
                 target_size=self.config.encoder_cnn_target_size,
+                recent_fraction=self.config.recent_fraction,
             )
             B, T = batch.states.shape[:2]
 
@@ -400,6 +380,16 @@ class WorldModelTrainer:
 
             do_log_images = self.train_step % self.image_log_every == 0
             metrics = create_step_metrics(self.device, do_log_images)
+            metrics.replay_online_fraction = (
+                self.replay_buffer.last_online_sample_fraction
+            )
+            metrics.replay_online_fraction_cumulative = (
+                self.replay_buffer.online_sample_fraction
+            )
+            metrics.replay_online_queue_size = self.replay_buffer.online_queue_size
+            metrics.replay_online_descriptors_dropped = (
+                self.replay_buffer.online_descriptors_dropped
+            )
 
             # Initialize loss variables in case loop doesn't execute
             t0 = time.perf_counter()
@@ -427,10 +417,10 @@ class WorldModelTrainer:
             all_tokens = self.encoder(encoder_input)  # (B*T, token_dim)
             all_tokens = all_tokens.view(B, T, -1)
 
-            # Decide AC update once per batch. During warmup, train only the
-            # world model so actor/critic do not optimize against a cold RSSM.
             in_actor_warmup = self.train_step < self.config.actor_warmup_steps
-            skip_ac_batch = in_actor_warmup or self.should_skip_ac_update()
+            skip_ac_batch = self.should_skip_ac_update()
+            skip_actor_batch = in_actor_warmup or skip_ac_batch
+            skip_critic_batch = skip_ac_batch
 
             # Forward pass: RSSM rollout + dreaming + replay grounding
             result = dreamer_step(
@@ -447,22 +437,35 @@ class WorldModelTrainer:
                 B=B,
                 T=T,
                 train_start_t=train_start_t,
-                skip_ac=skip_ac_batch,
+                skip_actor=skip_actor_batch,
+                skip_critic=skip_critic_batch,
                 bins=self.B,
                 return_scale=self.S,
                 config=self.config,
                 device=self.device,
                 use_pixels=self.use_pixels,
                 do_log_images=do_log_images,
+                collect_gradient_diagnostics=(
+                    bool(self.config.research_gradient_diagnostics)
+                    and self.train_step % self.log_every == 0
+                ),
+                return_lo=self.ret_lo,
+                return_hi=self.ret_hi,
+                return_norm_rate=self.retnorm_rate,
+                continuation_terminal_ema=self.continuation_terminal_ema,
             )
             total_wm_loss = result.total_wm_loss
             total_actor_loss = result.total_actor_loss
             total_critic_loss = result.total_critic_loss
             metrics = result.metrics
 
-            # Update return normalization EMA
-            if result.last_lambda_returns is not None:
-                self.update_return_scale(result.last_lambda_returns)
+            if result.return_scale is not None:
+                assert result.ret_lo is not None and result.ret_hi is not None
+                self.S = result.return_scale
+                self.ret_lo = result.ret_lo
+                self.ret_hi = result.ret_hi
+            if result.continuation_terminal_ema is not None:
+                self.continuation_terminal_ema = result.continuation_terminal_ema
 
             # Backprop
             assert (
@@ -475,57 +478,79 @@ class WorldModelTrainer:
                     f"Non-finite WM loss at step {self.train_step}: {total_wm_loss.item()}"
                 )
 
-            # Use the batch-level AC skip decision
-            if skip_ac_batch:
-                # WM-only update this step
-                total_wm_loss.backward()
-                adaptive_gradient_clipping(self.wm_params)
-                self.wm_optimizer.step()
+            if result.replay_representation_loss is not None:
+                named_wm_parameters = [
+                    (f"encoder.{name}", parameter)
+                    for name, parameter in self.encoder.named_parameters()
+                ] + [
+                    (f"world_model.{name}", parameter)
+                    for name, parameter in self.world_model.named_parameters()
+                ]
+                metrics.gradient_alignment = measure_gradient_alignment(
+                    total_wm_loss,
+                    result.replay_representation_loss,
+                    named_wm_parameters,
+                )
+
+            has_critic_grad = bool(total_critic_loss.requires_grad)
+            has_actor_grad = bool(total_actor_loss.requires_grad)
+            if self.config.optimizer_contract == "reference":
+                # Replay value grounding shares the observed encoder/RSSM graph
+                # with the world-model objective. Traverse the combined graph
+                # once, exactly as the reference's single aggregate loss does.
+                combined_loss = total_wm_loss
+                if has_critic_grad:
+                    combined_loss = combined_loss + total_critic_loss
+                if has_actor_grad:
+                    combined_loss = combined_loss + total_actor_loss
+                combined_loss.backward()
             else:
-                # Full training: WM + critic + actor
                 total_wm_loss.backward()
-                has_critic_grad = bool(total_critic_loss.requires_grad)
-                has_actor_grad = bool(total_actor_loss.requires_grad)
                 if has_critic_grad:
                     total_critic_loss.backward()
                 if has_actor_grad:
                     total_actor_loss.backward()
-                # AGC: clip gradients based on param/grad norm ratio (DreamerV3)
-                # Use more aggressive clipping for pixel observations (prevent NaN)
-                agc_clip = 0.15 if self.use_pixels else 0.3
-                adaptive_gradient_clipping(self.wm_params, clip_factor=agc_clip)
-                self.wm_optimizer.step()
-                if has_critic_grad:
-                    adaptive_gradient_clipping(
-                        self.critic_params, clip_factor=agc_clip
-                    )
-                    self.critic_optimizer.step()
-                if has_actor_grad:
-                    adaptive_gradient_clipping(
-                        self.actor.parameters(), clip_factor=agc_clip
-                    )
-                    self.actor_optimizer.step()
 
-                # Polyak update for critic EMA
-                if has_critic_grad:
-                    with torch.no_grad():
-                        for param, param_ema in zip(
-                            self.critic.parameters(), self.critic_ema.parameters()
-                        ):
-                            param_ema.data.mul_(self.config.critic_ema_decay).add_(
-                                param.data, alpha=1 - self.config.critic_ema_decay
-                            )
-                        for param, param_ema in zip(
-                            self.q_critic.parameters(), self.q_critic_ema.parameters()
-                        ):
-                            param_ema.data.mul_(self.config.critic_ema_decay).add_(
-                                param.data, alpha=1 - self.config.critic_ema_decay
-                            )
+            # AGC: clip gradients based on param/grad norm ratio (DreamerV3).
+            # Use more aggressive clipping for pixel observations (prevent NaN).
+            agc_clip = 0.15 if self.use_pixels else 0.3
+            adaptive_gradient_clipping(self.wm_params, clip_factor=agc_clip)
+            self.wm_optimizer.step()
+            if has_critic_grad:
+                adaptive_gradient_clipping(self.critic_params, clip_factor=agc_clip)
+                self.critic_optimizer.step()
+            if has_actor_grad:
+                adaptive_gradient_clipping(
+                    self.actor.parameters(), clip_factor=agc_clip
+                )
+                self.actor_optimizer.step()
+
+            # Polyak update for critic EMA whenever the critic trained.
+            if has_critic_grad:
+                with torch.no_grad():
+                    for param, param_ema in zip(
+                        self.critic.parameters(), self.critic_ema.parameters()
+                    ):
+                        param_ema.data.mul_(self.config.critic_ema_decay).add_(
+                            param.data, alpha=1 - self.config.critic_ema_decay
+                        )
+                    for param, param_ema in zip(
+                        self.q_critic.parameters(), self.q_critic_ema.parameters()
+                    ):
+                        param_ema.data.mul_(self.config.critic_ema_decay).add_(
+                            param.data, alpha=1 - self.config.critic_ema_decay
+                        )
 
             # End backward
 
             log_step = self.train_step
             self.train_step += 1
+            self.replay_buffer.allow_env_steps(
+                self.batch_size
+                * effective_train_steps
+                * self.config.action_repeat
+                / self.config.replay_ratio
+            )
 
             # Log metrics to MLflow
             log_step_metrics(
@@ -553,7 +578,10 @@ class WorldModelTrainer:
             if (
                 self.train_step < self.config.max_train_steps
                 and self.train_step >= self.config.actor_warmup_steps
-                and self.train_step % self.config.steps_per_weight_sync == 0
+                and (
+                    self.train_step == self.config.actor_warmup_steps
+                    or self.train_step % self.config.steps_per_weight_sync == 0
+                )
             ):
                 self.send_models_to_collectors(self.train_step)
 
@@ -711,6 +739,8 @@ class WorldModelTrainer:
             best_eval_step=self.best_eval_step,
             best_eval_metric=self.best_eval_metric,
             run_id=self.run_manifest_id,
+            config_snapshot=asdict(self.config),
+            continuation_terminal_ema=self.continuation_terminal_ema,
         )
 
     def should_skip_ac_update(self) -> bool:
@@ -721,22 +751,6 @@ class WorldModelTrainer:
         else:
             self._wm_ac_counter = 0
             return False
-
-    def update_return_scale(self, lambda_returns, decay=0.99):
-        """Update percentile-based return normalization EMA (DreamerV3 Appendix B)."""
-        flat = lambda_returns.detach().reshape(-1)
-        lo_batch = torch.quantile(flat, 0.05).item()
-        hi_batch = torch.quantile(flat, 0.95).item()
-
-        if self.ret_lo is None or self.ret_hi is None:
-            self.ret_lo = lo_batch
-            self.ret_hi = hi_batch
-        else:
-            rate = self.retnorm_rate
-            self.ret_lo = (1.0 - rate) * self.ret_lo + rate * lo_batch
-            self.ret_hi = (1.0 - rate) * self.ret_hi + rate * hi_batch
-
-        self.S = max(1.0, float(self.ret_hi - self.ret_lo))
 
     def get_cosine_schedule(self, max_val: float, min_val: float) -> float:
         """Cosine schedule from max_val to min_val over training."""
@@ -759,8 +773,24 @@ class WorldModelTrainer:
         return max(1, round(ratio))
 
     def apply_lr_schedule(self):
-        """Apply cosine LR decay to all optimizers."""
-        scale = self.get_cosine_schedule(1.0, self.config.lr_cosine_min_factor)
+        """Apply a shared linear warmup followed by the optional cosine decay."""
+        warmup = int(self.config.optimizer_warmup_steps)
+        if warmup > 0 and self.train_step < warmup:
+            scale = self.train_step / warmup
+        elif self.config.lr_cosine_decay:
+            if warmup > 0:
+                duration = max(1, self.config.max_train_steps - warmup)
+                progress = min(1.0, (self.train_step - warmup) / duration)
+                cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+                scale = self.config.lr_cosine_min_factor + (
+                    1.0 - self.config.lr_cosine_min_factor
+                ) * cosine
+            else:
+                scale = self.get_cosine_schedule(
+                    1.0, self.config.lr_cosine_min_factor
+                )
+        else:
+            scale = 1.0
         for pg in self.wm_optimizer.param_groups:
             pg["lr"] = self.config.wm_lr * scale
         for pg in self.actor_optimizer.param_groups:
@@ -799,9 +829,10 @@ class WorldModelTrainer:
         episode_rewards = []
 
         with torch.no_grad():
-            eval_seed = int(getattr(self.config, "seed", 0)) + 1_000_000 + step * 1000
             for episode_idx in range(num_episodes):
-                obs, _info = env.reset(seed=eval_seed + episode_idx)
+                obs, _info = env.reset(
+                    seed=evaluation_episode_seed(self.config.seed, episode_idx)
+                )
                 h = torch.zeros(
                     1,
                     self.config.d_hidden * self.config.rnn_n_blocks,
@@ -910,7 +941,7 @@ class WorldModelTrainer:
         return getattr(model, "_orig_mod", model)
 
     def send_models_to_collectors(self, step: int) -> None:
-        """Publish one coherent weight snapshot to every collector mailbox."""
+        """Publish the newest coherent snapshot to every collector mailbox."""
         # Exclude h_prev/z_prev buffers as they have batch-size-dependent shapes
         wm = self._get_model(self.world_model)
         actor = self._get_model(self.actor)
@@ -937,21 +968,36 @@ class WorldModelTrainer:
         }
 
         sent = []
+        replaced = []
         pending = []
         for collector_id, model_queue in enumerate(self.model_queues):
             try:
                 model_queue.put_nowait(models_to_send)
                 sent.append(collector_id)
             except Full:
-                # A full one-item mailbox means this collector already has an
-                # unseen update. Do not block training behind a slow environment.
-                pending.append(collector_id)
+                # A collector only applies updates between episodes. Replace
+                # its unseen stale item so the next episode starts from the
+                # newest available snapshot without blocking the trainer.
+                try:
+                    model_queue.get_nowait()
+                except Empty:
+                    # The collector raced us and consumed the old item.
+                    pass
+                try:
+                    model_queue.put_nowait(models_to_send)
+                    replaced.append(collector_id)
+                except Full:
+                    # A multiprocessing queue can race between the nonblocking
+                    # calls. Keeping a bounded pending item remains safe; the
+                    # next publication will try replacement again.
+                    pending.append(collector_id)
 
         log = logger.warning if pending else logger.info
         log(
-            "model_weights_published version=%d delivered=%s pending=%s",
+            "model_weights_published version=%d delivered=%s replaced=%s pending=%s",
             step,
             sent,
+            replaced,
             pending,
         )
 

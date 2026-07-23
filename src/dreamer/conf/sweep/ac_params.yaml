@@ -1,5 +1,6 @@
-# Actor-Critic parameter sweep
-# Usage: python -m src.train --multirun +sweep=ac_params
+# Historical Actor-Critic parameter grid; not an authored sweep default.
+# Varying actor rate independently requires the legacy optimizer contract and a
+# preregistered hypothesis, seed set, sample budget, metric, and stop rule.
 
 hydra:
   sweeper:

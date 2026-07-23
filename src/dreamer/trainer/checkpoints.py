@@ -38,8 +38,10 @@ def save_checkpoint(
     best_eval_step=None,
     best_eval_metric=None,
     run_id=None,
+    config_snapshot=None,
+    continuation_terminal_ema=None,
 ) -> str:
-    """Save training state atomically and return the checkpoint path."""
+    """Save training state and its optional config snapshot atomically."""
     if final and label is not None:
         raise ValueError("final and label are mutually exclusive")
     suffix = "final" if final else label or f"step_{train_step}"
@@ -67,6 +69,8 @@ def save_checkpoint(
         "best_eval_step": best_eval_step,
         "best_eval_metric": best_eval_metric,
         "run_id": run_id,
+        "config_snapshot": config_snapshot,
+        "continuation_terminal_ema": continuation_terminal_ema,
     }
     destination = Path(checkpoint_dir) / f"checkpoint_{suffix}.pt"
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -97,6 +101,7 @@ def load_checkpoint(
     current_return_scale,
     current_ret_lo,
     current_ret_hi,
+    current_continuation_terminal_ema=0.5,
 ):
     """
     Load full checkpoint (encoder, world model, actor, critic, optimizers).
@@ -151,6 +156,9 @@ def load_checkpoint(
     S = float(checkpoint.get("return_scale", current_return_scale))
     ret_lo = checkpoint.get("ret_lo", current_ret_lo)
     ret_hi = checkpoint.get("ret_hi", current_ret_hi)
+    continuation_terminal_ema = checkpoint.get("continuation_terminal_ema")
+    if continuation_terminal_ema is None:
+        continuation_terminal_ema = current_continuation_terminal_ema
 
     print(f"Resumed checkpoint from {checkpoint_path} at step {step}")
 
@@ -163,4 +171,5 @@ def load_checkpoint(
         "best_eval_step": checkpoint.get("best_eval_step"),
         "best_eval_metric": checkpoint.get("best_eval_metric"),
         "run_id": checkpoint.get("run_id"),
+        "continuation_terminal_ema": float(continuation_terminal_ema),
     }

@@ -18,14 +18,20 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from dreamer.config import Config, atari100k_pong_config, default_config
+from dreamer.config import (
+    Config,
+    atari100k_pong_config,
+    default_config,
+    load_checkpoint_config,
+)
 from dreamer.runtime.env import create_env
 from dreamer.models import (
     initialize_actor,
     initialize_world_model,
     resize_pixels_to_target,
     symlog,
-    symexp,
+    symexp_twohot_bins,
+    twohot_expectation,
     unimix_logits,
 )
 
@@ -43,16 +49,15 @@ def resolve_device(device_arg: str) -> str:
 def infer_config_from_checkpoint(
     checkpoint_path: Path, config_name: str | None
 ) -> Config:
+    """Resolve a legacy preset, checkpoint-authored config, or Pong fallback."""
     if config_name in {"atari_pong", "atari100k_pong"}:
         return atari100k_pong_config()
     if config_name == "default":
         return default_config()
 
-    run_dir = checkpoint_path.parent.parent
-    cfg_path = run_dir / "config.json"
-    if cfg_path.exists():
-        data = json.loads(cfg_path.read_text())
-        return Config(**data)
+    checkpoint_config = load_checkpoint_config(checkpoint_path)
+    if checkpoint_config is not None:
+        return checkpoint_config
 
     return atari100k_pong_config()
 
@@ -76,8 +81,7 @@ def load_models(checkpoint_path: Path, cfg: Config, device: str):
 def decode_twohot_expectation(
     logits: torch.Tensor, b_tensor: torch.Tensor
 ) -> torch.Tensor:
-    probs = F.softmax(logits, dim=-1)
-    return torch.sum(probs * b_tensor, dim=-1)
+    return twohot_expectation(logits, b_tensor)
 
 
 def imagine_dream_frames(
@@ -88,6 +92,7 @@ def imagine_dream_frames(
     n_actions: int,
     horizon: int,
     policy_mode: str,
+    actor_unimix: float = 0.01,
 ) -> list[np.ndarray]:
     """Generate imagined pixel frames from a latent starting state."""
     frames: list[np.ndarray] = []
@@ -116,7 +121,9 @@ def imagine_dream_frames(
                 frames.append(frame)
 
             action_logits = actor(h_z)
-            action_logits = unimix_logits(action_logits, unimix_ratio=0.01)
+            action_logits = unimix_logits(
+                action_logits, unimix_ratio=actor_unimix
+            )
             if policy_mode == "argmax":
                 action = action_logits.argmax(dim=-1)
             else:
@@ -169,14 +176,12 @@ def run_inspection(
     )
     if critic_out_bins <= 0:
         critic_out_bins = int(getattr(cfg, "num_bins", 255))
-    b_tensor = symexp(
-        torch.linspace(
-            cfg.b_start,
-            cfg.b_end,
-            steps=critic_out_bins,
-            device=device,
-            dtype=torch.float32,
-        )
+    b_tensor = symexp_twohot_bins(
+        cfg.b_start,
+        cfg.b_end,
+        critic_out_bins,
+        device=device,
+        dtype=torch.float32,
     )
 
     summary = {
@@ -299,6 +304,10 @@ def run_inspection(
                 )
 
                 action_logits = actor(actor_input)
+                action_logits = unimix_logits(
+                    action_logits,
+                    unimix_ratio=float(getattr(cfg, "actor_unimix", 0.01)),
+                )
                 action_probs = F.softmax(action_logits, dim=-1)
                 action_entropy = (
                     -(action_probs * torch.log(action_probs + 1e-8))
@@ -334,6 +343,7 @@ def run_inspection(
                         n_actions=cfg.n_actions,
                         horizon=int(dream_snippet_horizon),
                         policy_mode=policy_mode,
+                        actor_unimix=float(getattr(cfg, "actor_unimix", 0.01)),
                     )
                     if dream_frames:
                         dream_path = (

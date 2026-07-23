@@ -4,7 +4,17 @@ import torch
 import torch.nn.functional as F
 import torch.distributions as dist
 
-from .math_utils import unimix_logits
+from .math_utils import twohot_expectation, unimix_logits
+
+
+def learned_continue_discount(gamma: float, contdisc: bool) -> float:
+    """Return the extra discount applied to learned continuation probabilities.
+
+    With ``contdisc``, the continuation head's training target already contains
+    the task discount, so multiplying by ``gamma`` again would discount every
+    imagined transition twice.
+    """
+    return 1.0 if contdisc else float(gamma)
 
 
 def dream_sequence(
@@ -15,6 +25,8 @@ def dream_sequence(
     world_model,
     n_actions,
     d_hidden,
+    *,
+    actor_unimix=0.01,
 ):
     """
     Generate a sequence of dreamed states and actions starting from an initial state.
@@ -60,8 +72,8 @@ def dream_sequence(
     for _ in range(num_dream_steps):
         action_logits = actor(dream_h_z.detach())
         action_logits = unimix_logits(
-            action_logits, unimix_ratio=0.01
-        )  # Actor unimix (1%)
+            action_logits, unimix_ratio=actor_unimix
+        )
         dreamed_actions_logits.append(action_logits)
 
         action_dist = dist.Categorical(logits=action_logits, validate_args=False)
@@ -102,6 +114,129 @@ def dream_sequence(
 
 
 @torch.no_grad()
+def estimate_policy_lambda_action_values(
+    initial_h_z,
+    initial_z_embed,
+    actor,
+    critic,
+    world_model,
+    n_actions,
+    d_hidden,
+    bins,
+    gamma,
+    lam,
+    horizon,
+    samples,
+    *,
+    generator=None,
+    terminal_reward_penalty=0.0,
+    actor_unimix=0.01,
+):
+    """Estimate the actor's own lambda-return target for every first action.
+
+    Unlike :func:`enumerate_first_action_values`, this diagnostic does not take
+    the best future action branch. It forces each candidate first action, then
+    samples latent states and all later actions exactly like ``dream_sequence``.
+    The returned Monte Carlo means therefore measure the action preference that
+    the sampled REINFORCE objective presents to the actor.
+
+    Returns:
+        ``(means, standard_errors)`` with shape ``(batch, n_actions)``.
+    """
+    horizon = int(horizon)
+    samples = int(samples)
+    if horizon < 1:
+        raise ValueError("horizon must be positive")
+    if samples < 2:
+        raise ValueError("samples must be at least 2")
+
+    batch_size = initial_h_z.shape[0]
+    h_dim = world_model.n_blocks * d_hidden
+    device = initial_h_z.device
+    dtype = initial_h_z.dtype
+    rollout_shape = (batch_size, n_actions, samples)
+    rollout_count = batch_size * n_actions * samples
+
+    def expand_rollouts(tensor):
+        return (
+            tensor.view(batch_size, 1, 1, *tensor.shape[1:])
+            .expand(*rollout_shape, *tensor.shape[1:])
+            .reshape(rollout_count, *tensor.shape[1:])
+        )
+
+    def sample_categorical(probs):
+        flat = probs.reshape(-1, probs.shape[-1])
+        draws = torch.multinomial(flat, 1, generator=generator).squeeze(-1)
+        return draws.view(*probs.shape[:-1])
+
+    h_z = expand_rollouts(initial_h_z.detach())
+    h_state = h_z[:, :h_dim]
+    z_embed = expand_rollouts(initial_z_embed.detach())
+    dreamed_states = [h_z]
+    dreamed_rewards = []
+    dreamed_continues = []
+
+    first_actions = (
+        torch.arange(n_actions, device=device)
+        .view(1, n_actions, 1)
+        .expand(*rollout_shape)
+        .reshape(rollout_count)
+    )
+
+    for depth in range(horizon):
+        if depth == 0:
+            action_ids = first_actions
+        else:
+            action_logits = unimix_logits(
+                actor(h_z), unimix_ratio=actor_unimix
+            )
+            action_ids = sample_categorical(F.softmax(action_logits, dim=-1))
+        action_onehot = F.one_hot(action_ids, num_classes=n_actions).to(dtype=dtype)
+
+        h_next, prior_logits = world_model.step_dynamics(
+            z_embed, action_onehot, h_state
+        )
+        prior_probs = F.softmax(
+            unimix_logits(prior_logits, unimix_ratio=0.01), dim=-1
+        )
+        z_indices = sample_categorical(prior_probs)
+        z_state = F.one_hot(
+            z_indices, num_classes=world_model.n_classes
+        ).to(dtype=dtype)
+        h_z = world_model.join_h_and_z(h_next, z_state).detach()
+        dreamed_states.append(h_z)
+
+        reward_logits = world_model.reward_predictor(h_z)
+        rewards = twohot_expectation(reward_logits, bins)
+        continue_logits = world_model.continue_predictor(h_z).squeeze(-1)
+        if terminal_reward_penalty:
+            rewards = rewards - float(terminal_reward_penalty) * (
+                1.0 - torch.sigmoid(continue_logits)
+            )
+        dreamed_rewards.append(rewards)
+        dreamed_continues.append(continue_logits)
+
+        h_state = h_next.detach()
+        z_embed = world_model.z_embedding(z_state.view(rollout_count, -1)).detach()
+
+    states = torch.stack(dreamed_states)
+    value_logits = critic(states)
+    values = twohot_expectation(value_logits, bins)
+    lambda_returns = calculate_lambda_returns(
+        torch.stack(dreamed_rewards),
+        values,
+        torch.stack(dreamed_continues),
+        gamma,
+        lam,
+        horizon,
+    )
+    first_returns = lambda_returns[0].view(*rollout_shape)
+    means = first_returns.mean(dim=-1)
+    standard_errors = first_returns.std(dim=-1, unbiased=True) / samples**0.5
+    return means, standard_errors
+
+
+@torch.no_grad()
 def enumerate_first_action_values(
     initial_h_z,
     initial_z_embed,
@@ -115,6 +250,8 @@ def enumerate_first_action_values(
     horizon,
     terminal_reward_penalty=0.0,
     objective="value",
+    bootstrap_value=True,
+    latent_mode="mean",
 ):
     """Estimate Q(s, a) by enumerating discrete first actions in the world model.
 
@@ -122,9 +259,16 @@ def enumerate_first_action_values(
     instead of sampling one action and assigning it a REINFORCE target, it asks
     the learned model what would happen after each possible first action from
     the same latent state. Future actions are enumerated as a tiny deterministic
-    tree and the best branch for each first action is used as its value.
+    tree and the best branch for each first action is used as its value. Set
+    ``bootstrap_value`` to false to isolate learned reward and continuation
+    rollout values from the critic's terminal-state estimate. ``latent_mode``
+    can retain the historical probability-vector rollout (``mean``) or use the
+    categorical mode as a one-hot latent (``mode``), matching the support used
+    by the sampled RSSM during training.
     """
     horizon = max(1, int(horizon))
+    if latent_mode not in {"mean", "mode"}:
+        raise ValueError(f"unsupported latent_mode: {latent_mode}")
     batch_size = initial_h_z.shape[0]
     h_dim = world_model.n_blocks * d_hidden
     device = initial_h_z.device
@@ -166,7 +310,12 @@ def enumerate_first_action_values(
             z_embed_flat, action_onehot, h_flat
         )
         prior_logits = unimix_logits(prior_logits, unimix_ratio=0.01)
-        z_state_flat = F.softmax(prior_logits, dim=-1)
+        if latent_mode == "mode":
+            z_state_flat = F.one_hot(
+                prior_logits.argmax(dim=-1), num_classes=world_model.n_classes
+            ).to(dtype=dtype)
+        else:
+            z_state_flat = F.softmax(prior_logits, dim=-1)
         h_z_flat = world_model.join_h_and_z(h_next, z_state_flat)
 
         continue_probs = torch.sigmoid(
@@ -176,7 +325,7 @@ def enumerate_first_action_values(
             rewards = continue_probs
         else:
             reward_logits = world_model.reward_predictor(h_z_flat)
-            rewards = torch.sum(F.softmax(reward_logits, dim=-1) * bins, dim=-1)
+            rewards = twohot_expectation(reward_logits, bins)
             if terminal_reward_penalty:
                 rewards = rewards - float(terminal_reward_penalty) * (
                     1.0 - continue_probs
@@ -200,6 +349,7 @@ def enumerate_first_action_values(
         if depth == 0:
             first_action = action_ids
         else:
+            assert first_action is not None
             first_action = (
                 first_action.unsqueeze(2)
                 .expand(batch_size, branch_count, n_actions)
@@ -222,13 +372,11 @@ def enumerate_first_action_values(
             batch_size * branch_count, world_model.n_latents, world_model.n_classes
         ),
     )
-    if objective == "survival":
+    if objective == "survival" or not bootstrap_value:
         values = torch.zeros(batch_size, branch_count, device=device, dtype=dtype)
     else:
         value_logits = critic(final_h_z)
-        values = torch.sum(F.softmax(value_logits, dim=-1) * bins, dim=-1).view(
-            batch_size, branch_count
-        )
+        values = twohot_expectation(value_logits, bins).view(batch_size, branch_count)
     path_values = returns + discounts * values
 
     q_values = []
@@ -255,6 +403,7 @@ def compute_enumerated_actor_loss(
     terminal_reward_penalty=0.0,
     objective="value",
     sample_mask=None,
+    actor_unimix=0.01,
 ):
     """Train the actor toward model-enumerated action values for discrete control."""
     h_prev_backup = world_model.h_prev.clone()
@@ -275,7 +424,9 @@ def compute_enumerated_actor_loss(
         )
     finally:
         world_model.h_prev = h_prev_backup
-    policy_logits = unimix_logits(actor(initial_h_z.detach()), unimix_ratio=0.01)
+    policy_logits = unimix_logits(
+        actor(initial_h_z.detach()), unimix_ratio=actor_unimix
+    )
     log_probs = F.log_softmax(policy_logits, dim=-1)
     target_probs = F.softmax(q_values / max(float(temperature), 1e-6), dim=-1)
     action_dist = dist.Categorical(logits=policy_logits, validate_args=False)
@@ -320,6 +471,7 @@ def compute_mpc_teacher_actor_loss(
     margin_min=0.0,
     normalize_values=True,
     sample_mask=None,
+    actor_unimix=0.01,
 ):
     """Distill a short-horizon planner teacher into the actor.
 
@@ -347,7 +499,9 @@ def compute_mpc_teacher_actor_loss(
     finally:
         world_model.h_prev = h_prev_backup
 
-    policy_logits = unimix_logits(actor(initial_h_z.detach()), unimix_ratio=0.01)
+    policy_logits = unimix_logits(
+        actor(initial_h_z.detach()), unimix_ratio=actor_unimix
+    )
     action_dist = dist.Categorical(logits=policy_logits, validate_args=False)
     entropy_per_sample = action_dist.entropy()
 

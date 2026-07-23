@@ -13,14 +13,19 @@ import torch.nn.functional as F
 from ..models import (
     compute_wm_loss,
     compute_actor_critic_losses,
+    compute_reinforce_actor_loss,
     compute_q_actor_critic_losses,
     compute_enumerated_actor_loss,
     compute_mpc_teacher_actor_loss,
     dream_sequence,
     calculate_lambda_returns,
+    learned_continue_discount,
     symlog,
+    symexp,
     twohot_encode,
+    twohot_expectation,
     unimix_logits,
+    slow_value_regularizer_loss,
 )
 from .logging import StepMetrics, collect_viz_data
 
@@ -33,9 +38,231 @@ class ForwardResult:
     total_actor_loss: torch.Tensor
     total_critic_loss: torch.Tensor
     metrics: StepMetrics
-    # Return lambda_returns from the last AC step so the caller can
-    # update return-normalization EMA without reaching into internals.
-    last_lambda_returns: Optional[torch.Tensor] = None
+    replay_representation_loss: Optional[torch.Tensor] = None
+    return_scale: Optional[float] = None
+    ret_lo: Optional[float] = None
+    ret_hi: Optional[float] = None
+    continuation_terminal_ema: Optional[float] = None
+
+
+@dataclass
+class ReinforceActorBatch:
+    """Tensors needed to apply one shared return scale to an imagined batch."""
+
+    dreamed_values: torch.Tensor
+    lambda_returns: torch.Tensor
+    dreamed_continues: torch.Tensor
+    dreamed_actions_logits: torch.Tensor
+    dreamed_actions_sampled: torch.Tensor
+    sample_mask: torch.Tensor
+    actor_baseline_values: torch.Tensor
+    start_continue_logits: Optional[torch.Tensor]
+
+
+def replay_value_features(
+    features: torch.Tensor,
+    *,
+    optimizer_contract: str,
+    critic_replay_scale: float,
+) -> torch.Tensor:
+    """Select whether replay-value loss may shape observed representations."""
+    if optimizer_contract == "reference" and critic_replay_scale > 0.0:
+        return features
+    return features.detach()
+
+
+def calculate_return_normalizer_update(
+    return_batches: list[tuple[torch.Tensor, torch.Tensor]],
+    ret_lo: float,
+    ret_hi: float,
+    *,
+    rate: float = 0.01,
+) -> Optional[tuple[float, float, float]]:
+    """Update DreamerV3's non-debiased percentile return normalizer.
+
+    ``return_batches`` contains ``(lambda_returns, start_mask)`` pairs for every
+    post-burn-in imagination start. Reference Dreamer computes percentiles over
+    the corresponding combined ``B * K * H`` tensor, not only the final start.
+    """
+    if not 0.0 <= rate <= 1.0:
+        raise ValueError("return-normalizer rate must be between 0 and 1")
+
+    valid_returns: list[torch.Tensor] = []
+    for lambda_returns, start_mask in return_batches:
+        valid = start_mask.detach().bool().reshape(-1)
+        if bool(valid.any().item()):
+            valid_returns.append(lambda_returns.detach()[:, valid].reshape(-1))
+    if not valid_returns:
+        return None
+
+    flat = torch.cat(valid_returns)
+    lo_batch = float(torch.quantile(flat, 0.05).item())
+    hi_batch = float(torch.quantile(flat, 0.95).item())
+    next_lo = (1.0 - rate) * float(ret_lo) + rate * lo_batch
+    next_hi = (1.0 - rate) * float(ret_hi) + rate * hi_batch
+    next_scale = max(1.0, next_hi - next_lo)
+    return next_scale, next_lo, next_hi
+
+
+def add_sequence_mean_auxiliary_loss(
+    accumulated_loss: torch.Tensor,
+    auxiliary_loss: torch.Tensor,
+    scale: float,
+    sequence_length: int,
+) -> torch.Tensor:
+    """Add one averaged auxiliary loss beside a summed sequence loss.
+
+    The caller later divides ``accumulated_loss`` by ``sequence_length``.
+    Multiplying the already-averaged auxiliary term here preserves its authored
+    scale after that normalization instead of diluting it by the sequence
+    length.
+    """
+    if sequence_length <= 0:
+        raise ValueError("sequence_length must be positive")
+    return accumulated_loss + sequence_length * scale * auxiliary_loss
+
+
+def normalize_sequence_losses(
+    total_wm_loss: torch.Tensor,
+    total_actor_loss: torch.Tensor,
+    total_critic_loss: torch.Tensor,
+    *,
+    replay_length: int,
+    imagination_starts: int,
+    replay_representation_loss: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    """Reduce accumulated sequence objectives to their authored means."""
+    if replay_length <= 0:
+        raise ValueError("replay_length must be positive")
+    if imagination_starts <= 0:
+        raise ValueError("imagination_starts must be positive")
+
+    normalized_representation_loss = (
+        replay_representation_loss / imagination_starts
+        if replay_representation_loss is not None
+        else None
+    )
+    return (
+        total_wm_loss / replay_length,
+        total_actor_loss / imagination_starts,
+        total_critic_loss / imagination_starts,
+        normalized_representation_loss,
+    )
+
+
+def calculate_continuation_balance(
+    is_terminal: torch.Tensor,
+    mask: torch.Tensor,
+    inclusion_weights: torch.Tensor,
+    terminal_fraction_ema: float,
+    *,
+    enabled: bool,
+    rate: float,
+    minimum_fraction: float = 0.001,
+) -> tuple[torch.Tensor, float, float, float, float]:
+    """Update terminal prevalence and return scale-preserving BCE weights."""
+    if not 0.0 <= terminal_fraction_ema <= 1.0:
+        raise ValueError("terminal_fraction_ema must be between zero and one")
+    if not 0.0 < rate <= 1.0:
+        raise ValueError("continuation balance rate must be in (0, 1]")
+    if not 0.0 < minimum_fraction < 0.5:
+        raise ValueError("minimum_fraction must be in (0, 0.5)")
+
+    effective_weights = mask.float() * inclusion_weights
+    total_mass = effective_weights.sum()
+    terminal_mass = (effective_weights * is_terminal.float()).sum()
+    batch_fraction = float((terminal_mass / total_mass.clamp_min(1e-8)).item())
+    if not enabled:
+        return inclusion_weights, terminal_fraction_ema, batch_fraction, 1.0, 1.0
+
+    next_ema = (
+        (1.0 - rate) * float(terminal_fraction_ema) + rate * batch_fraction
+    )
+    bounded = min(1.0 - minimum_fraction, max(minimum_fraction, next_ema))
+    terminal_scale = 0.5 / bounded
+    live_scale = 0.5 / (1.0 - bounded)
+    class_weights = torch.where(
+        is_terminal.bool(),
+        torch.as_tensor(
+            terminal_scale, device=mask.device, dtype=inclusion_weights.dtype
+        ),
+        torch.as_tensor(
+            live_scale, device=mask.device, dtype=inclusion_weights.dtype
+        ),
+    )
+    return (
+        inclusion_weights * class_weights,
+        next_ema,
+        batch_fraction,
+        terminal_scale,
+        live_scale,
+    )
+
+
+def calculate_replay_lambda_targets(
+    rewards: torch.Tensor,
+    is_last: torch.Tensor,
+    is_terminal: torch.Tensor,
+    value_annotations: torch.Tensor,
+    gamma: float,
+    lam: float,
+) -> torch.Tensor:
+    """Return value targets aligned with post-transition replay states.
+
+    Replay row ``t`` stores the observation produced by the action and reward
+    in row ``t``. Its posterior therefore represents the state *after* that
+    reward, so its value target must start with the next row's reward. The last
+    posterior has no following replay transition and intentionally has no
+    target here; its imagined value annotation bootstraps the preceding state.
+    """
+    num_targets = max(0, rewards.shape[0] - 1)
+    if num_targets == 0:
+        return rewards[:0]
+    next_rewards = rewards[1:]
+    next_last = is_last[1:].float()
+    next_terminal = is_terminal[1:].float()
+    next_bootstrap = value_annotations[1:]
+
+    live = float(gamma) * (1.0 - next_terminal)
+    trace = float(lam) * (1.0 - next_last)
+    next_return = value_annotations[-1]
+    returns: list[torch.Tensor] = []
+    for index in reversed(range(num_targets)):
+        next_return = (
+            next_rewards[index]
+            + (1.0 - trace[index]) * live[index] * next_bootstrap[index]
+            + live[index] * trace[index] * next_return
+        )
+        returns.append(next_return)
+    return torch.stack(list(reversed(returns)))
+
+
+def calculate_replay_pair_mask(
+    replay_mask: torch.Tensor, replay_is_last: torch.Tensor
+) -> torch.Tensor:
+    """Mask invalid and cross-episode posterior/target pairs."""
+    return (
+        replay_mask[:-1]
+        * replay_mask[1:]
+        * (1.0 - replay_is_last[:-1].float())
+    )
+
+
+def select_critic_target_values(
+    online_values: torch.Tensor,
+    slow_values: torch.Tensor,
+    *,
+    use_slow_target: bool,
+) -> torch.Tensor:
+    """Select a detached value target for returns and the policy baseline.
+
+    Reference DreamerV3 uses the online value prediction for these targets by
+    default and retains the slow value model as a separate regularizer.
+    The explicit switch preserves the semantics of historical local runs that
+    instead used the slow model for both roles.
+    """
+    target = slow_values if use_slow_target else online_values
+    return target.detach()
 
 
 def dreamer_step(
@@ -53,13 +280,19 @@ def dreamer_step(
     B: int,
     T: int,
     train_start_t: int,
-    skip_ac: bool,
+    skip_actor: bool,
+    skip_critic: bool,
     bins: torch.Tensor,
     return_scale: float,
     config,
     device: torch.device,
     use_pixels: bool,
     do_log_images: bool,
+    collect_gradient_diagnostics: bool = False,
+    return_lo: float = 0.0,
+    return_hi: float = 0.0,
+    return_norm_rate: float = 0.01,
+    continuation_terminal_ema: float = 0.5,
 ) -> ForwardResult:
     """One complete DreamerV3 forward pass over a batch.
 
@@ -72,19 +305,23 @@ def dreamer_step(
         world_model: RSSM world model (h_prev/z_prev already zeroed).
         actor: Policy network.
         critic: Value network.
-        critic_ema: EMA copy of critic for stable targets.
+        critic_ema: Slow critic used for distributional regularization and,
+            when configured, historical lambda-return/baseline targets.
         batch: EnvData named tuple from replay buffer.
         metrics: Pre-initialized StepMetrics accumulator.
         all_tokens: Encoder output, shape (B, T, token_dim).
         B: Batch size.
         T: Sequence length.
         train_start_t: First timestep for loss accumulation (after burn-in).
-        skip_ac: Whether to skip actor-critic updates this batch.
+        skip_actor: Whether to skip actor updates this batch.
+        skip_critic: Whether to skip critic updates this batch.
         bins: Symexp bin edges for distributional value/reward.
         config: Training config.
         device: Torch device.
         use_pixels: Whether pixel observations are active.
         do_log_images: Whether to collect visualization data this step.
+        collect_gradient_diagnostics: Whether to measure read-only replay/WM
+            gradient alignment for this step.
 
     Returns:
         ForwardResult with accumulated losses and populated metrics.
@@ -94,8 +331,12 @@ def dreamer_step(
     n_dream_steps = config.num_dream_steps
     d_hidden = config.d_hidden
     gamma = config.gamma
+    imagination_discount = learned_continue_discount(
+        gamma, bool(getattr(config, "contdisc", True))
+    )
     lam = config.lam
     actor_entropy_coef = config.actor_entropy_coef
+    actor_unimix = float(getattr(config, "actor_unimix", 0.01))
     critic_ema_coef = config.critic_ema_regularizer
     critic_replay_scale = config.critic_replay_scale
     critic_real_return_scale = float(getattr(config, "critic_real_return_scale", 0.0))
@@ -105,7 +346,30 @@ def dreamer_step(
     total_wm_loss = None
     total_actor_loss = None
     total_critic_loss = None
-    last_lambda_returns = None
+    return_batches: list[tuple[torch.Tensor, torch.Tensor]] = []
+    reinforce_actor_batches: list[ReinforceActorBatch] = []
+    replay_posterior_states_with_grad: list[torch.Tensor] = []
+    replay_representation_loss = None
+
+    (
+        continuation_loss_weights,
+        next_continuation_terminal_ema,
+        batch_terminal_fraction,
+        terminal_class_scale,
+        live_class_scale,
+    ) = calculate_continuation_balance(
+        batch.is_terminal,
+        batch.mask,
+        batch.continue_weights,
+        continuation_terminal_ema,
+        enabled=bool(getattr(config, "balance_continuation", False)),
+        rate=float(getattr(config, "continuation_balance_rate", 0.01)),
+    )
+    if bool(getattr(config, "balance_continuation", False)):
+        metrics.continue_balance_batch_fraction = batch_terminal_fraction
+        metrics.continue_balance_ema = next_continuation_terminal_ema
+        metrics.continue_balance_terminal_scale = terminal_class_scale
+        metrics.continue_balance_live_scale = live_class_scale
 
     # --- RSSM rollout + per-timestep dreaming ---
     for t_step in range(T):
@@ -130,7 +394,7 @@ def dreamer_step(
             posterior_z_sample,
             prior_logits,
             posterior_logits,
-        ) = world_model(tokens_t, action_t)
+        ) = world_model(tokens_t, action_t, is_first=batch.is_first[:, t_step])
 
         # World model loss
         wm_loss, wm_loss_dict = compute_wm_loss(
@@ -147,7 +411,19 @@ def dreamer_step(
             device,
             use_pixels=use_pixels,
             sample_mask=sample_mask,
+            continue_loss_weights=continuation_loss_weights[:, t_step],
         )
+        valid_rows = sample_mask.bool()
+        terminal_rows = valid_rows & is_terminal_t.bool()
+        live_rows = valid_rows & ~is_terminal_t.bool()
+        continue_probs = torch.sigmoid(continue_logits.detach().squeeze(-1))
+        if bool(terminal_rows.any().item()):
+            metrics.continue_terminal_weights.append(
+                batch.continue_weights[:, t_step][terminal_rows].detach()
+            )
+            metrics.continue_terminal_probs.append(continue_probs[terminal_rows])
+        if bool(live_rows.any().item()):
+            metrics.continue_live_probs.append(continue_probs[live_rows])
         if (
             prior_state_pred_scale > 0.0
             and not use_pixels
@@ -191,8 +467,30 @@ def dreamer_step(
             continue
 
         # --- Post-burn-in: accumulate WM components for logging ---
+        state_prediction = obs_reconstruction.get("state")
+        state_target = obs_t.get("state")
+        if (
+            state_prediction is not None
+            and state_target is not None
+            and state_prediction.shape[-1] > 0
+        ):
+            metrics.replay_states.append(state_target.detach())
+            metrics.replay_state_reconstructions.append(
+                symexp(state_prediction.detach())
+            )
+            metrics.replay_state_masks.append(sample_mask.detach())
+
         if critic_replay_scale > 0.0 or critic_real_return_scale > 0.0:
-            metrics.replay_posterior_states.append(h_z_joined.detach())
+            replay_features = replay_value_features(
+                h_z_joined,
+                optimizer_contract=getattr(
+                    config, "optimizer_contract", "legacy"
+                ),
+                critic_replay_scale=critic_replay_scale,
+            )
+            metrics.replay_posterior_states.append(replay_features)
+        if collect_gradient_diagnostics and critic_replay_scale > 0.0:
+            replay_posterior_states_with_grad.append(h_z_joined)
 
         for key in metrics.wm_components:
             metrics.wm_components[key] = (
@@ -201,7 +499,7 @@ def dreamer_step(
 
         # --- Dream sequence for actor-critic ---
         valid_ac_step = sample_mask.sum() > 0
-        if not skip_ac and valid_ac_step:
+        if (not skip_actor or not skip_critic) and valid_ac_step:
             h_prev_backup = world_model.h_prev.clone()
             (
                 dreamed_recurrent_states,
@@ -215,16 +513,37 @@ def dreamer_step(
                 world_model,
                 n_actions,
                 d_hidden,
+                actor_unimix=actor_unimix,
             )
             world_model.h_prev = h_prev_backup
+
+            action_probabilities = F.softmax(dreamed_actions_logits, dim=-1)
+            valid_action_probabilities = action_probabilities[:, sample_mask.bool()]
+            valid_action_samples = dreamed_actions_sampled[:, sample_mask.bool()]
+            modal_actions = valid_action_probabilities.argmax(dim=-1)
+            metrics.actor_min_action_probability.append(
+                valid_action_probabilities.min(dim=-1).values.mean().detach().cpu()
+            )
+            metrics.actor_non_modal_probability.append(
+                (1.0 - valid_action_probabilities.max(dim=-1).values)
+                .mean()
+                .detach()
+                .cpu()
+            )
+            metrics.actor_non_modal_sample_fraction.append(
+                (valid_action_samples != modal_actions)
+                .float()
+                .mean()
+                .detach()
+                .cpu()
+            )
 
             # Reward/continue predictions from post-action states [1:]
             dreamed_rewards_logits = world_model.reward_predictor(
                 dreamed_recurrent_states[1:]
             ).detach()
-            dreamed_rewards_probs = F.softmax(dreamed_rewards_logits, dim=-1)
-            dreamed_rewards = torch.sum(
-                dreamed_rewards_probs * bins, dim=-1
+            dreamed_rewards = twohot_expectation(
+                dreamed_rewards_logits, bins
             ).detach()
             dreamed_continues = (
                 world_model.continue_predictor(dreamed_recurrent_states[1:])
@@ -244,22 +563,36 @@ def dreamer_step(
             dreamed_values_logits = critic(dreamed_recurrent_states)
             with torch.no_grad():
                 dreamed_values_logits_ema = critic_ema(dreamed_recurrent_states)
-            dreamed_values_probs = F.softmax(dreamed_values_logits, dim=-1)
-            dreamed_values = torch.sum(dreamed_values_probs * bins, dim=-1)
+                dreamed_values_ema = twohot_expectation(
+                    dreamed_values_logits_ema, bins
+                )
+            dreamed_values = twohot_expectation(dreamed_values_logits, bins)
             metrics.dreamed_values.append(dreamed_values.detach().cpu())
+
+            critic_target_values = select_critic_target_values(
+                dreamed_values,
+                dreamed_values_ema,
+                use_slow_target=bool(getattr(config, "critic_slow_target", True)),
+            )
 
             lambda_returns = calculate_lambda_returns(
                 dreamed_rewards,
-                dreamed_values,
+                critic_target_values,
                 dreamed_continues,
-                gamma,
+                imagination_discount,
                 lam,
                 n_dream_steps,
             )
-            last_lambda_returns = lambda_returns
+            return_batches.append((lambda_returns, sample_mask))
 
             if critic_replay_scale > 0.0:
                 metrics.replay_value_annotations.append(lambda_returns[0].detach())
+
+            start_continue_logits = (
+                continue_logits.detach().squeeze(-1)
+                if bool(getattr(config, "weight_imagination_starts", False))
+                else None
+            )
 
             (
                 actor_loss,
@@ -274,14 +607,38 @@ def dreamer_step(
                 dreamed_actions_sampled,
                 bins,
                 return_scale,
-                gamma,
+                imagination_discount,
                 actor_entropy_coef=actor_entropy_coef,
                 normalize_advantages=config.normalize_advantages,
                 dreamed_values_logits_ema=dreamed_values_logits_ema,
                 critic_ema_coef=critic_ema_coef,
                 sample_mask=sample_mask,
+                actor_baseline_values=critic_target_values,
+                start_continue_logits=start_continue_logits,
+                critic_ema_target=getattr(
+                    config, "critic_ema_target", "distribution"
+                ),
             )
-            if getattr(config, "actor_loss_mode", "reinforce") == "enumerate":
+            if (
+                not skip_actor
+                and getattr(config, "actor_loss_mode", "reinforce") == "reinforce"
+            ):
+                reinforce_actor_batches.append(
+                    ReinforceActorBatch(
+                        dreamed_values=dreamed_values,
+                        lambda_returns=lambda_returns,
+                        dreamed_continues=dreamed_continues,
+                        dreamed_actions_logits=dreamed_actions_logits,
+                        dreamed_actions_sampled=dreamed_actions_sampled,
+                        sample_mask=sample_mask,
+                        actor_baseline_values=critic_target_values,
+                        start_continue_logits=start_continue_logits,
+                    )
+                )
+            if (
+                not skip_actor
+                and getattr(config, "actor_loss_mode", "reinforce") == "enumerate"
+            ):
                 (
                     actor_loss,
                     entropy,
@@ -296,19 +653,23 @@ def dreamer_step(
                     n_actions,
                     d_hidden,
                     bins,
-                    gamma,
+                    imagination_discount,
                     getattr(config, "actor_enum_horizon", 3),
                     actor_entropy_coef,
                     getattr(config, "actor_enum_temperature", 0.25),
                     terminal_reward_penalty=terminal_reward_penalty,
                     objective=getattr(config, "actor_enum_objective", "value"),
                     sample_mask=sample_mask,
+                    actor_unimix=actor_unimix,
                 )
                 actor_loss = actor_loss * float(
                     getattr(config, "actor_enum_loss_scale", 1.0)
                 )
                 metrics.actor_enum_margin.append(enum_margin.detach().cpu())
-            if getattr(config, "actor_loss_mode", "reinforce") == "mpc_teacher":
+            if (
+                not skip_actor
+                and getattr(config, "actor_loss_mode", "reinforce") == "mpc_teacher"
+            ):
                 (
                     actor_loss,
                     entropy,
@@ -324,7 +685,7 @@ def dreamer_step(
                     n_actions,
                     d_hidden,
                     bins,
-                    gamma,
+                    imagination_discount,
                     getattr(config, "mpc_teacher_horizon", 6),
                     actor_entropy_coef,
                     getattr(config, "mpc_teacher_temperature", 0.1),
@@ -336,6 +697,7 @@ def dreamer_step(
                         config, "mpc_teacher_normalize_values", True
                     ),
                     sample_mask=sample_mask,
+                    actor_unimix=actor_unimix,
                 )
                 actor_loss = actor_loss * float(
                     getattr(config, "mpc_teacher_loss_scale", 1.0)
@@ -346,8 +708,12 @@ def dreamer_step(
                 q_critic is not None
                 and q_critic_ema is not None
                 and (
-                    q_critic_scale > 0.0
-                    or getattr(config, "actor_loss_mode", "reinforce") == "qcritic"
+                    (not skip_critic and q_critic_scale > 0.0)
+                    or (
+                        not skip_actor
+                        and getattr(config, "actor_loss_mode", "reinforce")
+                        == "qcritic"
+                    )
                 )
             ):
                 num_bins = bins.numel()
@@ -360,14 +726,13 @@ def dreamer_step(
                     q_logits_ema = q_logits_ema.view(
                         n_dream_steps + 1, B, n_actions, num_bins
                     )
-                    q_probs_ema = F.softmax(q_logits_ema, dim=-1)
-                    q_values_ema = torch.sum(q_probs_ema * bins, dim=-1)
+                    q_values_ema = twohot_expectation(q_logits_ema, bins)
                     q_state_values = q_values_ema.max(dim=-1).values
                     q_lambda_returns = calculate_lambda_returns(
                         dreamed_rewards,
                         q_state_values,
                         dreamed_continues,
-                        gamma,
+                        imagination_discount,
                         lam,
                         n_dream_steps,
                     )
@@ -385,21 +750,29 @@ def dreamer_step(
                     dreamed_actions_logits,
                     dreamed_actions_sampled,
                     bins,
-                    gamma,
+                    imagination_discount,
                     actor_entropy_coef=actor_entropy_coef,
                     temperature=getattr(config, "q_actor_temperature", 0.25),
                     sample_mask=sample_mask,
                 )
-                critic_loss = critic_loss + q_critic_scale * q_loss
-                if getattr(config, "actor_loss_mode", "reinforce") == "qcritic":
+                if not skip_critic:
+                    critic_loss = critic_loss + q_critic_scale * q_loss
+                if (
+                    not skip_actor
+                    and getattr(config, "actor_loss_mode", "reinforce") == "qcritic"
+                ):
                     actor_loss = q_actor_loss
                     entropy = q_entropy
                 metrics.actor_q_margin.append(q_margin.detach().cpu())
             metrics.actor_entropy.append(entropy.detach().cpu())
+            if skip_actor:
+                actor_loss = torch.tensor(0.0, device=device)
+            if skip_critic:
+                critic_loss = torch.tensor(0.0, device=device)
         else:
             actor_loss = torch.tensor(0.0, device=device)
             critic_loss = torch.tensor(0.0, device=device)
-            if critic_replay_scale > 0.0 and not skip_ac:
+            if critic_replay_scale > 0.0 and not skip_critic:
                 metrics.replay_value_annotations.append(
                     torch.zeros_like(sample_mask, device=device)
                 )
@@ -430,10 +803,47 @@ def dreamer_step(
             total_actor_loss = total_actor_loss + actor_loss
             total_critic_loss = total_critic_loss + critic_loss
 
+    normalizer_update = calculate_return_normalizer_update(
+        return_batches,
+        return_lo,
+        return_hi,
+        rate=return_norm_rate,
+    )
+    next_return_scale = return_scale
+    next_ret_lo = return_lo
+    next_ret_hi = return_hi
+    if normalizer_update is not None:
+        next_return_scale, next_ret_lo, next_ret_hi = normalizer_update
+
+        # The reference updates its return normalizer from all imagination
+        # starts before evaluating the current policy loss. Critic losses do
+        # not depend on this scale, so only the default REINFORCE actor loss
+        # needs to be recomputed after the combined percentile is known.
+        if reinforce_actor_batches:
+            recomputed_actor_losses = []
+            for actor_batch in reinforce_actor_batches:
+                recomputed_actor_loss, _entropy = compute_reinforce_actor_loss(
+                    actor_batch.dreamed_values,
+                    actor_batch.lambda_returns,
+                    actor_batch.dreamed_continues,
+                    actor_batch.dreamed_actions_logits,
+                    actor_batch.dreamed_actions_sampled,
+                    next_return_scale,
+                    imagination_discount,
+                    actor_entropy_coef=actor_entropy_coef,
+                    normalize_advantages=config.normalize_advantages,
+                    sample_mask=actor_batch.sample_mask,
+                    actor_baseline_values=actor_batch.actor_baseline_values,
+                    start_continue_logits=actor_batch.start_continue_logits,
+                )
+                recomputed_actor_losses.append(recomputed_actor_loss)
+            total_actor_loss = torch.stack(recomputed_actor_losses).sum()
+
     # --- Replay critic grounding ---
     if (
         critic_replay_scale > 0.0
-        and not skip_ac
+        and not skip_critic
+        and effective_train_steps > 1
         and len(metrics.replay_value_annotations) == effective_train_steps
         and len(metrics.replay_posterior_states) == effective_train_steps
     ):
@@ -442,86 +852,110 @@ def dreamer_step(
 
         replay_rewards = batch.rewards[:, train_start_t:].transpose(0, 1)
         replay_is_last = batch.is_last[:, train_start_t:].transpose(0, 1)
-        replay_continues = (1.0 - batch.is_terminal.float()).transpose(0, 1)[
-            train_start_t:
-        ]
-        replay_continues = replay_continues * (1.0 - replay_is_last.float())
-        replay_continues = replay_continues * (
-            1.0 - 1.0 / float(max(1, getattr(config, "horizon", 333)))
-        )
+        replay_is_terminal = batch.is_terminal[:, train_start_t:].transpose(0, 1)
         replay_mask = batch.mask[:, train_start_t:].transpose(0, 1)
 
-        replay_lambda_returns = calculate_lambda_returns(
+        replay_lambda_returns = calculate_replay_lambda_targets(
             replay_rewards,
-            replay_rewards,
-            replay_continues,
+            replay_is_last,
+            replay_is_terminal,
+            replay_annotations,
             gamma,
             lam,
-            effective_train_steps,
-            value_annotations=replay_annotations,
-            continues_are_logits=False,
         ).transpose(0, 1)
 
-        replay_logits = critic(replay_posterior.detach())
+        replay_logits = critic(replay_posterior[:, :-1])
         logits_flat = replay_logits.reshape(-1, replay_logits.size(-1))
         targets_flat = replay_lambda_returns.detach().reshape(-1)
-        mask_flat = replay_mask.reshape(-1).float()
+        replay_pair_mask = calculate_replay_pair_mask(replay_mask, replay_is_last)
+        mask_flat = replay_pair_mask.transpose(0, 1).reshape(-1).float()
 
         targets_twohot = twohot_encode(targets_flat, bins)
         per_step_ce = -torch.sum(
             targets_twohot * F.log_softmax(logits_flat, dim=-1), dim=-1
         )
-        replay_not_last = (1.0 - replay_is_last.float()).reshape(-1)
-        replay_weight = mask_flat * replay_not_last
-        metrics.replay_loss = (per_step_ce * replay_weight).sum() / (
-            replay_weight.sum() + 1e-8
+        metrics.replay_loss = (per_step_ce * mask_flat).sum() / (
+            mask_flat.sum() + 1e-8
         )
 
         with torch.no_grad():
-            replay_logits_ema = critic_ema(replay_posterior.detach())
+            replay_logits_ema = critic_ema(replay_posterior[:, :-1].detach())
         ema_logits_flat = replay_logits_ema.reshape(-1, replay_logits_ema.size(-1))
-        ema_probs = F.softmax(ema_logits_flat, dim=-1)
-        per_step_ema = -torch.sum(
-            ema_probs * F.log_softmax(logits_flat, dim=-1), dim=-1
+        per_step_ema = slow_value_regularizer_loss(
+            logits_flat,
+            ema_logits_flat,
+            bins,
+            target_mode=getattr(config, "critic_ema_target", "distribution"),
         )
-        metrics.replay_ema_reg = (per_step_ema * replay_weight).sum() / (
-            replay_weight.sum() + 1e-8
+        metrics.replay_ema_reg = (per_step_ema * mask_flat).sum() / (
+            mask_flat.sum() + 1e-8
         )
 
         replay_loss_total = (
             metrics.replay_loss + config.critic_ema_regularizer * metrics.replay_ema_reg
         )
-        total_critic_loss = total_critic_loss + critic_replay_scale * replay_loss_total
+        total_critic_loss = add_sequence_mean_auxiliary_loss(
+            total_critic_loss,
+            replay_loss_total,
+            critic_replay_scale,
+            effective_train_steps,
+        )
 
-    # --- Direct replay Monte Carlo / n-step critic grounding ---
+        if (
+            collect_gradient_diagnostics
+            and len(replay_posterior_states_with_grad) == effective_train_steps
+        ):
+            live_replay_posterior = torch.stack(
+                replay_posterior_states_with_grad, dim=1
+            )
+            live_replay_logits = critic(live_replay_posterior[:, :-1])
+            live_logits_flat = live_replay_logits.reshape(
+                -1, live_replay_logits.size(-1)
+            )
+            live_per_step_ce = -torch.sum(
+                targets_twohot * F.log_softmax(live_logits_flat, dim=-1),
+                dim=-1,
+            )
+            live_target_loss = (live_per_step_ce * mask_flat).sum() / (
+                mask_flat.sum() + 1e-8
+            )
+            live_per_step_ema = slow_value_regularizer_loss(
+                live_logits_flat,
+                ema_logits_flat,
+                bins,
+                target_mode=getattr(
+                    config, "critic_ema_target", "distribution"
+                ),
+            )
+            live_slow_regularizer = (
+                live_per_step_ema * mask_flat
+            ).sum() / (mask_flat.sum() + 1e-8)
+            replay_representation_loss = (
+                effective_train_steps
+                * critic_replay_scale
+                * (
+                    live_target_loss
+                    + config.critic_ema_regularizer * live_slow_regularizer
+                )
+            )
+
+    # --- Full-episode replay return critic grounding ---
     if (
         critic_real_return_scale > 0.0
-        and not skip_ac
+        and not skip_critic
         and len(metrics.replay_posterior_states) == effective_train_steps
     ):
+        if batch.future_returns is None:
+            raise RuntimeError(
+                "critic_real_return_scale requires replay future-return annotations"
+            )
         replay_posterior = torch.stack(metrics.replay_posterior_states, dim=1)
-        replay_rewards = batch.rewards[:, train_start_t:].transpose(0, 1)
-        replay_is_last = batch.is_last[:, train_start_t:].transpose(0, 1)
-        replay_continues = (1.0 - batch.is_terminal.float()).transpose(0, 1)[
-            train_start_t:
-        ]
-        replay_continues = replay_continues * (1.0 - replay_is_last.float())
-        replay_continues = replay_continues * (
-            1.0 - 1.0 / float(max(1, getattr(config, "horizon", 333)))
-        )
-        replay_mask = batch.mask[:, train_start_t:].transpose(0, 1)
-
-        next_return = torch.zeros(B, device=device, dtype=replay_rewards.dtype)
-        returns_reversed = []
-        for t in reversed(range(effective_train_steps)):
-            next_return = replay_rewards[t] + gamma * replay_continues[t] * next_return
-            returns_reversed.append(next_return)
-        replay_mc_returns = torch.stack(list(reversed(returns_reversed)), dim=0)
-
         replay_logits = critic(replay_posterior.detach())
         logits_flat = replay_logits.reshape(-1, replay_logits.size(-1))
-        targets_flat = replay_mc_returns.transpose(0, 1).detach().reshape(-1)
-        mask_flat = replay_mask.transpose(0, 1).reshape(-1).float()
+        targets_flat = (
+            batch.future_returns[:, train_start_t:].detach().reshape(-1)
+        )
+        mask_flat = batch.mask[:, train_start_t:].reshape(-1).float()
         targets_twohot = twohot_encode(targets_flat, bins)
         per_step_ce = -torch.sum(
             targets_twohot * F.log_softmax(logits_flat, dim=-1), dim=-1
@@ -529,16 +963,36 @@ def dreamer_step(
         metrics.replay_mc_loss = (per_step_ce * mask_flat).sum() / (
             mask_flat.sum() + 1e-8
         )
-        total_critic_loss = total_critic_loss + (
-            critic_real_return_scale * metrics.replay_mc_loss
+        total_critic_loss = add_sequence_mean_auxiliary_loss(
+            total_critic_loss,
+            metrics.replay_mc_loss,
+            critic_real_return_scale,
+            effective_train_steps,
         )
 
     assert total_wm_loss is not None and total_actor_loss is not None and total_critic_loss is not None
+    (
+        total_wm_loss,
+        total_actor_loss,
+        total_critic_loss,
+        replay_representation_loss,
+    ) = normalize_sequence_losses(
+        total_wm_loss,
+        total_actor_loss,
+        total_critic_loss,
+        replay_length=T,
+        imagination_starts=effective_train_steps,
+        replay_representation_loss=replay_representation_loss,
+    )
 
     return ForwardResult(
         total_wm_loss=total_wm_loss,
         total_actor_loss=total_actor_loss,
         total_critic_loss=total_critic_loss,
         metrics=metrics,
-        last_lambda_returns=last_lambda_returns,
+        replay_representation_loss=replay_representation_loss,
+        return_scale=next_return_scale,
+        ret_lo=next_ret_lo,
+        ret_hi=next_ret_hi,
+        continuation_terminal_ema=next_continuation_terminal_ema,
     )

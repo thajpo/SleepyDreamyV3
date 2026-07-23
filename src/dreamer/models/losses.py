@@ -3,7 +3,7 @@
 import torch
 import torch.nn.functional as F
 
-from .math_utils import symlog, twohot_encode, unimix_logits
+from .math_utils import symlog, twohot_encode, twohot_expectation, unimix_logits
 
 
 def _free_bits_straight_through(raw_kl, free_bits):
@@ -25,6 +25,7 @@ def compute_wm_loss(
     device,
     use_pixels=True,
     sample_mask=None,
+    continue_loss_weights=None,
 ):
     """
     Compute world model loss combining prediction, dynamics, and representation losses.
@@ -39,9 +40,11 @@ def compute_wm_loss(
         posterior_logits: Raw posterior logits from world model (B, num_latents, num_classes)
         prior_logits: Prior logits from dynamics model
         B: Bin tensor for twohot encoding
-        config: Config object with beta coefficients
+        config: Config object with beta, continuation-discount, and free-bits settings
         device: Torch device
         use_pixels: Whether to compute pixel loss
+        sample_mask: Optional validity mask for padded replay rows
+        continue_loss_weights: Optional per-row continuation supervision weights
 
     Returns:
         Tuple of (total_loss, loss_dict) where loss_dict contains individual components
@@ -70,8 +73,16 @@ def compute_wm_loss(
         # vector observations and the raw target is squashed inside the loss.
         obs_pred = state_pred
         obs_target = symlog(state_target)
-        pred_loss_vector = 1 / 2 * (obs_pred - obs_target) ** 2
-        pred_loss_vector = pred_loss_vector.mean(dim=-1)  # (B,)
+        squared_error = (obs_pred - obs_target) ** 2
+        state_loss_mode = getattr(
+            config, "state_loss_mode", "legacy_half_mean"
+        )
+        if state_loss_mode == "legacy_half_mean":
+            pred_loss_vector = 0.5 * squared_error.mean(dim=-1)
+        elif state_loss_mode == "reference_sum":
+            pred_loss_vector = squared_error.sum(dim=-1)
+        else:
+            raise ValueError(f"unsupported state_loss_mode: {state_loss_mode!r}")
     else:
         pred_loss_vector = torch.zeros(
             reward_t.shape[0], device=device, dtype=reward_t.dtype
@@ -107,6 +118,8 @@ def compute_wm_loss(
     pred_loss_continue = F.binary_cross_entropy_with_logits(
         continue_logits, continue_target, reduction="none"
     ).squeeze(-1)  # (B,)
+    if continue_loss_weights is not None:
+        pred_loss_continue = pred_loss_continue * continue_loss_weights
 
     # Prediction loss is the sum of the individual losses
     l_pred = pred_loss_pixel + pred_loss_vector + reward_loss + pred_loss_continue
@@ -141,7 +154,7 @@ def compute_wm_loss(
         (posterior_probs * (log_posterior - log_prior_sg)).sum(dim=-1).sum(dim=-1)
     )  # (B,)
 
-    if bool(getattr(config, "free_bits_straight_through", True)):
+    if bool(getattr(config, "free_bits_straight_through", False)):
         # Straight-through free bits:
         # - Forward value matches max(free_bits, raw_kl) for logging/loss scale.
         # - Backward pass still trains the prior/posterior when raw KL is below
@@ -198,6 +211,9 @@ def compute_actor_critic_losses(
     dreamed_values_logits_ema=None,
     critic_ema_coef=1.0,
     sample_mask=None,
+    actor_baseline_values=None,
+    start_continue_logits=None,
+    critic_ema_target="distribution",
 ):
     """
     Compute actor and critic losses for policy gradient training.
@@ -216,6 +232,15 @@ def compute_actor_critic_losses(
         normalize_advantages: Center and scale advantages within the imagined batch
         dreamed_values_logits_ema: Logits from EMA critic (for regularization)
         critic_ema_coef: Coefficient for EMA regularization
+        sample_mask: Optional validity mask for imagined starts
+        actor_baseline_values: Selected detached baseline values; online by
+            default, or slow-critic values for historical semantics
+        start_continue_logits: Optional continuation logits for the observed
+            replay starts. When provided, their detached probabilities weight
+            the entire imagined loss trajectory, matching DreamerV3.
+        critic_ema_target: Slow-value regularizer target contract. Historical
+            runs copy the full distribution; reference semantics decode the
+            slow scalar and re-encode it as ``mean_twohot``.
 
     Returns:
         Tuple of (actor_loss, critic_loss, entropy)
@@ -226,7 +251,15 @@ def compute_actor_critic_losses(
     continue_probs = torch.sigmoid(dreamed_continues).detach()
     discount = gamma * continue_probs
     # Weight timestep t by product_{i < t} (gamma * continue_i), matching Dreamer weighting.
-    weight_prefix = torch.ones(1, Bsz, device=discount.device, dtype=discount.dtype)
+    if start_continue_logits is None:
+        weight_prefix = torch.ones(
+            1, Bsz, device=discount.device, dtype=discount.dtype
+        )
+    else:
+        weight_prefix = (
+            torch.sigmoid(start_continue_logits).detach().reshape(1, Bsz)
+        )
+        weight_prefix = weight_prefix.to(device=discount.device, dtype=discount.dtype)
     if H > 1:
         weights = torch.cumprod(torch.cat([weight_prefix, discount[:-1]], dim=0), dim=0)
     else:
@@ -254,18 +287,15 @@ def compute_actor_critic_losses(
     else:
         critic_loss = per_step_ce.mean()
 
-    # --- Critic EMA Regularizer (Distributional) ---
+    # --- Slow critic regularizer ---
     if dreamed_values_logits_ema is not None:
         ema_logits_train = dreamed_values_logits_ema[:H_train]
         ema_logits_flat = ema_logits_train.view(-1, num_bins).detach()
-
-        # Target distribution from EMA critic
-        ema_probs = F.softmax(ema_logits_flat, dim=-1)
-
-        # Cross-entropy: -sum(P_ema * log(P_current))
-        # Note: P_ema is fixed target (detached), P_current has gradients
-        per_step_ema = -torch.sum(
-            ema_probs * F.log_softmax(dreamed_values_logits_flat, dim=-1), dim=-1
+        per_step_ema = slow_value_regularizer_loss(
+            dreamed_values_logits_flat,
+            ema_logits_flat,
+            B,
+            target_mode=critic_ema_target,
         ).view(H_train, Bsz)
         per_step_ema = per_step_ema * weights[:H_train]
         if sample_mask is not None:
@@ -277,11 +307,103 @@ def compute_actor_critic_losses(
         critic_loss += critic_ema_coef * ema_reg_loss
     # -----------------------------------------------
 
-    # Actor Loss: Policy gradient with lambda returns as advantage. DreamerV3
-    # normalizes advantages; without centering, CartPole's mostly +1 imagined
-    # rewards can reinforce arbitrary early samples and collapse entropy.
-    dreamed_values_train = dreamed_values[:H_train]
-    advantage = ((lambda_returns_train - dreamed_values_train) / max(1, S)).detach()
+    actor_loss, entropy = compute_reinforce_actor_loss(
+        dreamed_values,
+        lambda_returns,
+        dreamed_continues,
+        dreamed_actions_logits,
+        dreamed_actions_sampled,
+        S,
+        gamma,
+        actor_entropy_coef=actor_entropy_coef,
+        normalize_advantages=normalize_advantages,
+        sample_mask=sample_mask,
+        actor_baseline_values=actor_baseline_values,
+        start_continue_logits=start_continue_logits,
+    )
+
+    return actor_loss, critic_loss, entropy
+
+
+def slow_value_regularizer_targets(
+    slow_logits: torch.Tensor,
+    bins: torch.Tensor,
+    *,
+    target_mode: str,
+) -> torch.Tensor:
+    """Build the detached slow-value target under either semantic contract."""
+    detached_logits = slow_logits.detach()
+    if target_mode == "distribution":
+        return F.softmax(detached_logits, dim=-1)
+    if target_mode == "mean_twohot":
+        slow_values = twohot_expectation(detached_logits, bins)
+        flat_targets = twohot_encode(slow_values.reshape(-1), bins)
+        return flat_targets.view_as(detached_logits)
+    raise ValueError(f"unsupported critic EMA target mode: {target_mode!r}")
+
+
+def slow_value_regularizer_loss(
+    online_logits: torch.Tensor,
+    slow_logits: torch.Tensor,
+    bins: torch.Tensor,
+    *,
+    target_mode: str,
+) -> torch.Tensor:
+    """Return per-example cross-entropy for the selected slow-value target."""
+    targets = slow_value_regularizer_targets(
+        slow_logits, bins, target_mode=target_mode
+    )
+    return -torch.sum(targets * F.log_softmax(online_logits, dim=-1), dim=-1)
+
+
+def compute_reinforce_actor_loss(
+    dreamed_values,
+    lambda_returns,
+    dreamed_continues,
+    dreamed_actions_logits,
+    dreamed_actions_sampled,
+    S,
+    gamma,
+    actor_entropy_coef=0.003,
+    normalize_advantages=True,
+    sample_mask=None,
+    actor_baseline_values=None,
+    start_continue_logits=None,
+):
+    """Compute the discrete REINFORCE loss for one imagined start batch."""
+    H, Bsz = lambda_returns.shape[:2]
+    H_train = max(1, H)
+    continue_probs = torch.sigmoid(dreamed_continues).detach()
+    discount = gamma * continue_probs
+    if start_continue_logits is None:
+        weight_prefix = torch.ones(
+            1, Bsz, device=discount.device, dtype=discount.dtype
+        )
+    else:
+        weight_prefix = (
+            torch.sigmoid(start_continue_logits).detach().reshape(1, Bsz)
+        )
+        weight_prefix = weight_prefix.to(device=discount.device, dtype=discount.dtype)
+    if H > 1:
+        weights = torch.cumprod(
+            torch.cat([weight_prefix, discount[:-1]], dim=0), dim=0
+        )
+    else:
+        weights = weight_prefix
+
+    # DreamerV3 divides returns by a running percentile span. The optional
+    # per-batch z-score is retained for historical configurations, but the
+    # source-conforming default leaves it disabled.
+    lambda_returns_train = lambda_returns[:H_train]
+    baseline_values = (
+        dreamed_values
+        if actor_baseline_values is None
+        else actor_baseline_values
+    )
+    baseline_values_train = baseline_values[:H_train]
+    advantage = (
+        (lambda_returns_train - baseline_values_train) / max(1, S)
+    ).detach()
     if normalize_advantages:
         if sample_mask is not None:
             valid = sample_mask.bool().view(1, Bsz).expand_as(advantage)
@@ -310,7 +432,7 @@ def compute_actor_critic_losses(
         actor_loss = per_step_actor.mean()
         entropy = entropy.mean()
 
-    return actor_loss, critic_loss, entropy
+    return actor_loss, entropy
 
 
 def compute_q_actor_critic_losses(
