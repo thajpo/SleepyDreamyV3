@@ -187,6 +187,9 @@ class Config:
     # Episode preserves historical replay snapshots. Authored Hydra runs use
     # reference-style per-collector streams that can cross reset boundaries.
     replay_sequence_mode: str = "episode"  # episode, stream
+    # Pinned replay presents each new non-overlapping stream sequence once
+    # before falling back to its uniform selector. Historical runs did not.
+    online_replay: bool = False
 
     # ===== Training: replay ratio gating =====
     replay_ratio: float = 1.0
@@ -342,6 +345,8 @@ def validate_config(cfg: Config) -> None:
         errors.append("min_buffer_episodes cannot exceed replay_buffer_size")
     if cfg.replay_sequence_mode not in {"episode", "stream"}:
         errors.append("replay_sequence_mode must be 'episode' or 'stream'")
+    if cfg.online_replay and cfg.replay_sequence_mode != "stream":
+        errors.append("online_replay requires replay_sequence_mode='stream'")
     if cfg.replay_ratio <= 0:
         errors.append("replay_ratio must be > 0")
     if not 0.0 <= cfg.recent_fraction <= 1.0:

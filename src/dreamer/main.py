@@ -266,6 +266,7 @@ def resolve_resume_config(
                 checkpoint_config.weight_imagination_starts
             ),
             replay_sequence_mode=checkpoint_config.replay_sequence_mode,
+            online_replay=checkpoint_config.online_replay,
             actor_warmup_steps=checkpoint_config.actor_warmup_steps,
             actor_unimix=checkpoint_config.actor_unimix,
         )
@@ -328,6 +329,7 @@ def resolve_resume_config(
         contdisc=True,
         weight_imagination_starts=False,
         replay_sequence_mode="episode",
+        online_replay=False,
         actor_warmup_steps=0,
         actor_unimix=0.01,
     )

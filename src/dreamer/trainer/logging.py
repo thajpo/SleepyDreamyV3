@@ -48,6 +48,10 @@ class StepMetrics:
     replay_loss: Optional[torch.Tensor] = None
     replay_ema_reg: Optional[torch.Tensor] = None
     replay_mc_loss: Optional[torch.Tensor] = None
+    replay_online_fraction: Optional[float] = None
+    replay_online_fraction_cumulative: Optional[float] = None
+    replay_online_queue_size: Optional[int] = None
+    replay_online_descriptors_dropped: Optional[int] = None
     gradient_alignment: dict[str, float] = field(default_factory=dict)
     viz_data: Optional[dict[str, torch.Tensor]] = None
 
@@ -194,6 +198,22 @@ def log_step_metrics(
                 m["loss/critic/replay_ema_reg"] = float(metrics.replay_ema_reg.item())
             if metrics.replay_mc_loss is not None:
                 m["loss/critic/replay_mc_return"] = float(metrics.replay_mc_loss.item())
+            if metrics.replay_online_fraction is not None:
+                m["replay/online_sequence_fraction"] = float(
+                    metrics.replay_online_fraction
+                )
+            if metrics.replay_online_fraction_cumulative is not None:
+                m["replay/online_sequence_fraction_cumulative"] = float(
+                    metrics.replay_online_fraction_cumulative
+                )
+            if metrics.replay_online_queue_size is not None:
+                m["replay/online_queue_size"] = float(
+                    metrics.replay_online_queue_size
+                )
+            if metrics.replay_online_descriptors_dropped is not None:
+                m["replay/online_descriptors_dropped"] = float(
+                    metrics.replay_online_descriptors_dropped
+                )
 
             pixel = wm_cpu["prediction_pixel"] * norm
             state = wm_cpu["prediction_vector"] * norm

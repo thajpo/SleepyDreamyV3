@@ -96,6 +96,7 @@ class EpisodeReplayBuffer:
         compute_future_returns=False,
         throttle_collection=False,
         sequence_mode="episode",
+        online_replay=False,
     ):
         """
         Args:
@@ -109,6 +110,8 @@ class EpisodeReplayBuffer:
                 the startup population is ready
             sequence_mode: ``episode`` for historical contained windows or
                 ``stream`` for per-collector windows that cross episode resets
+            online_replay: Prefer each new non-overlapping stream sequence once
+                before filling batches from the configured replay selector.
         """
         self.data_queue = data_queue
         self.max_episodes = max_episodes
@@ -120,6 +123,9 @@ class EpisodeReplayBuffer:
         self.sequence_mode = str(sequence_mode)
         if self.sequence_mode not in {"episode", "stream"}:
             raise ValueError("sequence_mode must be 'episode' or 'stream'")
+        self.online_replay = bool(online_replay)
+        if self.online_replay and self.sequence_mode != "stream":
+            raise ValueError("online_replay requires sequence_mode='stream'")
 
         self.buffer = deque(maxlen=max_episodes)
         self.lock = threading.Lock()
@@ -134,6 +140,17 @@ class EpisodeReplayBuffer:
         self._max_sequence_length = 256  # Cap for adaptive growth
         self._env_step_budget: float | None = None
         self._last_episode_id: dict[int, int] = defaultdict(lambda: -1)
+        # Keep only tiny stream-position descriptors, never copied observations.
+        # The cap prevents an unconsumed startup/backpressure queue from scaling
+        # without bound while remaining far above the expected live backlog.
+        self._online_queue = deque(maxlen=max_episodes * max(1, sequence_length))
+        self._online_pending_start: dict[int, tuple[int, int, int]] = {}
+        self._online_pending_length: dict[int, int] = defaultdict(int)
+        self._online_last_episode_id: dict[int, int] = {}
+        self._online_descriptors_dropped = 0
+        self._online_samples = 0
+        self._sequence_samples = 0
+        self._last_online_sample_fraction = 0.0
 
     def start(self):
         """Start background queue draining thread."""
@@ -241,6 +258,10 @@ class EpisodeReplayBuffer:
         with self._budget_changed:
             was_ready = self.ready_event.is_set()
             self.buffer.append(stored_episode)
+            if self.online_replay:
+                self._enqueue_online_sequences(
+                    collector_id, episode_id, len(states)
+                )
             self._episodes_added += 1
             self._total_steps += ep_len
             self._recent_ep_lengths.append(ep_len)
@@ -376,6 +397,116 @@ class EpisodeReplayBuffer:
                 segments.append(current)
         return segments
 
+    def _episode_lookup(self):
+        return {
+            (int(episode[8]), int(episode[9])): episode
+            for episode in self.buffer
+        }
+
+    def _advance_stream_position(
+        self, position: tuple[int, int, int], steps: int
+    ) -> tuple[int, int, int]:
+        """Advance a same-collector descriptor across consecutive episodes."""
+        collector_id, episode_id, offset = position
+        lookup = self._episode_lookup()
+        remaining = int(steps)
+        while remaining > 0:
+            episode = lookup.get((collector_id, episode_id))
+            if episode is None:
+                raise RuntimeError("online replay position is outside stored stream")
+            available = len(episode[1]) - offset
+            if remaining < available:
+                return collector_id, episode_id, offset + remaining
+            remaining -= available
+            episode_id += 1
+            offset = 0
+        return collector_id, episode_id, offset
+
+    def _enqueue_online_sequences(
+        self, collector_id: int, episode_id: int, episode_length: int
+    ) -> None:
+        """Register each new non-overlapping sequence exactly once."""
+        previous_id = self._online_last_episode_id.get(collector_id)
+        if previous_id is None or episode_id != previous_id + 1:
+            self._online_pending_start[collector_id] = (
+                collector_id,
+                episode_id,
+                0,
+            )
+            self._online_pending_length[collector_id] = 0
+
+        pending = self._online_pending_length[collector_id] + int(episode_length)
+        start = self._online_pending_start[collector_id]
+        while pending >= self.sequence_length:
+            if len(self._online_queue) == self._online_queue.maxlen:
+                self._online_descriptors_dropped += 1
+            self._online_queue.append(start)
+            start = self._advance_stream_position(start, self.sequence_length)
+            pending -= self.sequence_length
+        self._online_pending_start[collector_id] = start
+        self._online_pending_length[collector_id] = pending
+        self._online_last_episode_id[collector_id] = episode_id
+
+    def _compose_stream_pieces(self, pieces):
+        """Assemble aligned replay fields from consecutive episode slices."""
+        def concatenate(field):
+            if pieces[0][0][field] is None:
+                return None
+            values = [episode[field][start:stop] for episode, start, stop in pieces]
+            return np.concatenate(values, axis=0)
+
+        is_first_parts = []
+        for _episode, start, stop in pieces:
+            part = np.zeros(stop - start, dtype=np.bool_)
+            if start == 0:
+                part[0] = True
+            is_first_parts.append(part)
+        is_first = np.concatenate(is_first_parts)
+        # Every sampled sequence starts with a zero carry. Preserve additional
+        # true episode boundaries inside the sequence.
+        is_first[0] = True
+        return (
+            concatenate(0),
+            concatenate(1),
+            concatenate(2),
+            concatenate(3),
+            concatenate(4),
+            concatenate(5),
+            concatenate(7),
+            np.ones(self.sequence_length, dtype=np.float32),
+            np.ones(self.sequence_length, dtype=np.float32),
+            is_first,
+        )
+
+    def _sample_stream_position(self, position):
+        """Resolve an online descriptor, returning None after eviction or a gap."""
+        collector_id, episode_id, offset = position
+        lookup = self._episode_lookup()
+        remaining = self.sequence_length
+        pieces = []
+        while remaining:
+            episode = lookup.get((collector_id, episode_id))
+            if episode is None:
+                return None
+            available = len(episode[1]) - offset
+            if available <= 0:
+                return None
+            used = min(remaining, available)
+            pieces.append((episode, offset, offset + used))
+            remaining -= used
+            episode_id += 1
+            offset = 0
+        return self._compose_stream_pieces(pieces)
+
+    def _take_online_stream_samples(self, count: int):
+        samples = []
+        while self._online_queue and len(samples) < count:
+            descriptor = self._online_queue.popleft()
+            sample = self._sample_stream_position(descriptor)
+            if sample is not None:
+                samples.append(sample)
+        return samples
+
     def _stream_start_candidates(self):
         """Enumerate episode-local ranges containing every valid stream start."""
         candidates = []
@@ -414,33 +545,7 @@ class EpisodeReplayBuffer:
             episode_index += 1
             offset = 0
 
-        def concatenate(field):
-            if pieces[0][0][field] is None:
-                return None
-            values = [episode[field][start:stop] for episode, start, stop in pieces]
-            return np.concatenate(values, axis=0)
-
-        is_first_parts = []
-        for _episode, start, stop in pieces:
-            part = np.zeros(stop - start, dtype=np.bool_)
-            if start == 0:
-                part[0] = True
-            is_first_parts.append(part)
-        is_first = np.concatenate(is_first_parts)
-        # Sampled carries always begin at zero, even for a mid-episode start.
-        is_first[0] = True
-        return (
-            concatenate(0),
-            concatenate(1),
-            concatenate(2),
-            concatenate(3),
-            concatenate(4),
-            concatenate(5),
-            concatenate(7),
-            np.ones(self.sequence_length, dtype=np.float32),
-            np.ones(self.sequence_length, dtype=np.float32),
-            is_first,
-        )
+        return self._compose_stream_pieces(pieces)
 
     def _sample_stream(self, batch_size, recent_fraction, candidates=None):
         if candidates is None:
@@ -448,8 +553,14 @@ class EpisodeReplayBuffer:
         if not candidates:
             raise RuntimeError("replay stream has no complete sequence")
 
-        n_recent = int(batch_size * recent_fraction)
-        n_uniform = batch_size - n_recent
+        online_samples = (
+            self._take_online_stream_samples(batch_size)
+            if self.online_replay
+            else []
+        )
+        remaining_batch = batch_size - len(online_samples)
+        n_recent = int(remaining_batch * recent_fraction)
+        n_uniform = remaining_batch - n_recent
         recent_start = len(self.buffer) - max(1, len(self.buffer) // 5)
         recent = [item for item in candidates if item[3] >= recent_start]
         if not recent:
@@ -472,7 +583,13 @@ class EpisodeReplayBuffer:
                     k=n_uniform,
                 )
             )
-        return [self._sample_stream_subsequence(item) for item in selected]
+        selector_samples = [
+            self._sample_stream_subsequence(item) for item in selected
+        ]
+        self._online_samples += len(online_samples)
+        self._sequence_samples += batch_size
+        self._last_online_sample_fraction = len(online_samples) / batch_size
+        return online_samples + selector_samples
 
     def sample(self, batch_size, recent_fraction=0.0):
         """
@@ -648,6 +765,32 @@ class EpisodeReplayBuffer:
         """Total environment steps collected (for replay ratio gating)."""
         with self.lock:
             return self._total_steps
+
+    @property
+    def last_online_sample_fraction(self) -> float:
+        """Fraction of the most recent sequence batch supplied by online FIFO."""
+        with self.lock:
+            return self._last_online_sample_fraction
+
+    @property
+    def online_sample_fraction(self) -> float:
+        """Cumulative fraction of sampled sequences supplied by online FIFO."""
+        with self.lock:
+            if self._sequence_samples == 0:
+                return 0.0
+            return self._online_samples / self._sequence_samples
+
+    @property
+    def online_queue_size(self) -> int:
+        """Number of bounded online descriptors awaiting first consumption."""
+        with self.lock:
+            return len(self._online_queue)
+
+    @property
+    def online_descriptors_dropped(self) -> int:
+        """Descriptors discarded only because the bounded FIFO was already full."""
+        with self.lock:
+            return self._online_descriptors_dropped
 
     @property
     def recent_avg_episode_length(self):

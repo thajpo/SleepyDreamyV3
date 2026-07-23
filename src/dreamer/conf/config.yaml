@@ -164,6 +164,8 @@ train:
   replay_burn_in: 8
   # Reference-style same-collector windows may cross consecutive episode resets.
   replay_sequence_mode: stream
+  # Present each new non-overlapping stream sequence once before uniform replay.
+  online_replay: true
 
   # Replay ratio gating (DreamerV3 paper)
   replay_ratio: 1.0  # replayed non-burn-in transitions per raw env frame

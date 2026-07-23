@@ -198,6 +198,7 @@ class WorldModelTrainer:
             compute_future_returns=config.critic_real_return_scale > 0.0,
             throttle_collection=True,
             sequence_mode=config.replay_sequence_mode,
+            online_replay=config.online_replay,
         )
 
         self.batch_size = config.batch_size
@@ -379,6 +380,16 @@ class WorldModelTrainer:
 
             do_log_images = self.train_step % self.image_log_every == 0
             metrics = create_step_metrics(self.device, do_log_images)
+            metrics.replay_online_fraction = (
+                self.replay_buffer.last_online_sample_fraction
+            )
+            metrics.replay_online_fraction_cumulative = (
+                self.replay_buffer.online_sample_fraction
+            )
+            metrics.replay_online_queue_size = self.replay_buffer.online_queue_size
+            metrics.replay_online_descriptors_dropped = (
+                self.replay_buffer.online_descriptors_dropped
+            )
 
             # Initialize loss variables in case loop doesn't execute
             t0 = time.perf_counter()

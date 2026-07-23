@@ -25,6 +25,7 @@ def test_hydra_yaml_defines_every_runtime_field():
     assert runtime_config.vector_encoder_mode == "reference"
     assert runtime_config.posterior_head_layers == 1
     assert runtime_config.replay_sequence_mode == "stream"
+    assert runtime_config.online_replay is True
     assert runtime_config.critic_slow_target is False
     assert runtime_config.critic_ema_target == "mean_twohot"
     assert runtime_config.optimizer_contract == "reference"
@@ -73,6 +74,10 @@ def test_hydra_yaml_defines_every_runtime_field():
             replace(Config(), replay_sequence_mode="mystery"),
             "replay_sequence_mode",
         ),
+        (
+            replace(Config(), online_replay=True, replay_sequence_mode="episode"),
+            "online_replay requires",
+        ),
         (replace(Config(), actor_loss_mode="mystery"), "actor_loss_mode"),
         (
             replace(Config(), gamma=0.95, horizon=333, contdisc=True),
@@ -115,6 +120,7 @@ def test_resume_inherits_historical_checkpoint_semantics(tmp_path):
     snapshot.pop("critic_slow_target")
     snapshot.pop("critic_ema_target")
     snapshot.pop("replay_sequence_mode")
+    snapshot.pop("online_replay")
     snapshot.pop("optimizer_contract")
     snapshot.pop("laprop_bias_correction")
     snapshot.pop("optimizer_warmup_steps")
@@ -136,6 +142,7 @@ def test_resume_inherits_historical_checkpoint_semantics(tmp_path):
             posterior_head_layers=1,
             critic_slow_target=False,
             replay_sequence_mode="stream",
+            online_replay=True,
             laprop_bias_correction=True,
             actor_warmup_steps=0,
             gamma=0.75,
@@ -153,6 +160,7 @@ def test_resume_inherits_historical_checkpoint_semantics(tmp_path):
     assert resumed.critic_slow_target is True
     assert resumed.critic_ema_target == "distribution"
     assert resumed.replay_sequence_mode == "episode"
+    assert resumed.online_replay is False
     assert resumed.optimizer_contract == "legacy"
     assert resumed.laprop_bias_correction is False
     assert resumed.optimizer_warmup_steps == 0
@@ -185,6 +193,8 @@ def test_resume_restores_reference_optimizer_contract_and_rates(tmp_path):
         actor_lr=4e-5,
         critic_lr=4e-5,
         actor_unimix=0.10,
+        replay_sequence_mode="stream",
+        online_replay=True,
     )
     current = replace(
         Config(),
@@ -207,6 +217,8 @@ def test_resume_restores_reference_optimizer_contract_and_rates(tmp_path):
     assert resumed.laprop_bias_correction is True
     assert resumed.optimizer_warmup_steps == 1000
     assert resumed.actor_unimix == 0.10
+    assert resumed.replay_sequence_mode == "stream"
+    assert resumed.online_replay is True
     assert (resumed.wm_lr, resumed.actor_lr, resumed.critic_lr) == (
         4e-5,
         4e-5,
@@ -273,6 +285,7 @@ def test_resume_infers_reference_rssm_core_without_config_snapshot(tmp_path):
     assert resumed.continue_head_layers == 1
     assert resumed.vector_encoder_mode == "reference"
     assert resumed.posterior_head_layers == 1
+    assert resumed.online_replay is False
     assert resumed.laprop_bias_correction is False
     assert (resumed.gamma, resumed.horizon, resumed.contdisc) == (
         0.997,

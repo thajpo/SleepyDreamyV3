@@ -5679,3 +5679,94 @@ architecture cleanup, but it is rejected as the next training intervention
 and does not explain the observed collapse. No epsilon canary is launched. The
 investigation returns to the source equations that construct and optimize the
 online policy-conditioned value target.
+
+### Pinned online-replay FIFO audit
+
+The earlier uniform-replay canary isolated `recency: 0.0`, but it did not
+replicate the pinned selector's second path. Official replay is configured with
+`online: True`. In addition to inserting every overlapping start into the
+uniform selector, it enqueues one newly completed start every sequence length
+per worker and consumes that FIFO before uniform samples. Each non-overlapping
+fresh sequence is therefore presented once promptly, without reserving a fixed
+fraction of all later batches for a broad "newest episode" pool.
+
+The local `recent_fraction=0` path has only the uniform selector. Under the
+frozen CartPole pacing, each update trains on eight 16-row sequences and admits
+about six new environment rows. The pinned online rule should therefore supply
+roughly `6 / (16 * 8) = 4.7%` of sampled sequences after startup, whereas the
+matched recent-biased run forced one of eight rows from its newest pool and the
+uniform run guaranteed none. This is a smaller and qualitatively different
+freshness mechanism. It is also consistent with the one-seed observation that
+the recent-biased baseline remained solved while fully uniform replay
+collapsed; that comparison does not prove freshness is causal.
+
+#### Preregistered online-FIFO conformance canary
+
+- **Hypothesis:** uniform replay without the pinned online FIFO delays each new
+  policy corridor's first value/model updates enough for actor collection and
+  self-bootstrapped targets to move apart. Presenting every non-overlapping new
+  sequence once before uniform reuse will preserve acquisition while reducing
+  the solved-to-collapsed transition.
+- **Causal variable:** add checkpointed `online_replay` semantics. Authored
+  stream runs enqueue one non-overlapping length-`T` descriptor per collector
+  stream and consume valid FIFO entries before filling the remainder of the
+  batch uniformly. Entries invalidated by FIFO episode eviction are skipped.
+  Historical/missing snapshots retain `online_replay=false`. Keep explicit
+  recency at zero and do not change replay capacity, ratio, collection pacing,
+  batch/sequence shape, model, losses, optimizer, actor support, or evaluation.
+- **Local delivery limitation:** the pinned replay receives rows continuously;
+  the local collector publishes complete episodes so new descriptors become
+  visible in an episode-boundary burst. The selector will preserve FIFO
+  priority and exactly-once non-overlapping coverage once rows are available,
+  and telemetry will report the realized online fraction. This can test the
+  missing guarantee inside the current runtime, but it is not evidence of
+  identical row-level timing.
+- **Mechanical gate:** prove exact non-overlapping descriptors across episode
+  boundaries, reset and field alignment, gap reset, online-before-uniform
+  selection, exactly-once consumption, safe eviction skips, uniform fallback,
+  bounded descriptor memory, authored config selection, historical fallback,
+  resume preservation, and realized-fraction telemetry. Then run focused/full
+  tests, compile/type checks, and the supported one-update multiprocess smoke.
+- **Frozen run:** repeat the uniform seed-0 3,500-update contract exactly:
+  `d_hidden=128`, four blocks, batch 8, sequence 16, burn-in 4, replay ratio 16,
+  capacity 512 episodes, minimum 16, one collector, 15-step dreams, equal
+  `4e-5` rates with 1,000-step warmup, actor unimix `0.01`, entropy `0.001`,
+  online value targets, 20 deterministic evaluations every 100 updates, and
+  checkpoints every 500. Require a final realized online-sequence fraction
+  between `3%` and `7%` so the intended mechanism actually operated.
+- **Behavioral and boundary gates:** reach return 475 and never fall below 300
+  afterward, finish at least 400, and keep best-to-final gap at most 100. Then
+  rerun the fixed update-2,000 recovery histories at update 2,500 and final;
+  require at least 100 actionable states and non-constant posterior-critic or
+  full-dream balanced accuracy above `0.60`, unless behavior passes and both
+  trusted action classes are clearly retained relative to the uniform run.
+- **Stop rule:** one seed. Failure rejects the missing online FIFO as a
+  sufficient stability mechanism. Do not tune an online fraction, restore
+  fixed recency, expand replay, or add seeds from a failed gate.
+
+#### Online-FIFO mechanical gate result
+
+The implementation gate is complete. Online entries are bounded descriptors
+of `(collector, episode, offset)`, not copied state or pixel tensors. Each
+collector maintains a non-overlapping stream cursor across consecutive episode
+IDs; a gap resets only that cursor. Sampling resolves descriptors against the
+current replay contents, preserves reset/action/reward/terminal alignment,
+skips entries invalidated by episode FIFO eviction, consumes online entries
+before selector entries, and falls back to the unchanged uniform/recent
+selector for the rest of the batch. Queue overflow is bounded and counted.
+
+Authored Hydra runs now select `online_replay=true` together with stream replay.
+Historical dataclass defaults, missing snapshot fields, and snapshot-less
+checkpoint inference retain false; resume restores either authored value and
+an incompatible episode/online combination is rejected before side effects.
+Per-batch and cumulative online fractions, current descriptor backlog, and
+overflow count are logged so a long run can prove that the mechanism operated
+without hidden queue growth.
+
+Focused replay/config/resume tests passed (`59`), the full fast suite passed
+(`237`), source/test/script compilation passed, and the supported scoped
+Pyright gate reported zero errors. The canonical one-update multiprocess CPU
+smoke composed stream plus online replay, consumed its startup population,
+published model version zero, stopped the collector, and exited normally. No
+long run has started during the mechanical gate; the frozen seed-0 canary above
+is the next experiment.

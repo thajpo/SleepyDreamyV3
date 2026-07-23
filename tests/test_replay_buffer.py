@@ -213,6 +213,105 @@ def test_stream_default_sampling_is_uniform_over_every_valid_start(monkeypatch):
     assert calls == [(candidates, [item[2] for item in candidates], 4)]
 
 
+def test_stream_online_fifo_precedes_uniform_and_consumes_each_sequence_once(
+    monkeypatch,
+):
+    replay = EpisodeReplayBuffer(
+        data_queue=None,
+        max_episodes=10,
+        min_episodes=1,
+        sequence_length=3,
+        sequence_mode="stream",
+        online_replay=True,
+    )
+    replay.add_episode((*_episode(4, marker=10.0), 0, 1))
+    replay.add_episode((*_episode(4, marker=20.0), 0, 2))
+
+    assert replay.online_queue_size == 2
+    online = replay.sample(batch_size=2)
+
+    assert np.array_equal(online[0][1][:, 0], np.array([10, 10, 10]))
+    assert np.array_equal(online[1][1][:, 0], np.array([10, 20, 20]))
+    assert np.array_equal(online[1][9], np.array([True, True, False]))
+    assert replay.online_queue_size == 0
+    assert replay.last_online_sample_fraction == pytest.approx(1.0)
+    assert replay.online_sample_fraction == pytest.approx(1.0)
+
+    calls = []
+
+    def choose(population, *, weights, k):
+        calls.append((list(population), list(weights), k))
+        return [population[-1]] * k
+
+    monkeypatch.setattr("dreamer.runtime.replay_buffer.random.choices", choose)
+    replay.sample(batch_size=2)
+    assert calls and calls[0][2] == 2
+    assert replay.last_online_sample_fraction == pytest.approx(0.0)
+    assert replay.online_sample_fraction == pytest.approx(0.5)
+
+
+def test_stream_online_fifo_resets_nonoverlap_alignment_at_episode_gap():
+    replay = EpisodeReplayBuffer(
+        data_queue=None,
+        max_episodes=10,
+        min_episodes=1,
+        sequence_length=3,
+        sequence_mode="stream",
+        online_replay=True,
+    )
+    replay.add_episode((*_episode(2, marker=1.0), 0, 1))
+    replay.add_episode((*_episode(3, marker=3.0), 0, 3))
+
+    assert replay.online_queue_size == 1
+    sample = replay.sample(batch_size=1)[0]
+    assert np.array_equal(sample[1][:, 0], np.array([3, 3, 3]))
+
+
+def test_stream_online_fifo_skips_descriptor_invalidated_by_eviction():
+    replay = EpisodeReplayBuffer(
+        data_queue=None,
+        max_episodes=1,
+        min_episodes=1,
+        sequence_length=3,
+        sequence_mode="stream",
+        online_replay=True,
+    )
+    replay.add_episode((*_episode(3, marker=1.0), 0, 1))
+    replay.add_episode((*_episode(3, marker=2.0), 0, 2))
+
+    sample = replay.sample(batch_size=1)[0]
+    assert np.array_equal(sample[1][:, 0], np.array([2, 2, 2]))
+    assert replay.online_queue_size == 0
+
+
+def test_online_replay_requires_stream_mode():
+    with pytest.raises(ValueError, match="online_replay requires"):
+        EpisodeReplayBuffer(
+            data_queue=None,
+            max_episodes=1,
+            min_episodes=1,
+            sequence_length=3,
+            sequence_mode="episode",
+            online_replay=True,
+        )
+
+
+def test_stream_online_descriptor_queue_is_bounded():
+    replay = EpisodeReplayBuffer(
+        data_queue=None,
+        max_episodes=1,
+        min_episodes=1,
+        sequence_length=3,
+        sequence_mode="stream",
+        online_replay=True,
+    )
+    for episode_id in range(1, 5):
+        replay.add_episode((*_episode(3, marker=float(episode_id)), 0, episode_id))
+
+    assert replay.online_queue_size == 3
+    assert replay.online_descriptors_dropped == 1
+
+
 def test_stream_crosses_reset_with_aligned_fields_and_unit_weights(monkeypatch):
     replay = EpisodeReplayBuffer(
         data_queue=None,
