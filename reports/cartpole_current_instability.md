@@ -5852,3 +5852,92 @@ The evidence-selected next direction remains the construction and optimization
 of the online policy-conditioned value target. Do not tune online fraction,
 add recency, expand replay, or launch additional FIFO seeds before auditing
 that boundary against the pinned implementation.
+
+### Continuous replay-delivery audit
+
+The online-FIFO result exposed a timing mismatch that its original selector
+audit explicitly left unresolved. Pinned Dreamer replay receives every
+environment row through `Replay.add()` and enqueues each new non-overlapping
+sequence as soon as its final row exists. The local collector instead sends one
+queue item only after the whole episode terminates. Replay throttling also
+accounts for that item only after receipt and intentionally permits one item of
+collection debt. This means the local selector can realize the correct average
+online fraction while observing new policy data much later and in much larger
+bursts than the pinned implementation.
+
+The frozen contract admits about `8 * 12 / 16 = 6` new environment rows per
+learner update. A solved 500-row CartPole episode can therefore remain entirely
+invisible for about `500 / 6 = 83.3` updates, while a pinned 16-row online
+sequence can become eligible every `16 / 6 = 2.67` updates. During the frozen
+run's update-2,100 through update-3,200 solved plateau, the completed-episode
+counter moves only from 381 to 399: one episode completion per roughly 61
+learner updates. Consistent with episode-end bursts, only 44 of 140 scalar-log
+points have a nonzero per-batch online fraction and individual logged batches
+range as high as 100% online, even though the cumulative fraction is the
+expected `4.822%`.
+
+This is not evidence that collection generally outruns learning: the configured
+replay-ratio throttle controls the long-run average. It is evidence that the
+unit at which collection becomes visible is too coarse. The learner can update
+the world model, critic, and actor for dozens of steps using an older policy
+corridor before the current corridor arrives. Because the fixed-history probe
+already finds a wrong recovery target during solved behavior, delayed corrective
+data is a plausible way for a narrow solution to become self-reinforcing and
+then collapse.
+
+#### Preregistered continuous-delivery canary
+
+- **Hypothesis:** complete-episode publication makes current-policy experience
+  too delayed and bursty for the pinned online FIFO to stabilize the learned
+  corridor. Publishing fixed, non-overlapping chunks as they are collected will
+  preserve prompt online training and prevent or materially reduce the
+  solved-to-collapsed transition.
+- **Causal variable:** add checkpointed continuous replay delivery. A collector
+  publishes each full `sequence_length` chunk immediately and publishes the
+  final remainder at the real episode boundary. Replay appends those chunks to
+  one logical `(collector_id, episode_id)` record and makes newly valid stream
+  starts and online descriptors eligible immediately. Model/encoder/actor
+  weights remain swapped only at true episode boundaries. Do not change replay
+  ratio, capacity, minimum population, batch/sequence shape, selector, online
+  fraction, model, losses, optimizer, actor support, or evaluation.
+- **Transport and memory contract:** queue items contain each newly collected
+  row exactly once; never publish repeated growing episode prefixes. Replay
+  retains immutable array chunks behind one logical partial episode and
+  concatenates only sampled slices, keeping the bounded queue and one active
+  partial record per collector. This avoids an episode-length copy multiplier,
+  which would be unacceptable for Pong pixels.
+- **Compatibility contract:** historical and missing configuration fields keep
+  complete-episode delivery. Continuous delivery requires stream replay and is
+  initially incompatible with exact full-episode future-return annotations,
+  because those targets are unknowable before termination; the frozen run uses
+  `critic_real_return_scale=0`. Episode mode and checkpoint inspection remain
+  unchanged.
+- **Mechanical gate:** prove exact chunk reassembly, no duplicate or missing
+  rows, no artificial `is_first` at chunk boundaries, correct real reset and
+  terminal alignment, prompt online eligibility before termination, uniform
+  eligibility of newly valid starts, final-remainder handling, bounded chunk
+  storage, and explicit rejection of gaps or out-of-order chunks. Add telemetry
+  for delivered chunks/rows and active partial episodes. Then pass focused/full
+  tests, compile/type checks, and the supported one-update multiprocess CPU
+  smoke with at least one pre-terminal chunk.
+- **Frozen run:** repeat the completed online-FIFO seed-0 3,500-update contract
+  exactly at the implementation commit: `d_hidden=128`, four blocks, batch 8,
+  sequence 16, burn-in 4, replay ratio 16, capacity 512 episodes, minimum 16,
+  one collector, 15-step dreams, equal `4e-5` rates with 1,000-step optimizer
+  warmup, actor unimix `0.01`, entropy `0.001`, online value targets, 20
+  deterministic evaluations every 100 updates, and checkpoints every 500.
+- **Mechanism gate:** observe pre-terminal chunks after startup, zero chunk
+  ordering errors, zero online-descriptor drops, no sustained queue or memory
+  growth, and a cumulative online fraction between 3% and 7%. Continuous
+  publication must reduce episode-end online bursts; it must not silently turn
+  chunks into independent episodes or resets.
+- **Behavioral and boundary gates:** reach return 475 and never fall below 300
+  afterward, finish at least 400, and keep best-to-final gap at most 100. Then
+  rerun the fixed update-2,000 recovery histories at update 2,500 and final;
+  require at least 100 actionable states and non-constant posterior-critic or
+  full-dream balanced accuracy above `0.60`, unless behavior passes and both
+  trusted action classes are clearly retained relative to the complete-episode
+  online-FIFO run.
+- **Stop rule:** one seed. Failure rejects continuous experience visibility as
+  a sufficient stability correction. Do not tune chunk size, queue size,
+  online fraction, replay ratio, or add seeds from a failed gate.
