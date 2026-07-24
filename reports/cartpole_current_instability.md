@@ -5941,3 +5941,31 @@ then collapse.
 - **Stop rule:** one seed. Failure rejects continuous experience visibility as
   a sufficient stability correction. Do not tune chunk size, queue size,
   online fraction, replay ratio, or add seeds from a failed gate.
+
+#### Continuous-delivery mechanical gate result
+
+Implementation commit `b1166c9` publishes each new transition exactly once in
+fixed 16-row collector chunks plus a terminal remainder for the frozen run.
+Replay stores immutable NumPy chunks behind one append-only logical episode,
+so adding a chunk does not copy its growing prefix. Partial records count toward
+bounded storage but not startup's completed-episode minimum; if capacity is
+full, replay evicts the oldest completed record rather than an active partial
+record. Uniform stream starts and online descriptors become eligible from the
+logical record's current length. Collector model weights and RSSM carry still
+change only at true episode resets.
+
+The focused replay, configuration, resume, and collector-delivery suite passed
+67 tests; the full fast suite passed 247 tests. Source, test, and script
+compilation passed, and the supported scoped Pyright check reported zero
+errors. The one-update multiprocess CPU smoke exited normally after reporting
+`completed_episodes=2`, `preterminal_chunks=14`, and `chunk_rows=60` when replay
+became ready. This proves the real process path delivered pre-terminal chunks,
+not merely that direct replay unit tests could assemble them. Tests also prove
+chunk-boundary reset exclusion, true reset inclusion, exact offset/gap
+rejection, prompt online eligibility, no prefix copying, completed-versus-
+partial readiness, safe capacity eviction, historical fallback, resume
+preservation, and rejection with exact full-episode return annotations.
+
+No behavioral evidence has been collected yet. The preregistered single seed
+is now authorized at clean source `b1166c9`; it changes only continuous replay
+delivery relative to the completed online-FIFO run.
