@@ -14,6 +14,38 @@ from .env import create_env
 logger = logging.getLogger(__name__)
 
 
+def _queue_replay_packet(data_queue, packet, stop_event) -> bool:
+    """Publish one bounded replay packet, respecting supervised shutdown."""
+    while not stop_event.is_set():
+        try:
+            data_queue.put(packet, timeout=0.1)
+            return True
+        except Full:
+            continue
+    return False
+
+
+def _replay_arrays(
+    pixels,
+    states,
+    actions,
+    rewards,
+    is_last,
+    is_terminal,
+    *,
+    use_pixels: bool,
+):
+    """Freeze aligned collector lists into transport-owned NumPy arrays."""
+    return (
+        np.array(pixels, dtype=np.uint8) if use_pixels else None,
+        np.array(states, dtype=np.float32),
+        np.array(actions, dtype=np.float32),
+        np.array(rewards, dtype=np.float32),
+        np.array(is_last, dtype=bool),
+        np.array(is_terminal, dtype=bool),
+    )
+
+
 def collect_experiences(
     data_queue,
     model_queue,
@@ -113,6 +145,10 @@ def collect_experiences(
             )
 
     episode_count = 0
+    continuous_delivery = bool(
+        getattr(config, "continuous_replay_delivery", False)
+    )
+    replay_chunk_rows = int(config.sequence_length)
 
     while not stop_event.is_set():
         episode_count += 1
@@ -158,6 +194,8 @@ def collect_experiences(
             )
 
         env_steps_in_episode = 0
+        chunk_env_steps = 0
+        chunk_row_offset = 0
 
         while not stop_event.is_set():
             if use_random_actions:
@@ -238,6 +276,7 @@ def collect_experiences(
                 obs, reward, terminated, truncated, info = env.step(action_np)
                 total_reward += float(reward)
                 env_steps_in_episode += 1
+                chunk_env_steps += 1
                 if terminated or truncated:
                     break
 
@@ -255,44 +294,68 @@ def collect_experiences(
             episode_is_last.append(terminated or truncated)
             episode_is_terminal.append(terminated)
 
-            if terminated or truncated:
+            episode_complete = terminated or truncated
+            if continuous_delivery and (
+                len(episode_vec_obs) >= replay_chunk_rows or episode_complete
+            ):
+                arrays = _replay_arrays(
+                    episode_pixels,
+                    episode_vec_obs,
+                    episode_actions,
+                    episode_rewards,
+                    episode_is_last,
+                    episode_is_terminal,
+                    use_pixels=use_pixels,
+                )
+                packet = (
+                    *arrays,
+                    chunk_env_steps,
+                    collector_id,
+                    episode_count,
+                    episode_complete,
+                    chunk_row_offset,
+                )
+                if not _queue_replay_packet(data_queue, packet, stop_event):
+                    break
+                chunk_row_offset += len(episode_vec_obs)
+                chunk_env_steps = 0
+                (
+                    episode_pixels,
+                    episode_vec_obs,
+                    episode_actions,
+                    episode_rewards,
+                    episode_is_last,
+                    episode_is_terminal,
+                ) = ([], [], [], [], [], [])
+
+            if episode_complete:
                 break
 
         # Once training is complete, replay is no longer being consumed. Drop an
         # interrupted/final episode rather than blocking shutdown on a full queue.
-        if not stop_event.is_set():
+        if not stop_event.is_set() and not continuous_delivery:
             # Package and send episode
-            if use_pixels:
-                pixels_np = np.array(episode_pixels, dtype=np.uint8)
-            else:
-                pixels_np = None  # State-only mode: no pixels
-            vec_obs_np = np.array(episode_vec_obs, dtype=np.float32)
-            actions_np = np.array(episode_actions, dtype=np.float32)
-            rewards_np = np.array(episode_rewards, dtype=np.float32)
-            is_last_np = np.array(episode_is_last, dtype=bool)
-            is_terminal_np = np.array(episode_is_terminal, dtype=bool)
+            arrays = _replay_arrays(
+                episode_pixels,
+                episode_vec_obs,
+                episode_actions,
+                episode_rewards,
+                episode_is_last,
+                episode_is_terminal,
+                use_pixels=use_pixels,
+            )
 
             episode_length = env_steps_in_episode
             episode = (
-                pixels_np,
-                vec_obs_np,
-                actions_np,
-                rewards_np,
-                is_last_np,
-                is_terminal_np,
+                *arrays,
                 episode_length,
                 collector_id,
                 episode_count,
             )
-            while not stop_event.is_set():
-                try:
-                    data_queue.put(episode, timeout=0.1)
-                    break
-                except Full:
-                    continue
+            _queue_replay_packet(data_queue, episode, stop_event)
 
-            # On-demand collection: wait if queue is sufficiently full
-            # This prevents wasteful over-collection in fast envs (e.g., state-only CartPole)
+        if not stop_event.is_set():
+            # On-demand collection: wait if queue is sufficiently full.
             while not stop_event.is_set():
                 queue_fill_ratio = (
                     data_queue.qsize() / data_queue._maxsize

@@ -24,6 +24,38 @@ def _episode(length: int, marker: float = 1.0):
     )
 
 
+def _chunk(
+    start: int,
+    length: int,
+    *,
+    collector_id: int = 0,
+    episode_id: int = 1,
+    complete: bool = False,
+    marker: float | None = None,
+):
+    values = np.arange(start, start + length, dtype=np.float32)
+    states = np.stack([values, values], axis=-1)
+    if marker is not None:
+        states.fill(marker)
+    is_last = np.zeros(length, dtype=np.bool_)
+    is_terminal = np.zeros(length, dtype=np.bool_)
+    if complete:
+        is_last[-1] = True
+    return (
+        None,
+        states,
+        np.zeros((length, 2), dtype=np.float32),
+        values,
+        is_last,
+        is_terminal,
+        length,
+        collector_id,
+        episode_id,
+        complete,
+        start,
+    )
+
+
 def test_short_episode_is_padded_and_masked():
     replay = EpisodeReplayBuffer(
         data_queue=None,
@@ -310,6 +342,147 @@ def test_stream_online_descriptor_queue_is_bounded():
 
     assert replay.online_queue_size == 3
     assert replay.online_descriptors_dropped == 1
+
+
+def test_continuous_delivery_makes_preterminal_sequence_online_immediately():
+    replay = EpisodeReplayBuffer(
+        data_queue=None,
+        max_episodes=10,
+        min_episodes=1,
+        sequence_length=3,
+        sequence_mode="stream",
+        online_replay=True,
+        continuous_delivery=True,
+    )
+
+    first = _chunk(0, 3)
+    replay.add_episode(first)
+
+    assert replay.total_episodes_added == 0
+    assert replay.active_partial_episodes == 1
+    assert replay.preterminal_chunks_added == 1
+    assert replay.online_queue_size == 1
+    assert not replay.is_ready  # Startup still counts real completed episodes.
+    stored = replay.buffer[0]
+    assert stored[1].chunk_count == 1
+    assert stored[1]._chunks[0] is first[1]
+
+    replay.add_episode(_chunk(3, 3, complete=True))
+    sample = replay.sample(batch_size=1)[0]
+
+    assert replay.total_episodes_added == 1
+    assert replay.active_partial_episodes == 0
+    assert replay.total_env_steps == 6
+    assert replay.replay_chunks_added == 2
+    assert replay.replay_chunk_rows_added == 6
+    assert replay.buffer[0][1].chunk_count == 2
+    assert np.array_equal(sample[1][:, 0], np.array([0, 1, 2]))
+
+
+def test_continuous_delivery_chunk_boundary_is_not_an_rssm_reset():
+    replay = EpisodeReplayBuffer(
+        data_queue=None,
+        max_episodes=10,
+        min_episodes=1,
+        sequence_length=3,
+        sequence_mode="stream",
+        continuous_delivery=True,
+    )
+    replay.add_episode(_chunk(0, 3))
+    replay.add_episode(_chunk(3, 3, complete=True))
+
+    sample = replay._sample_stream_position((0, 1, 2))
+
+    assert sample is not None
+    assert np.array_equal(sample[1][:, 0], np.array([2, 3, 4]))
+    assert np.array_equal(sample[9], np.array([True, False, False]))
+
+
+def test_continuous_online_sequence_crosses_only_a_real_episode_reset():
+    replay = EpisodeReplayBuffer(
+        data_queue=None,
+        max_episodes=10,
+        min_episodes=1,
+        sequence_length=4,
+        sequence_mode="stream",
+        online_replay=True,
+        continuous_delivery=True,
+    )
+    replay.add_episode(_chunk(0, 3, complete=True))
+    replay.add_episode(_chunk(0, 1, episode_id=2, marker=20.0))
+
+    assert replay.online_queue_size == 1
+    sample = replay.sample(batch_size=1)[0]
+
+    assert np.array_equal(sample[1][:, 0], np.array([0, 1, 2, 20]))
+    assert np.array_equal(sample[9], np.array([True, False, False, True]))
+
+
+def test_continuous_delivery_rejects_offsets_gaps_and_parallel_episode_prefixes():
+    replay = EpisodeReplayBuffer(
+        data_queue=None,
+        max_episodes=10,
+        min_episodes=1,
+        sequence_length=3,
+        sequence_mode="stream",
+        continuous_delivery=True,
+    )
+
+    with pytest.raises(ValueError, match="row_offset=0"):
+        replay.add_episode(_chunk(2, 2))
+
+    replay.add_episode(_chunk(0, 2))
+    with pytest.raises(ValueError, match="row_offset"):
+        replay.add_episode(_chunk(1, 2))
+    with pytest.raises(ValueError, match="prior chunk stream"):
+        replay.add_episode(_chunk(0, 2, episode_id=2))
+
+
+def test_continuous_delivery_cannot_evict_active_partial_episode():
+    replay = EpisodeReplayBuffer(
+        data_queue=None,
+        max_episodes=1,
+        min_episodes=1,
+        sequence_length=3,
+        sequence_mode="stream",
+        continuous_delivery=True,
+    )
+    replay.add_episode(_chunk(0, 2, collector_id=0))
+
+    with pytest.raises(RuntimeError, match="only active partial"):
+        replay.add_episode(_chunk(0, 2, collector_id=1))
+
+
+def test_continuous_delivery_evicts_oldest_complete_not_active_episode():
+    replay = EpisodeReplayBuffer(
+        data_queue=None,
+        max_episodes=2,
+        min_episodes=1,
+        sequence_length=3,
+        sequence_mode="stream",
+        continuous_delivery=True,
+    )
+    replay.add_episode(_chunk(0, 2, collector_id=0))
+    replay.add_episode(_chunk(0, 2, collector_id=1, complete=True))
+
+    replay.add_episode(_chunk(0, 2, collector_id=2, complete=True))
+
+    keys = {(episode[8], episode[9]) for episode in replay.buffer}
+    assert keys == {(0, 1), (2, 1)}
+    assert replay.active_partial_episodes == 1
+
+
+def test_continuous_delivery_rejects_full_episode_return_annotations():
+    with pytest.raises(ValueError, match="future returns"):
+        EpisodeReplayBuffer(
+            data_queue=None,
+            max_episodes=10,
+            min_episodes=1,
+            sequence_length=3,
+            sequence_mode="stream",
+            continuous_delivery=True,
+            compute_future_returns=True,
+        )
 
 
 def test_stream_crosses_reset_with_aligned_fields_and_unit_weights(monkeypatch):

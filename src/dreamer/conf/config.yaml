@@ -166,6 +166,8 @@ train:
   replay_sequence_mode: stream
   # Present each new non-overlapping stream sequence once before uniform replay.
   online_replay: true
+  # Publish transition chunks during long episodes instead of waiting for reset.
+  continuous_replay_delivery: true
 
   # Replay ratio gating (DreamerV3 paper)
   replay_ratio: 1.0  # replayed non-burn-in transitions per raw env frame

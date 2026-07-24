@@ -81,6 +81,7 @@ def test_cli_resume_restores_checkpoint_model_and_target_semantics(tmp_path):
             "train.critic_slow_target=true",
             "train.replay_sequence_mode=episode",
             "train.online_replay=false",
+            "train.continuous_replay_delivery=false",
             "train.state_loss_mode=legacy_half_mean",
         ],
     )
@@ -104,6 +105,7 @@ def test_cli_resume_restores_checkpoint_model_and_target_semantics(tmp_path):
     assert resumed_config["critic_slow_target"] is True
     assert resumed_config["replay_sequence_mode"] == "episode"
     assert resumed_config["online_replay"] is False
+    assert resumed_config["continuous_replay_delivery"] is False
     assert resumed_config["state_loss_mode"] == "legacy_half_mean"
     assert "continue_predictor.weight" in resumed_checkpoint["world_model"]
     assert "posterior_head.weight" in resumed_checkpoint["world_model"]
@@ -116,6 +118,10 @@ def test_cli_resume_restores_checkpoint_model_and_target_semantics(tmp_path):
     assert resumed_checkpoint["config_snapshot"]["critic_slow_target"] is True
     assert resumed_checkpoint["config_snapshot"]["replay_sequence_mode"] == "episode"
     assert resumed_checkpoint["config_snapshot"]["online_replay"] is False
+    assert (
+        resumed_checkpoint["config_snapshot"]["continuous_replay_delivery"]
+        is False
+    )
     assert (
         resumed_checkpoint["config_snapshot"]["state_loss_mode"]
         == "legacy_half_mean"

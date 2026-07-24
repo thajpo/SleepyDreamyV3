@@ -199,6 +199,7 @@ class WorldModelTrainer:
             throttle_collection=True,
             sequence_mode=config.replay_sequence_mode,
             online_replay=config.online_replay,
+            continuous_delivery=config.continuous_replay_delivery,
         )
 
         self.batch_size = config.batch_size
@@ -389,6 +390,16 @@ class WorldModelTrainer:
             metrics.replay_online_queue_size = self.replay_buffer.online_queue_size
             metrics.replay_online_descriptors_dropped = (
                 self.replay_buffer.online_descriptors_dropped
+            )
+            metrics.replay_chunks_added = self.replay_buffer.replay_chunks_added
+            metrics.replay_chunk_rows_added = (
+                self.replay_buffer.replay_chunk_rows_added
+            )
+            metrics.replay_preterminal_chunks_added = (
+                self.replay_buffer.preterminal_chunks_added
+            )
+            metrics.replay_active_partial_episodes = (
+                self.replay_buffer.active_partial_episodes
             )
 
             # Initialize loss variables in case loop doesn't execute

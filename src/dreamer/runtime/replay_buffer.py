@@ -5,6 +5,7 @@ Reference-style stream mode joins only consecutive episodes from one collector,
 may cross resets, and marks each boundary so the RSSM can reset its carry.
 """
 
+import logging
 import threading
 import random
 import numpy as np
@@ -14,6 +15,9 @@ from queue import Empty
 from typing import NamedTuple, Optional
 
 from ..models.math_utils import resize_pixels_to_target
+
+
+logger = logging.getLogger(__name__)
 
 
 class EnvData(NamedTuple):
@@ -30,6 +34,70 @@ class EnvData(NamedTuple):
     mask: torch.Tensor  # (B, T) — 1=real, 0=padded
     pixels: Optional[torch.Tensor] = None  # (B, T, C, H, W)
     pixels_original: Optional[torch.Tensor] = None  # (B, T, C, H, W)
+
+
+class _ChunkedArray:
+    """Append-only logical array that stores each collector chunk exactly once."""
+
+    def __init__(self, value: np.ndarray):
+        self._chunks: list[np.ndarray] = []
+        self._length = 0
+        self._tail_shape = value.shape[1:]
+        self._dtype = value.dtype
+        self.append(value)
+
+    def append(self, value: np.ndarray) -> None:
+        if value.ndim == 0 or len(value) == 0:
+            raise ValueError("replay chunks must contain at least one row")
+        if value.shape[1:] != self._tail_shape or value.dtype != self._dtype:
+            raise ValueError("replay chunk array shape or dtype changed mid-episode")
+        self._chunks.append(value)
+        self._length += len(value)
+
+    def __len__(self) -> int:
+        return self._length
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return (self._length, *self._tail_shape)
+
+    @property
+    def dtype(self) -> np.dtype:
+        return self._dtype
+
+    @property
+    def chunk_count(self) -> int:
+        return len(self._chunks)
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            index = key if key >= 0 else self._length + key
+            if not 0 <= index < self._length:
+                raise IndexError(index)
+            for chunk in self._chunks:
+                if index < len(chunk):
+                    return chunk[index]
+                index -= len(chunk)
+            raise IndexError(key)
+        if not isinstance(key, slice):
+            raise TypeError("chunked replay arrays support integer and slice access")
+        start, stop, step = key.indices(self._length)
+        if step != 1:
+            raise ValueError("chunked replay slices require a unit step")
+        if start >= stop:
+            return np.empty((0, *self._tail_shape), dtype=self._dtype)
+        pieces = []
+        cursor = 0
+        for chunk in self._chunks:
+            chunk_stop = cursor + len(chunk)
+            if chunk_stop > start and cursor < stop:
+                local_start = max(0, start - cursor)
+                local_stop = min(len(chunk), stop - cursor)
+                pieces.append(chunk[local_start:local_stop])
+            cursor = chunk_stop
+            if cursor >= stop:
+                break
+        return pieces[0] if len(pieces) == 1 else np.concatenate(pieces, axis=0)
 
 
 def continuation_inclusion_weights(
@@ -97,6 +165,7 @@ class EpisodeReplayBuffer:
         throttle_collection=False,
         sequence_mode="episode",
         online_replay=False,
+        continuous_delivery=False,
     ):
         """
         Args:
@@ -112,6 +181,7 @@ class EpisodeReplayBuffer:
                 ``stream`` for per-collector windows that cross episode resets
             online_replay: Prefer each new non-overlapping stream sequence once
                 before filling batches from the configured replay selector.
+            continuous_delivery: Accept append-only partial-episode chunk packets.
         """
         self.data_queue = data_queue
         self.max_episodes = max_episodes
@@ -126,6 +196,13 @@ class EpisodeReplayBuffer:
         self.online_replay = bool(online_replay)
         if self.online_replay and self.sequence_mode != "stream":
             raise ValueError("online_replay requires sequence_mode='stream'")
+        self.continuous_delivery = bool(continuous_delivery)
+        if self.continuous_delivery and self.sequence_mode != "stream":
+            raise ValueError("continuous_delivery requires sequence_mode='stream'")
+        if self.continuous_delivery and self.compute_future_returns:
+            raise ValueError(
+                "continuous_delivery cannot compute full-episode future returns"
+            )
 
         self.buffer = deque(maxlen=max_episodes)
         self.lock = threading.Lock()
@@ -136,6 +213,7 @@ class EpisodeReplayBuffer:
         self._thread = None
         self._episodes_added = 0
         self._total_steps = 0  # For tracking average episode length
+        self._completed_steps = 0
         self._recent_ep_lengths = deque(maxlen=100)  # Track recent episode lengths
         self._max_sequence_length = 256  # Cap for adaptive growth
         self._env_step_budget: float | None = None
@@ -147,10 +225,15 @@ class EpisodeReplayBuffer:
         self._online_pending_start: dict[int, tuple[int, int, int]] = {}
         self._online_pending_length: dict[int, int] = defaultdict(int)
         self._online_last_episode_id: dict[int, int] = {}
+        self._online_last_episode_complete: dict[int, bool] = {}
         self._online_descriptors_dropped = 0
         self._online_samples = 0
         self._sequence_samples = 0
         self._last_online_sample_fraction = 0.0
+        self._active_partial_episodes: dict[tuple[int, int], list] = {}
+        self._chunks_added = 0
+        self._chunk_rows_added = 0
+        self._preterminal_chunks_added = 0
 
     def start(self):
         """Start background queue draining thread."""
@@ -224,7 +307,14 @@ class EpisodeReplayBuffer:
                 self._budget_changed.notify_all()
 
     def add_episode(self, episode):
-        """Insert one episode, including optional collector and episode IDs."""
+        """Insert a complete episode or one append-only partial-episode chunk."""
+        if len(episode) >= 11:
+            self._add_episode_chunk(episode)
+            return
+        self._add_complete_episode(episode)
+
+    def _add_complete_episode(self, episode):
+        """Insert one historical complete-episode packet."""
         pixels, states, actions, rewards, is_last, is_terminal = episode[:6]
         ep_len = episode[6] if len(episode) > 6 else len(states)
         collector_id = int(episode[7]) if len(episode) > 7 else 0
@@ -243,7 +333,7 @@ class EpisodeReplayBuffer:
                 future_returns[index] = rewards[next_index] + self.gamma * (
                     1.0 - float(is_last[next_index])
                 ) * future_returns[next_index]
-        stored_episode = (
+        stored_episode = [
             pixels,
             states,
             actions,
@@ -254,34 +344,153 @@ class EpisodeReplayBuffer:
             future_returns,
             collector_id,
             episode_id,
-        )
+            True,
+        ]
         with self._budget_changed:
             was_ready = self.ready_event.is_set()
+            self._make_room_for_episode()
             self.buffer.append(stored_episode)
             if self.online_replay:
                 self._enqueue_online_sequences(
-                    collector_id, episode_id, len(states)
+                    collector_id, episode_id, len(states), episode_complete=True
                 )
             self._episodes_added += 1
             self._total_steps += ep_len
+            self._completed_steps += ep_len
             self._recent_ep_lengths.append(ep_len)
-            has_complete_sequence = self.sequence_mode == "episode" or bool(
-                self._stream_start_candidates()
-            )
-            is_ready = len(self.buffer) >= self.min_episodes and has_complete_sequence
-            if is_ready:
-                self.ready_event.set()
+            self._update_readiness(was_ready)
+
+    def _add_episode_chunk(self, packet) -> None:
+        """Append a non-overlapping collector chunk to one logical episode."""
+        if not self.continuous_delivery:
+            raise ValueError("received replay chunk while continuous delivery is off")
+        pixels, states, actions, rewards, is_last, is_terminal = packet[:6]
+        chunk_env_steps = int(packet[6])
+        collector_id = int(packet[7])
+        episode_id = int(packet[8])
+        episode_complete = bool(packet[9])
+        row_offset = int(packet[10])
+        arrays = (states, actions, rewards, is_last, is_terminal)
+        row_count = len(states)
+        if row_count <= 0 or any(len(value) != row_count for value in arrays):
+            raise ValueError("replay chunk fields must have the same positive length")
+        if pixels is not None and len(pixels) != row_count:
+            raise ValueError("replay pixel chunk length does not match state rows")
+        if chunk_env_steps <= 0:
+            raise ValueError("replay chunk environment-step count must be positive")
+        if episode_complete:
+            if not bool(is_last[-1]):
+                raise ValueError("completed replay chunk must end with is_last")
+        elif np.any(is_last) or np.any(is_terminal):
+            raise ValueError("pre-terminal replay chunk contains a terminal marker")
+
+        key = (collector_id, episode_id)
+        with self._budget_changed:
+            was_ready = self.ready_event.is_set()
+            stored_episode = self._active_partial_episodes.get(key)
+            if stored_episode is None:
+                if row_offset != 0:
+                    raise ValueError("first replay chunk must have row_offset=0")
+                if any(
+                    active_collector == collector_id
+                    for active_collector, _active_episode in self._active_partial_episodes
+                ):
+                    raise ValueError(
+                        "cannot start a new replay episode before its prior chunk stream ends"
+                    )
+                if key in self._episode_lookup():
+                    raise ValueError("received a chunk for an already completed episode")
+                previous_id = self._last_episode_id[collector_id]
+                if previous_id >= 0 and episode_id != previous_id + 1:
+                    raise ValueError("replay chunk episode IDs must be consecutive")
+                self._make_room_for_episode()
+                chunked_pixels = _ChunkedArray(pixels) if pixels is not None else None
+                stored_episode = [
+                    chunked_pixels,
+                    _ChunkedArray(states),
+                    _ChunkedArray(actions),
+                    _ChunkedArray(rewards),
+                    _ChunkedArray(is_last),
+                    _ChunkedArray(is_terminal),
+                    chunk_env_steps,
+                    None,
+                    collector_id,
+                    episode_id,
+                    episode_complete,
+                ]
+                self.buffer.append(stored_episode)
+                self._last_episode_id[collector_id] = episode_id
+                if not episode_complete:
+                    self._active_partial_episodes[key] = stored_episode
             else:
-                self.ready_event.clear()
-            if is_ready and not was_ready:
-                if self.throttle_collection and self._env_step_budget is None:
-                    self._env_step_budget = float(self._total_steps)
-                print(
-                    f"Replay buffer ready: {len(self.buffer)} episodes collected",
-                    flush=True,
+                if row_offset != len(stored_episode[1]):
+                    raise ValueError(
+                        "replay chunk row_offset does not match stored episode length"
+                    )
+                if bool(stored_episode[10]):
+                    raise ValueError("cannot append to a completed replay episode")
+                chunk_fields = (pixels, states, actions, rewards, is_last, is_terminal)
+                for field, value in enumerate(chunk_fields):
+                    target = stored_episode[field]
+                    if (target is None) != (value is None):
+                        raise ValueError("replay pixel presence changed mid-episode")
+                    if target is not None:
+                        target.append(value)
+                stored_episode[6] += chunk_env_steps
+                stored_episode[10] = episode_complete
+
+            if self.online_replay:
+                self._enqueue_online_sequences(
+                    collector_id,
+                    episode_id,
+                    row_count,
+                    episode_complete=episode_complete,
                 )
-            if is_ready != was_ready:
-                self._budget_changed.notify_all()
+            self._total_steps += chunk_env_steps
+            self._chunks_added += 1
+            self._chunk_rows_added += row_count
+            if not episode_complete:
+                self._preterminal_chunks_added += 1
+            else:
+                self._active_partial_episodes.pop(key, None)
+                self._episodes_added += 1
+                self._completed_steps += int(stored_episode[6])
+                self._recent_ep_lengths.append(int(stored_episode[6]))
+            self._update_readiness(was_ready)
+
+    def _make_room_for_episode(self) -> None:
+        if len(self.buffer) < self.max_episodes:
+            return
+        for index, episode in enumerate(self.buffer):
+            if bool(episode[10]):
+                del self.buffer[index]
+                return
+        raise RuntimeError("replay capacity contains only active partial episodes")
+
+    def _update_readiness(self, was_ready: bool) -> None:
+        completed_in_buffer = sum(bool(episode[10]) for episode in self.buffer)
+        has_complete_sequence = self.sequence_mode == "episode" or bool(
+            self._stream_start_candidates()
+        )
+        is_ready = (
+            completed_in_buffer >= self.min_episodes and has_complete_sequence
+        )
+        if is_ready:
+            self.ready_event.set()
+        else:
+            self.ready_event.clear()
+        if is_ready and not was_ready:
+            if self.throttle_collection and self._env_step_budget is None:
+                self._env_step_budget = float(self._total_steps)
+            logger.info(
+                "replay_ready completed_episodes=%d preterminal_chunks=%d "
+                "chunk_rows=%d",
+                completed_in_buffer,
+                self._preterminal_chunks_added,
+                self._chunk_rows_added,
+            )
+        if is_ready != was_ready:
+            self._budget_changed.notify_all()
 
     def _sample_subsequence(self, episode):
         """
@@ -418,16 +627,35 @@ class EpisodeReplayBuffer:
             if remaining < available:
                 return collector_id, episode_id, offset + remaining
             remaining -= available
-            episode_id += 1
-            offset = 0
+            if bool(episode[10]):
+                episode_id += 1
+                offset = 0
+            else:
+                offset = len(episode[1])
+                if remaining:
+                    raise RuntimeError(
+                        "online replay advanced beyond available partial episode"
+                    )
         return collector_id, episode_id, offset
 
     def _enqueue_online_sequences(
-        self, collector_id: int, episode_id: int, episode_length: int
+        self,
+        collector_id: int,
+        episode_id: int,
+        rows_added: int,
+        *,
+        episode_complete: bool,
     ) -> None:
         """Register each new non-overlapping sequence exactly once."""
         previous_id = self._online_last_episode_id.get(collector_id)
-        if previous_id is None or episode_id != previous_id + 1:
+        previous_complete = self._online_last_episode_complete.get(collector_id, True)
+        is_same_partial = previous_id == episode_id and not previous_complete
+        is_next_episode = (
+            previous_id is not None
+            and episode_id == previous_id + 1
+            and previous_complete
+        )
+        if previous_id is None or not (is_same_partial or is_next_episode):
             self._online_pending_start[collector_id] = (
                 collector_id,
                 episode_id,
@@ -435,7 +663,7 @@ class EpisodeReplayBuffer:
             )
             self._online_pending_length[collector_id] = 0
 
-        pending = self._online_pending_length[collector_id] + int(episode_length)
+        pending = self._online_pending_length[collector_id] + int(rows_added)
         start = self._online_pending_start[collector_id]
         while pending >= self.sequence_length:
             if len(self._online_queue) == self._online_queue.maxlen:
@@ -446,6 +674,7 @@ class EpisodeReplayBuffer:
         self._online_pending_start[collector_id] = start
         self._online_pending_length[collector_id] = pending
         self._online_last_episode_id[collector_id] = episode_id
+        self._online_last_episode_complete[collector_id] = episode_complete
 
     def _compose_stream_pieces(self, pieces):
         """Assemble aligned replay fields from consecutive episode slices."""
@@ -758,7 +987,7 @@ class EpisodeReplayBuffer:
         with self.lock:
             if self._episodes_added == 0:
                 return 0
-            return self._total_steps / self._episodes_added
+            return self._completed_steps / self._episodes_added
 
     @property
     def total_env_steps(self):
@@ -791,6 +1020,30 @@ class EpisodeReplayBuffer:
         """Descriptors discarded only because the bounded FIFO was already full."""
         with self.lock:
             return self._online_descriptors_dropped
+
+    @property
+    def replay_chunks_added(self) -> int:
+        """Number of transport chunks appended to logical episodes."""
+        with self.lock:
+            return self._chunks_added
+
+    @property
+    def replay_chunk_rows_added(self) -> int:
+        """Number of transition rows received through chunk transport."""
+        with self.lock:
+            return self._chunk_rows_added
+
+    @property
+    def preterminal_chunks_added(self) -> int:
+        """Chunks that made experience visible before its episode terminated."""
+        with self.lock:
+            return self._preterminal_chunks_added
+
+    @property
+    def active_partial_episodes(self) -> int:
+        """Logical episodes currently awaiting a final collector chunk."""
+        with self.lock:
+            return len(self._active_partial_episodes)
 
     @property
     def recent_avg_episode_length(self):

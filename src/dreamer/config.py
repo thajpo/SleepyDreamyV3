@@ -190,6 +190,9 @@ class Config:
     # Pinned replay presents each new non-overlapping stream sequence once
     # before falling back to its uniform selector. Historical runs did not.
     online_replay: bool = False
+    # Publish fixed-size transition chunks during an episode so replay can make
+    # current-policy rows sampleable without waiting for episode termination.
+    continuous_replay_delivery: bool = False
 
     # ===== Training: replay ratio gating =====
     replay_ratio: float = 1.0
@@ -347,6 +350,15 @@ def validate_config(cfg: Config) -> None:
         errors.append("replay_sequence_mode must be 'episode' or 'stream'")
     if cfg.online_replay and cfg.replay_sequence_mode != "stream":
         errors.append("online_replay requires replay_sequence_mode='stream'")
+    if cfg.continuous_replay_delivery and cfg.replay_sequence_mode != "stream":
+        errors.append(
+            "continuous_replay_delivery requires replay_sequence_mode='stream'"
+        )
+    if cfg.continuous_replay_delivery and cfg.critic_real_return_scale > 0.0:
+        errors.append(
+            "continuous_replay_delivery is incompatible with "
+            "critic_real_return_scale > 0"
+        )
     if cfg.replay_ratio <= 0:
         errors.append("replay_ratio must be > 0")
     if not 0.0 <= cfg.recent_fraction <= 1.0:

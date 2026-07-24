@@ -52,6 +52,10 @@ class StepMetrics:
     replay_online_fraction_cumulative: Optional[float] = None
     replay_online_queue_size: Optional[int] = None
     replay_online_descriptors_dropped: Optional[int] = None
+    replay_chunks_added: Optional[int] = None
+    replay_chunk_rows_added: Optional[int] = None
+    replay_preterminal_chunks_added: Optional[int] = None
+    replay_active_partial_episodes: Optional[int] = None
     gradient_alignment: dict[str, float] = field(default_factory=dict)
     viz_data: Optional[dict[str, torch.Tensor]] = None
 
@@ -213,6 +217,20 @@ def log_step_metrics(
             if metrics.replay_online_descriptors_dropped is not None:
                 m["replay/online_descriptors_dropped"] = float(
                     metrics.replay_online_descriptors_dropped
+                )
+            if metrics.replay_chunks_added is not None:
+                m["replay/chunks_added"] = float(metrics.replay_chunks_added)
+            if metrics.replay_chunk_rows_added is not None:
+                m["replay/chunk_rows_added"] = float(
+                    metrics.replay_chunk_rows_added
+                )
+            if metrics.replay_preterminal_chunks_added is not None:
+                m["replay/preterminal_chunks_added"] = float(
+                    metrics.replay_preterminal_chunks_added
+                )
+            if metrics.replay_active_partial_episodes is not None:
+                m["replay/active_partial_episodes"] = float(
+                    metrics.replay_active_partial_episodes
                 )
 
             pixel = wm_cpu["prediction_pixel"] * norm
