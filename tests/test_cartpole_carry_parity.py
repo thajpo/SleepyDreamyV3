@@ -1,6 +1,14 @@
-import pytest
+from dataclasses import asdict
 
-from scripts.probe_cartpole_carry_parity import summarize
+import pytest
+import torch
+
+from dreamer.models import initialize_actor, initialize_world_model
+from scripts.probe_cartpole_carry_parity import (
+    load_probe_models,
+    reference_config,
+    summarize,
+)
 
 
 def test_carry_parity_summary_preserves_gate_statistics() -> None:
@@ -34,3 +42,30 @@ def test_carry_parity_summary_preserves_gate_statistics() -> None:
 def test_carry_parity_summary_rejects_empty_input() -> None:
     with pytest.raises(ValueError, match="at least one"):
         summarize([])
+
+
+def test_carry_parity_loads_trained_checkpoint(tmp_path) -> None:
+    config = reference_config(seed=3)
+    encoder, world_model = initialize_world_model("cpu", config, batch_size=1)
+    actor = initialize_actor("cpu", config)
+    checkpoint_path = tmp_path / "checkpoint_step_17.pt"
+    torch.save(
+        {
+            "step": 17,
+            "config_snapshot": asdict(config),
+            "encoder": encoder.state_dict(),
+            "world_model": world_model.state_dict(),
+            "actor": actor.state_dict(),
+        },
+        checkpoint_path,
+    )
+
+    loaded_config, loaded_encoder, loaded_world_model, loaded_actor, step = (
+        load_probe_models(seed=999, checkpoint_path=checkpoint_path)
+    )
+
+    assert loaded_config.architecture_contract == "reference_v3_state"
+    assert step == 17
+    assert loaded_encoder.training is False
+    assert loaded_world_model.training is False
+    assert loaded_actor.training is False

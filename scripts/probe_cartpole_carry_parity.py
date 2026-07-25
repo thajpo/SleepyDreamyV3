@@ -13,6 +13,7 @@ import torch
 import torch.nn.functional as F
 
 from dreamer.config import Config, validate_config
+from dreamer.inspect import infer_config_from_checkpoint
 from dreamer.models import (
     initialize_actor,
     initialize_world_model,
@@ -43,6 +44,44 @@ def reference_config(seed: int) -> Config:
     )
     validate_config(config)
     return config
+
+
+def load_probe_models(
+    *, seed: int, checkpoint_path: Path | None
+) -> tuple[Config, object, object, object, int | None]:
+    """Initialize the frozen model or load an attributable trained checkpoint."""
+    torch.manual_seed(int(seed))
+    np.random.seed(int(seed))
+    if checkpoint_path is None:
+        config = reference_config(seed)
+        encoder, world_model = initialize_world_model("cpu", config, batch_size=1)
+        actor = initialize_actor("cpu", config)
+        checkpoint_step = None
+    else:
+        checkpoint_path = checkpoint_path.resolve()
+        config = infer_config_from_checkpoint(checkpoint_path, config_name=None)
+        if (
+            config.environment_name != "CartPole-v1"
+            or config.use_pixels
+            or config.architecture_contract != "reference_v3_state"
+        ):
+            raise ValueError(
+                "carry parity requires a reference_v3_state CartPole checkpoint"
+            )
+        encoder, world_model = initialize_world_model("cpu", config, batch_size=1)
+        actor = initialize_actor("cpu", config)
+        checkpoint = torch.load(
+            checkpoint_path, map_location="cpu", weights_only=True
+        )
+        encoder.load_state_dict(checkpoint["encoder"])
+        world_model.load_state_dict(checkpoint["world_model"], strict=False)
+        actor.load_state_dict(checkpoint["actor"])
+        checkpoint_step = int(checkpoint.get("step", -1))
+
+    encoder.eval()
+    world_model.eval()
+    actor.eval()
+    return config, encoder, world_model, actor, checkpoint_step
 
 
 def collect_random_episode(
@@ -157,15 +196,12 @@ def run_probe(
     seed: int,
     episode_seeds: list[int],
     burn_ins: list[int],
+    checkpoint_path: Path | None = None,
+    primary_burn_in: int = 8,
 ) -> dict:
-    torch.manual_seed(int(seed))
-    np.random.seed(int(seed))
-    config = reference_config(seed)
-    encoder, world_model = initialize_world_model("cpu", config, batch_size=1)
-    actor = initialize_actor("cpu", config)
-    encoder.eval()
-    world_model.eval()
-    actor.eval()
+    config, encoder, world_model, actor, checkpoint_step = load_probe_models(
+        seed=seed, checkpoint_path=checkpoint_path
+    )
 
     rows_by_burn: dict[int, list[dict[str, float]]] = defaultdict(list)
     episode_lengths = []
@@ -203,7 +239,7 @@ def run_probe(
     summaries = {
         str(burn_in): summarize(rows_by_burn[burn_in]) for burn_in in burn_ins
     }
-    primary = summaries["8"] if "8" in summaries else None
+    primary = summaries.get(str(primary_burn_in))
     primary_pass = None
     if primary is not None:
         primary_pass = bool(
@@ -215,6 +251,10 @@ def run_probe(
         "schema_version": 1,
         "git": capture_git_state(),
         "model_seed": int(seed),
+        "checkpoint": (
+            str(checkpoint_path.resolve()) if checkpoint_path is not None else None
+        ),
+        "checkpoint_step": checkpoint_step,
         "episode_seeds": episode_seeds,
         "episode_lengths": episode_lengths,
         "burn_ins": burn_ins,
@@ -227,14 +267,18 @@ def run_probe(
             "replay_row_alignment": config.replay_row_alignment,
         },
         "summaries": summaries,
-        "primary_burn_in": 8,
+        "primary_burn_in": int(primary_burn_in),
         "primary_thresholds": {
             "actor_action_agreement_mean_min": 0.99,
             "feature_cosine_median_min": 0.99,
             "feature_relative_l2_p95_max": 0.10,
         },
         "primary_pass": primary_pass,
-        "limitation": "Initialized-model parity must be repeated after training.",
+        "limitation": (
+            "Initialized-model parity must be repeated after training."
+            if checkpoint_path is None
+            else "Random-policy episodes test carry convergence off the trained policy distribution."
+        ),
     }
 
 
@@ -245,12 +289,18 @@ def main() -> None:
     parser.add_argument("--episodes", type=int, default=20)
     parser.add_argument("--episode-seed-start", type=int, default=17)
     parser.add_argument("--burn-ins", type=int, nargs="+", default=[1, 2, 4, 8, 16])
+    parser.add_argument("--primary-burn-in", type=int, default=8)
+    parser.add_argument("--checkpoint", type=Path)
     args = parser.parse_args()
     if args.episodes <= 0:
         raise ValueError("episodes must be positive")
     burn_ins = sorted(set(int(value) for value in args.burn_ins))
     if any(value <= 0 for value in burn_ins):
         raise ValueError("burn-ins must be positive")
+    if args.primary_burn_in <= 0:
+        raise ValueError("primary-burn-in must be positive")
+    if args.primary_burn_in not in burn_ins:
+        raise ValueError("primary-burn-in must be included in burn-ins")
     episode_seeds = list(
         range(args.episode_seed_start, args.episode_seed_start + args.episodes)
     )
@@ -258,6 +308,8 @@ def main() -> None:
         seed=args.seed,
         episode_seeds=episode_seeds,
         burn_ins=burn_ins,
+        checkpoint_path=args.checkpoint,
+        primary_burn_in=args.primary_burn_in,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_json(args.output, result)
