@@ -1,0 +1,50 @@
+contract_version: 1
+name: cartpole_drift_v1
+purpose: local_reliability_diagnostic
+reference:
+  repository: https://github.com/thajpo/SleepyDreamyV3
+  commit: 35d7454c22d34bb9ba72d35c2f9f7254bdfac0cd
+  note: This reproduces the current late-collapse diagnostic; it is not a paper benchmark.
+
+environment:
+  family: classic_control
+  task: CartPole-v1
+  agent_decisions: 21000
+  action_repeat: 1
+  raw_environment_frames: 21000
+
+training:
+  replay_ratio: 16.0
+  replay_ratio_unit: actor_critic_trained_rows_per_agent_decision
+  batch_size: 8
+  sampled_sequence_length: 16
+  replay_context_or_burn_in: 4
+  trained_batch_length: 12
+  expected_gradient_updates: 3500
+  world_model_rows_per_update: 16
+  effective_world_model_replay_ratio: 21.333333333333332
+  optimizer: laprop
+  learning_rate: 0.00004
+  optimizer_warmup_updates: 1000
+  imagination_horizon: 15
+  early_stop: false
+
+model:
+  architecture: local_pre_reference_v3
+  d_hidden: 128
+  stochastic_variables: 32
+  derived_stochastic_classes: 8
+  recurrent_blocks: 4
+  derived_deterministic_width: 512
+  vector_encoder_mode: reference
+  posterior_hidden_layers: 1
+  continuation_hidden_layers: 1
+
+evaluation:
+  training_seeds: [0, 1, 2, 3, 4]
+  evaluation_episodes: 20
+  evaluation_interval_updates: 100
+  final_held_out_episodes: 100
+  provisional_solved_mean: 475.0
+  post_solve_retention_floor: 400.0
+  provisional_max_best_to_final_gap: 25.0

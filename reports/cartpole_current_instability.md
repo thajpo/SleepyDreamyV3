@@ -6525,3 +6525,30 @@ still-eligible histories, with the exact replay-history probe as its mechanism
 gate. Do not infer that a slower target, stronger regularizer, or supervised
 return loss is correct without choosing one from the existing rejected-canary
 history and the current objective equations.
+
+### Post-audit causal correction and next boundary
+
+A 2026-07-25 evidence and reference audit narrows the conclusion above. The
+crossed cells change every checkpointed controller component: encoder/RSSM,
+reward and continuation heads, actor, online critic, and slow critic. The
+trusted 30-step continuation policy also changes with the target checkpoint.
+Consequently, the matrix establishes **coupled policy-conditioned
+parameter/target drift**, but it does not isolate the drift specifically to the
+critic/head or prove that the actor is only downstream. Near-perfect
+actor/dream agreement establishes self-consistency with the current imagined
+preference, not causal order inside the actor-model-value feedback loop.
+
+The audit also distinguishes replay eligibility from effective exposure. Every
+update-3,000 history remained eligible at final, but this run did not record the
+number or cumulative gradient weight of later selections of each anchor. The
+eviction explanation remains rejected; insufficient or destructive effective
+updates remain observable only through a narrower diagnostic.
+
+No training intervention is authorized from the complete-checkpoint cross.
+The next preregistered step is the fixed-policy component/target cross in
+`reports/dreamerv3_attack_plan.md`. It holds real continuation labels fixed,
+crosses individual parameter groups, and inspects exact target and gradient
+movement before selecting any stabilizer. In parallel, deterministic numerical
+fixtures will compare the local implementation with pinned source
+`e3f02248693a79dc8b0ebd62c93683888ddaccfe`. The paper-v2, current-source, and
+CartPole diagnostic contracts are frozen separately under `reports/contracts/`.

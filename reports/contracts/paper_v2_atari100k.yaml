@@ -1,0 +1,32 @@
+contract_version: 1
+name: paper_v2_atari100k
+purpose: published_benchmark_replication
+reference:
+  paper: https://arxiv.org/abs/2301.04104
+  revision: v2
+  note: Keep this benchmark distinct from the current source-code preset.
+
+environment:
+  family: atari100k
+  task: pong
+  agent_decisions: 100000
+  action_repeat: 4
+  raw_environment_frames: 400000
+
+training:
+  replay_ratio: 128.0
+  replay_ratio_unit: trained_rows_per_agent_decision
+  batch_size: 16
+  trained_batch_length: 64
+  replay_context: 1
+  expected_gradient_updates: 12500
+  optimizer: laprop
+  beta1: 0.9
+  beta2: 0.99
+
+model:
+  reported_parameter_scale: 200m
+
+evaluation:
+  seeds: 5
+  primary_metric: episodic_return
