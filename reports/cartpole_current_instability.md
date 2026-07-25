@@ -6220,3 +6220,46 @@ plateau ever repairs that hidden boundary.
 - **Stop rule:** one read-only extension over the two retained checkpoints. Do
   not launch training, tune replay, or modify a loss from this timeline alone.
   Preserve the result and use it only to select the next bounded boundary.
+
+#### Seed-2 recovery-target timeline result
+
+The extension is retained in the existing
+`experiments/2026-07-25_cartpole_continuous_delivery_seed2_recovery_value_boundary/`
+directory. The best checkpoint at update 2,600 and periodic checkpoint at
+update 3,000 were evaluated against exactly the same 760 physical states as
+the already recorded update-2,500 and final results.
+
+At the best checkpoint, 59 states are actionable: trusted real branches prefer
+action 0 on 24 and action 1 on 35. Actor, posterior critic, one-step prior, and
+full dream choose action 0 on all 59, so every balanced accuracy is `0.500`.
+The full-dream/real margin correlation is `-0.113`. The actor's probability for
+the trusted-preferred action has median `0.0163`, and 44.1% of actionable rows
+are below 1%. Actor/full-dream agreement is `0.9956` on 679 statistically
+confident dream states.
+
+At update 3,000, 152 states are actionable: trusted branches prefer action 1
+on 144 and action 0 on eight. All four learned/deployed boundaries again choose
+action 0 on every actionable state, with balanced accuracy `0.500` and full-
+dream/real margin correlation `-0.0257`. The actor's trusted-preferred-action
+probability has median `0.00518`, is below 1% on 94.7% of actionable rows, and
+agrees with the dream target on 99.1% of 688 confident dream states.
+
+The result selects the preregistered persistent-corridor explanation. The
+general recovery target is already constant and wrong immediately before the
+solve, remains wrong at the first/best 500-return checkpoint, remains wrong in
+the middle of the uninterrupted 500-return plateau, and remains wrong after
+the final behavioral collapse. Live return therefore masks the defect rather
+than measuring its repair. The final update does not suddenly create a bad
+critic or actor; a parameter/distribution change exposes a recovery region in
+which the coupled actor and imagined value target have been confidently wrong
+throughout the solved phase.
+
+This timeline cannot by itself decide why the wrong target persists. The run
+does not checkpoint replay contents or imagination-start identities, so exact
+historical replay density for these fixed recovery histories cannot be
+reconstructed after the fact. The next bounded boundary must measure support
+prospectively: relate imagination starts to a fixed recovery cohort while also
+measuring target error on the subset that is demonstrably replay-near. If the
+target is wrong despite local replay support, the online objective/optimization
+is implicated; if error tracks loss of nearby starts, recovery-history support
+is implicated. Do not infer either cause from physical reachability alone.
