@@ -473,3 +473,30 @@ adequate, preregister one reference-state CartPole canary.
   selects longer context or cached carry. Passing permits one preregistered
   CartPole canary but must be repeated on its trained checkpoints because
   recurrent memory can change during learning.
+
+### Carry-parity result and bounded extension
+
+The clean-source probe at `8e1e7f0` completed in 3.28 seconds with peak RSS
+235 MiB. Its artifact is retained at
+`experiments/2026-07-25_cartpole_reference_carry_parity/summary.json`.
+
+| Burn-in | Comparisons | Feature cosine median | Feature relative L2 p95 | Actor action agreement |
+|---:|---:|---:|---:|---:|
+| 1 | 490 | 0.7398 | 0.7268 | 0.4163 |
+| 2 | 470 | 0.8312 | 0.6280 | 0.8340 |
+| 4 | 430 | 0.9240 | 0.4659 | 1.0000 |
+| 8 | 350 | 0.9801 | 0.2752 | 1.0000 |
+| 16 | 198 | 0.9971 | 0.1199 | 1.0000 |
+
+Burn-in eight fails both latent thresholds despite preserving the initialized
+actor's modal action. Sixteen passes cosine and action agreement but narrowly
+misses the `0.10` relative-L2 threshold. The curve is monotonic and strongly
+supports longer context rather than a categorical failure of truncated replay.
+
+One bounded extension is authorized before considering cached carry: repeat the
+identical model seed, environment seeds, action streams, deterministic posterior,
+and metrics for burn-ins 20 and 24. Select the shortest context that clears the
+same three thresholds. If neither passes, stop and implement replay-cached carry.
+Because sequence length is 32, a passing 20-row context would leave 12 trained
+rows per sample and a 24-row context would leave eight; replay pacing must use
+that exact trained-row count.

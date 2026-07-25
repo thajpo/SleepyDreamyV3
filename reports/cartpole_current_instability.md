@@ -6708,3 +6708,10 @@ Historical post-action row semantics remain checkpoint-selectable.
 This still uses bounded burn-in reconstructed from zero at arbitrary stream
 starts, not upstream's replay-cached model entries. A carry-parity measurement
 is therefore required before the first behavioral canary.
+
+The clean initialized-model parity run rejects the configured eight-row
+context: modal actor actions agree on every comparison, but median full-prefix
+feature cosine is `0.9801` and p95 relative L2 is `0.2752`. Sixteen rows improve
+these to `0.9971` and `0.1199`, narrowly missing the frozen L2 threshold. One
+bounded 20/24-row extension is selected; training remains stopped until the
+shortest passing context is known or cached carry is implemented.
