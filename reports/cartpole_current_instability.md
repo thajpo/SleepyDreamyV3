@@ -6124,3 +6124,66 @@ unstable beforehand, including a fall from 172.20 at update 2,500 to 26.75 at
 3,300. Continuous delivery has now prevented post-solution collapse in two
 fixed seeds, but seed 1 demonstrates that it has not made acquisition smooth or
 sample-efficient. Seed 2 remains required before the aggregate verdict.
+
+#### Seed-2 confirmation and aggregate result
+
+Seed 2 completed normally under
+`experiments/2026-07-24_cartpole_continuous_delivery_seed2_3500/` at clean
+source `a7a842c`. Its manifest run ID is
+`1943479650ba45629ba897ee042a86d7` (MLflow
+`c32f50aa28d847ba921b4744a543eec9`) and reports 3,500 updates, 21,422
+environment steps, 1,072.99 seconds, maximum-step completion, all expected
+checkpoints, and normal process shutdown. The complete evaluation curve is:
+
+```text
+100: 13.50, 200: 10.95, 300: 9.35, 400: 9.35,
+500: 9.35, 600: 9.35, 700: 9.35, 800: 9.35,
+900: 9.35, 1000: 24.75, 1100: 56.65, 1200: 66.90,
+1300: 76.80, 1400: 140.50, 1500: 147.45, 1600: 171.15,
+1700: 249.80, 1800: 52.00, 1900: 99.65, 2000: 137.55,
+2100: 150.60, 2200: 150.10, 2300: 248.25, 2400: 287.35,
+2500: 156.60, 2600: 500.00, 2700: 500.00, 2800: 500.00,
+2900: 500.00, 3000: 500.00, 3100: 500.00, 3200: 500.00,
+3300: 500.00, 3400: 500.00, 3500: 172.80
+```
+
+The mechanism operated correctly: final logged cumulative online fraction is
+`4.779%`, no descriptor was dropped, the online queue is empty at the final
+scalar sample, and replay received 1,096 pre-terminal chunks containing 21,278
+rows. Seed 2 nevertheless fails the behavioral gate. It first reaches 475 at
+update 2,600 and remains exactly 500 through update 3,400, then falls to 172.8
+at final. Its best-to-final gap is 327.2.
+
+The preregistered failure diagnostic is retained under
+`experiments/2026-07-25_cartpole_continuous_delivery_seed2_recovery_value_boundary/`.
+At update 2,500, 330 of the fixed 760 old-policy states are actionable. Trusted
+real branches prefer action 1 on 298 and action 0 on 32, while actor, posterior
+critic, one-step prior, and full dream choose action 0 on all 330. Every
+balanced accuracy is `0.500`; full-dream/real margin correlation is `-0.036`.
+Actor trusted-preferred-action probability has median `0.00548` and is below
+1% on `89.1%` of actionable states. Thus the wrong general recovery target is
+already present immediately before the live policy enters its 500-return
+corridor.
+
+At final, 240 states are actionable: trusted real branches prefer action 1 on
+238 and action 0 on two, while all four learned/deployed boundaries choose
+action 0 on all 240. Every balanced accuracy remains `0.500`; full-dream/real
+margin correlation worsens to `-0.219`. Actor trusted-preferred-action
+probability has median `0.00504` and is below 1% on `99.17%` of actionable
+states. The full dream is statistically confident on 712 fixed states and the
+actor agrees with it on all of them. This is the same causal shape as the
+complete-episode seed-0 collapse: a wrong self-reinforcing imagined value
+ordering exists during solved live behavior and later becomes behaviorally
+material.
+
+The aggregate confirmation therefore **fails**: seeds 0 and 1 pass the frozen
+behavioral gate, but seed 2 does not. Continuous delivery remains a necessary
+runtime/replay correction and caused a large controlled improvement, including
+preventing the matched seed-0 collapse. It is not a sufficient algorithmic
+stability fix. Across seeds, acquisition remains irregular and the learned
+policy-conditioned value target can still become a confident constant wrong
+classifier on reachable recovery states; the actor accurately follows that
+target. Do not describe CartPole as solved or return to broad Pong training on
+this evidence. The next intervention must address the online imagined/value
+target or its support, selected by a bounded diagnostic, rather than further
+queue timing, online-fraction, replay-capacity, entropy, or actor-rate tuning.
