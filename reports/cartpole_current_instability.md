@@ -6734,3 +6734,17 @@ replay-pacing-funded decision count, while the final manifest count also
 contains completed-episode startup debt and bounded collector overshoot. The
 projected 30--40 minute seed-0 run is safe, so the frozen canary is authorized
 without a configuration change.
+
+The seed-0 canary completed all 3,500 updates normally on clean commit
+`473e23f` (manifest `605ba73c3b1241e1a09a88b25093a027`, MLflow
+`f4d79c244ae54bf6a7b54799c6fee322`). It took 26:45.73, peaked at 3,904,188
+KiB RSS, dropped no replay descriptors, and recorded 21,408 actual environment
+steps. It acquired a controller but failed retention: evaluation reached 403.55
+at update 1,900, peaked at 480.55 at 2,400, crossed below the 400 retention
+floor at 2,600, and finished at 141.9. The best-to-final gap is 338.65.
+
+Disposition: the frozen gate fails and seeds 1/2 remain stopped. Runtime and
+replay delivery were healthy, so this is no longer the old throughput failure.
+The reference bundle repairs acquisition but not stability. No parameter
+tuning is selected. Trained best/final carry parity, fixed-policy component
+crossing, and rollout fidelity are the required next diagnostics.

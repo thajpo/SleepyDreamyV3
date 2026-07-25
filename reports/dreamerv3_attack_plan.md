@@ -560,3 +560,33 @@ than silently treating those two quantities as identical.
 The preflight therefore passes its stop rule. The next and only authorized
 behavioral run is the frozen seed-0 canary. No hyperparameter change is selected
 from this profile.
+
+### Seed-0 qualification result
+
+The clean-source canary at commit `473e23f` completed all 3,500 updates normally
+in 26:45.73 wall time, with 3,904,188 KiB peak RSS and no replay descriptor
+drops. Its manifest run ID is `605ba73c3b1241e1a09a88b25093a027`, its MLflow
+run ID is `f4d79c244ae54bf6a7b54799c6fee322`, and it ended at 21,408 actual
+environment steps. The 408-step difference from the pacing authorization is
+the expected startup/collector accounting debt identified by the preflight.
+
+The run **fails** the frozen behavior gate. It acquired a near-solved controller,
+reaching 403.55 at update 1,900 and the run best of 480.55 at update 2,400. It
+then fell through the retention floor at update 2,600 (389.65), declined to
+114.75 at update 3,200, and finished at 141.9. The best-to-final gap is 338.65.
+Seeds 1 and 2 are therefore not authorized.
+
+This is a narrower and more useful failure than the earlier controlled runs.
+The corrected reference architecture and replay contract can acquire a
+controller, while continued joint training still destroys deployed behavior.
+The process, fan-out, replay delivery, artifact, and evaluation paths remained
+healthy, so the old collection-outruns-learning defect does not explain this
+collapse. Low contemporaneous pole-angle reconstruction error also makes plain
+state reconstruction failure insufficient as an explanation.
+
+Per the frozen stop rule, no tuning follows this result. The next experiment is
+diagnostic: run trained carry parity on `checkpoint_best.pt` and
+`checkpoint_final.pt`, then apply the existing fixed-policy component cross and
+rollout-fidelity probes to the best/final pair. Those measurements decide
+whether the first post-acquisition break is replay carry, policy-conditioned
+representation drift, or imagined dynamics/value error.
