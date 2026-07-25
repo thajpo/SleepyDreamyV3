@@ -231,6 +231,65 @@ real environment?
 - This is one read-only comparison. Do not change training from it alone, and do
   not begin the replay-accounting canary until the result is documented.
 
+### Deployed-policy matched-rollout result
+
+The comparison ran from clean source `865eb93` and is retained under
+`experiments/2026-07-25_cartpole_deployed_policy_rollout_fidelity/`. It took
+629.84 seconds on one CPU thread with peak RSS 674 MiB.
+
+The solved checkpoint completed all 20 episodes at the 500-step Gym time limit;
+the final checkpoint averaged `45.2` over 904 transitions and 20 physical
+terminations. Therefore their absolute critic/return errors are not directly
+comparable: the probe's finite return-to-go target does not bootstrap at a
+time-limit truncation, whereas Dreamer correctly treats truncation as
+bootstrappable. The solved checkpoint's large negative oracle error is a
+diagnostic-target artifact, not evidence that its working critic is worse.
+
+Three same-semantics readouts remain valid:
+
+| Matched deployed actions | Update 3,000 | Final 3,500 |
+|---|---:|---:|
+| Mean real return | 500.0 | 45.2 |
+| One-step decoded-state mean MSE | 0.0061 | 0.0301 |
+| Fifteen-step decoded-state mean MSE | 0.0550 | 0.1240 |
+| Prior continuation on nonterminal transitions | 0.9971 | 0.9957 |
+| Prior continuation on physical terminal transitions | not observed | 0.9919 |
+
+Along the exact failed-policy action sequence, final one-step state error is
+about five times the solved-path error and fifteen-step error is about 2.25
+times larger. More importantly, the imagined prior assigns actual terminal
+transitions continuation probability `0.9919`; it effectively does not foresee
+the failures induced by its deployed policy. This selects rollout-distribution
+error/model exploitation as part of the boundary, while retaining coupling
+with the actor/representation drift that creates the bad action sequence.
+
+## Phase 1 final preregistration: final-only trajectory trace
+
+- Select 32 of the 401 final-only actionable replay occurrences uniformly
+  without replacement using seed 23.
+- Reconstruct update-3,000 and final posterior histories from the same retained
+  final evidence.
+- From each physical state, force each first action and then follow the complete
+  final controller in real CartPole for at most 30 steps.
+- On every realized history, evaluate the 2x2 actor/representation action cross:
+  solved actor/solved representation, final actor/solved representation, solved
+  actor/final representation, and final actor/final representation.
+- For the actual final-controller action, sample 64 final priors and record
+  decoded next-state error, reward, and continuation before observing the real
+  successor. The replayed real branch score must match the previously retained
+  final-policy label exactly.
+- Report the first solved/final action divergence, action histograms and
+  pairwise agreement, terminal/nonterminal predicted continuation, and state
+  error by depth.
+
+If the solved actor on final coordinates transfers the final action bias while
+the final actor on solved coordinates does not, representation coordinates are
+the leading policy-drift boundary. The reverse selects actor parameters. Both
+moving retains co-adaptation. Failure prediction that remains optimistic on
+the exact real terminal transitions selects the model target seen by
+imagination. Stop after this read-only trace and complete the reference oracle;
+do not modify training from this local implementation alone.
+
 ## Execution ladder
 
 1. Complete the offline component/target cross and independent JAX fixtures.

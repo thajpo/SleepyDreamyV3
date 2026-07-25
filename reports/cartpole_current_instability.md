@@ -6600,3 +6600,33 @@ actor follows it. The next read-only boundary is the exact deployed-action
 matched-rollout probe preregistered in `reports/dreamerv3_attack_plan.md`. It
 will distinguish world-model rollout error from posterior value fitting before
 any training intervention.
+
+#### Deployed-policy matched-rollout result
+
+The preregistered comparison ran from clean source `865eb93` under
+`experiments/2026-07-25_cartpole_deployed_policy_rollout_fidelity/`. It used one
+CPU thread, seeds 17--36, 64 samples, and horizons 1, 3, 5, 10, and 15; runtime
+was 629.84 seconds and peak RSS 674 MiB.
+
+The update-3,000 controller completed all 20 episodes at the 500-step time
+limit. The final controller averaged `45.2` over 904 transitions and 20
+physical terminations. This exposes a limitation in the existing absolute
+return decomposition: its finite return-to-go does not bootstrap at Gym time
+limits, while Dreamer treats truncation as bootstrappable. The solved
+checkpoint's large finite-target critic error therefore cannot be compared
+causally with the failed checkpoint's physical-terminal target.
+
+The matched local rollout metrics are still decisive. One-step decoded-state
+mean MSE rises from `0.0061` on solved-policy actions to `0.0301` on final-policy
+actions; at fifteen steps it rises from `0.0550` to `0.1240`. The final prior
+assigns mean continuation `0.9957` to nonterminal transitions and `0.9919` to
+the 20 actual terminal transitions. Thus the imagined model largely fails to
+foresee the physical failures caused by the final deployed action sequence.
+
+This selects rollout-distribution error/model exploitation as part of the
+policy-conditioned boundary, but does not yet tell whether actor weights or
+representation coordinates create the changed action sequence. The final
+read-only trace is preregistered in `reports/dreamerv3_attack_plan.md`: 32
+final-only replay histories, both forced actions, exact final real continuation,
+the 2x2 actor/representation action cross, and 64-sample prior predictions.
+Training remains stopped.
