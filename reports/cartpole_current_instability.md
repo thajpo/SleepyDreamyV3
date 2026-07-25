@@ -6187,3 +6187,36 @@ target. Do not describe CartPole as solved or return to broad Pong training on
 this evidence. The next intervention must address the online imagined/value
 target or its support, selected by a bounded diagnostic, rather than further
 queue timing, online-fraction, replay-capacity, entropy, or actor-rate tuning.
+
+### Preregistered seed-2 recovery-target timeline extension
+
+The completed failure probe already establishes that seed 2's recovery target
+is constant and wrong at update 2,500 and final. Before changing training, the
+retained best and periodic checkpoints can determine whether the 500-return
+plateau ever repairs that hidden boundary.
+
+- **Question:** does fixed-history recovery ordering become useful when live
+  evaluation first reaches 500, then degrade before final, or does a constant
+  wrong off-corridor target coexist with the entire solved plateau?
+- **Frozen targets:** reuse the already measured update-2,500 and final
+  checkpoints, and add seed 2's best checkpoint at update 2,600 plus periodic
+  update 3,000. Their live deterministic returns are 156.60, 500, 500, and
+  172.80 at final; update 3,000 lies inside the uninterrupted update-2,600
+  through update-3,400 plateau.
+- **Fixed data and equations:** use the identical 760 physical states from five
+  update-2,000 reference-observation-posterior source-policy histories, seeds
+  17--21, real branch horizon 30, and 64 model samples. Do not regenerate a new
+  cohort or alter actionability, confidence, critic, actor, or dream equations.
+- **Primary readouts:** trusted action histogram and support; actor, posterior
+  critic, one-step prior, and full-dream preference histograms and balanced
+  accuracy; full-dream/real margin correlation; actor trusted-preferred-action
+  probability; confident actor/dream agreement.
+- **Interpretation:** useful/non-constant recovery ordering at update 2,600 or
+  3,000 followed by final failure selects time-local target drift. Constant
+  wrong ordering throughout the solved checkpoints selects a narrow live
+  policy corridor that masks persistent off-corridor target error; the next
+  diagnostic must distinguish replay/support distance from an objective error
+  on well-supported states. A mixed result must retain both explanations.
+- **Stop rule:** one read-only extension over the two retained checkpoints. Do
+  not launch training, tune replay, or modify a loss from this timeline alone.
+  Preserve the result and use it only to select the next bounded boundary.
