@@ -1,7 +1,10 @@
+import pytest
+
 from scripts.probe_cartpole_replay_history_support import (
     csv_fieldnames,
     select_actionable_rows,
     summarize_support_rows,
+    validate_evidence_pair,
 )
 
 
@@ -44,3 +47,11 @@ def test_csv_schema_includes_fields_added_only_to_selected_rows():
     rows = [{"state": 1}, {"state": 2, "policy_q": 3}]
 
     assert csv_fieldnames(rows) == ["state", "policy_q"]
+
+
+def test_cross_step_evidence_requires_explicit_opt_in():
+    validate_evidence_pair(3_000, 3_000, allow_cross_step=False)
+    validate_evidence_pair(3_000, 3_500, allow_cross_step=True)
+
+    with pytest.raises(ValueError, match="--allow-cross-step"):
+        validate_evidence_pair(3_000, 3_500, allow_cross_step=False)

@@ -6480,3 +6480,48 @@ disposition.
 - **Stop rule:** two read-only crossed cells. Do not launch training, tune replay,
   or change target/optimizer equations from this matrix alone. Document the
   result and select at most one further boundary if the matrix is mixed.
+
+#### Replay-history model/distribution cross result
+
+The two crossed cells completed under
+`experiments/2026-07-25_cartpole_replay_history_support_seed2_cross/`. The
+script now rejects a checkpoint/evidence step mismatch unless
+`--allow-cross-step` is explicit and records both steps plus `cross_step=true`.
+Four focused tests, compile, and direct Pyright passed before execution.
+
+| Target model | Replay evidence | Actionable rows; real labels 0 / 1 | Actor balanced | Posterior critic balanced | One-step prior balanced | Full dream balanced | Dream/real margin corr. |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Step 3,000 | Step 3,000 | 265; 126 / 139 | 0.907 | 0.820 | 0.735 | 0.899 | 0.826 |
+| Step 3,000 | Final 3,500 | 202; 105 / 97 | 0.887 | 0.853 | 0.763 | 0.883 | 0.838 |
+| Final 3,500 | Step 3,000 | 600; 150 / 450 | 0.604 | 0.434 | 0.473 | 0.590 | 0.766 |
+| Final 3,500 | Final 3,500 | 597; 137 / 460 | 0.562 | 0.477 | 0.509 | 0.562 | 0.733 |
+
+The solved update-3,000 controller/value system remains useful on the final
+replay histories, clearing every preregistered `0.70` threshold. The final
+system fails not only on its contemporaneous evidence but also on the replay
+distribution that its own earlier checkpoint had learned. This selects
+parameter/target drift and rejects a new-corridor generalization gap as the
+primary explanation. The final actor remains downstream: it agrees with the
+confident dream target on `98.9%` of the crossed update-3,000 evidence and
+`99.6%` of matching final evidence.
+
+Replay eviction cannot explain this result. The final run logged 397 completed
+episodes and one active partial episode against capacity 512, so every retained
+update-3,000 history remained eligible at final. Uniform selector sampling and
+continuous delivery supply the data, but the policy-conditioned scalar target
+changes as the actor/model system changes and eventually assigns a wrong value
+landscape to histories it previously handled. The cross does not identify
+which shared parameter block moves first, and its trusted continuation actor
+changes with the target checkpoint as preregistered. Combined with the earlier
+fresh-head representability result and repeated near-perfect actor/dream
+agreement, however, the active defect is now specifically online imagined-value
+target/head drift rather than replay transport, history eviction, actor fitting,
+or irrecoverable latent information loss.
+
+The matrix is categorical rather than mixed, so no additional diagnostic is
+authorized under its stop rule. The next action should be a separately
+preregistered causal intervention aimed at retaining correct value ordering on
+still-eligible histories, with the exact replay-history probe as its mechanism
+gate. Do not infer that a slower target, stronger regularizer, or supervised
+return loss is correct without choosing one from the existing rejected-canary
+history and the current objective equations.

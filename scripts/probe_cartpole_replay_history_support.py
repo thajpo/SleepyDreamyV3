@@ -94,6 +94,17 @@ def csv_fieldnames(rows: list[dict]) -> list[str]:
     return list(dict.fromkeys(key for row in rows for key in row))
 
 
+def validate_evidence_pair(
+    checkpoint_step: int, evidence_step: int, *, allow_cross_step: bool
+) -> None:
+    """Require aligned artifacts unless a diagnostic explicitly crosses them."""
+    if checkpoint_step != evidence_step and not allow_cross_step:
+        raise ValueError(
+            f"checkpoint step {checkpoint_step} does not match evidence step "
+            f"{evidence_step}; pass --allow-cross-step for a preregistered cross"
+        )
+
+
 def _reset_latent(cfg, world_model, device: str):
     h = torch.zeros(1, cfg.d_hidden * cfg.rnn_n_blocks, device=device)
     z = torch.zeros(
@@ -116,6 +127,7 @@ def run_replay_history_probe(
     model_samples: int,
     actionable_cap: int,
     seed: int,
+    allow_cross_step: bool = False,
 ) -> dict:
     """Evaluate one checkpoint on its own read-only replay evidence sample."""
     evidence = load_replay_evidence(evidence_path)
@@ -132,11 +144,11 @@ def run_replay_history_probe(
     ) = load_checkpoint_models(checkpoint_path, device, critic_source="online")
     checkpoint_step = int(checkpoint.get("step", checkpoint.get("train_step", -1)))
     evidence_step = int(evidence["train_step"])
-    if checkpoint_step != evidence_step:
-        raise ValueError(
-            f"checkpoint step {checkpoint_step} does not match evidence step "
-            f"{evidence_step}"
-        )
+    validate_evidence_pair(
+        checkpoint_step,
+        evidence_step,
+        allow_cross_step=allow_cross_step,
+    )
     if int(evidence["sequence_length"]) != int(cfg.sequence_length):
         raise ValueError("checkpoint and evidence sequence lengths differ")
     if cfg.environment_name != "CartPole-v1" or cfg.use_pixels:
@@ -324,6 +336,8 @@ def run_replay_history_probe(
         "checkpoint": str(checkpoint_path),
         "evidence": str(evidence_path),
         "train_step": checkpoint_step,
+        "evidence_train_step": evidence_step,
+        "cross_step": checkpoint_step != evidence_step,
         "checkpoint_name": str(evidence["checkpoint_name"]),
         "critic_used": critic_key,
         "selector": str(evidence["selector"]),
@@ -369,6 +383,7 @@ def main() -> None:
     parser.add_argument("--model-samples", type=int, default=64)
     parser.add_argument("--actionable-cap", type=int, default=760)
     parser.add_argument("--seed", type=int, default=17)
+    parser.add_argument("--allow-cross-step", action="store_true")
     args = parser.parse_args()
     if args.real_horizon <= 0 or args.model_samples < 2 or args.actionable_cap <= 0:
         parser.error("horizon/cap must be positive and model samples at least two")
@@ -382,6 +397,7 @@ def main() -> None:
         model_samples=args.model_samples,
         actionable_cap=args.actionable_cap,
         seed=args.seed,
+        allow_cross_step=args.allow_cross_step,
     )
     boundary = summary["selected_boundary"] or {}
     print(
