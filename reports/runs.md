@@ -2,11 +2,11 @@
 
 Generated non-destructively from run manifests and config snapshots. No checkpoint contents were loaded.
 
-- Indexed runs: 105
-- Indexed size: 8.1 GiB
-- Manifest / legacy: 67 / 38
-- Exact-comparison eligible: 49
-- Dispositions: {'incomplete': 12, 'keep': 53, 'review': 40}
+- Indexed runs: 110
+- Indexed size: 8.8 GiB
+- Manifest / legacy: 72 / 38
+- Exact-comparison eligible: 53
+- Dispositions: {'incomplete': 12, 'keep': 57, 'review': 41}
 
 A blank comparison key means the run lacks the provenance or protocol needed for an exact comparison. Legacy runs are retained for review.
 
@@ -57,9 +57,12 @@ A blank comparison key means the run lacks the provenance or protocol needed for
 | `experiments/2026-07-21_cartpole_online_target_seed0_3500` | completed | keep | yes | 9 | 164.2 MiB |
 | `experiments/2026-07-22_090738_CartPole-v1` | completed | keep | yes | 9 | 164.2 MiB |
 | `experiments/2026-07-22_093847_CartPole-v1` | completed | keep | yes | 9 | 164.2 MiB |
+| `experiments/2026-07-22_211047_CartPole-v1` | interrupted | review | no | 0 | 14.2 KiB |
+| `experiments/2026-07-22_cartpole_actor_unimix_10pct_seed0_3500` | completed | keep | yes | 9 | 172.5 MiB |
 | `experiments/2026-07-22_cartpole_balanced_continuation_seed0_3500` | completed | keep | yes | 9 | 164.2 MiB |
 | `experiments/2026-07-22_cartpole_corrected_reference_optimizer_seed0_3500` | completed | keep | yes | 9 | 177.5 MiB |
 | `experiments/2026-07-22_cartpole_episode_coherent_seed0_3500` | completed | keep | yes | 9 | 177.5 MiB |
+| `experiments/2026-07-22_cartpole_online_replay_seed0_3500` | completed | keep | yes | 9 | 172.5 MiB |
 | `experiments/2026-07-22_cartpole_reference_observation_posterior_seed0_3500` | completed | keep | yes | 9 | 172.5 MiB |
 | `experiments/2026-07-22_cartpole_reference_optimizer_seed0_3500` | completed | keep | yes | 9 | 177.5 MiB |
 | `experiments/2026-07-22_cartpole_reference_rssm_core_seed0_3500` | completed | keep | yes | 9 | 177.5 MiB |
@@ -72,6 +75,8 @@ A blank comparison key means the run lacks the provenance or protocol needed for
 | `experiments/2026-07-22_cartpole_symmetric_twohot_seed0_3500_retry1` | interrupted | review | no | 2 | 36.5 MiB |
 | `experiments/2026-07-22_cartpole_symmetric_twohot_seed0_3500_retry2` | completed | keep | yes | 9 | 164.2 MiB |
 | `experiments/2026-07-22_cartpole_truncation_bootstrap_seed0_3500` | completed | keep | yes | 9 | 164.2 MiB |
+| `experiments/2026-07-22_cartpole_uniform_replay_seed0_3500` | completed | keep | yes | 9 | 172.5 MiB |
+| `experiments/2026-07-24_cartpole_continuous_delivery_seed0_3500` | completed | keep | yes | 9 | 172.5 MiB |
 | `runs/cartpole_collection_budget_smoke` | completed | keep | no | 1 | 5.2 MiB |
 | `runs/cartpole_critic_warmup_canary_99e543a_seed1_3200` | completed | keep | yes | 3 | 50.1 MiB |
 | `runs/cartpole_current_10k_12e748b/seed_0` | interrupted | review | no | 2 | 32.2 MiB |

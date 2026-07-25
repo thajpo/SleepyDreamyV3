@@ -5969,3 +5969,88 @@ preservation, and rejection with exact full-episode return annotations.
 No behavioral evidence has been collected yet. The preregistered single seed
 is now authorized at clean source `b1166c9`; it changes only continuous replay
 delivery relative to the completed online-FIFO run.
+
+#### Continuous-delivery canary result
+
+The frozen run completed normally under
+`experiments/2026-07-24_cartpole_continuous_delivery_seed0_3500/`. Its manifest
+run ID is `cd3cc89d86a649b79116ae6672b3be14` (MLflow
+`4243a8d18f4d4d4eb15de65447b78199`) and records clean source `30cb834`, whose
+only commit after implementation `b1166c9` documents the mechanical gate. It
+used ROCm 6.4 for 3,500 updates, 21,401 environment steps, and 1,106.60 seconds,
+then wrote periodic, best, and final checkpoints and joined the collector
+normally.
+
+The complete evaluation curve is:
+
+```text
+100: 9.40, 200: 9.40, 300: 9.55, 400: 9.35,
+500: 9.35, 600: 9.35, 700: 9.35, 800: 9.35,
+900: 9.35, 1000: 40.00, 1100: 85.15, 1200: 79.95,
+1300: 62.60, 1400: 172.15, 1500: 138.70, 1600: 94.55,
+1700: 73.35, 1800: 50.00, 1900: 58.80, 2000: 309.40,
+2100: 180.25, 2200: 500.00, 2300: 500.00, 2400: 500.00,
+2500: 500.00, 2600: 500.00, 2700: 500.00, 2800: 500.00,
+2900: 500.00, 3000: 500.00, 3100: 500.00, 3200: 500.00,
+3300: 500.00, 3400: 500.00, 3500: 465.70
+```
+
+This passes every preregistered behavioral gate. It first reaches 475 at
+update 2,200, never falls below 465.7 afterward, finishes above 400, and has a
+best-to-final gap of only 34.3. The matched complete-episode online-FIFO run was
+also 500 through update 3,200 but then scored 303.35, 219.45, and 74.30 at
+updates 3,300--3,500. Continuous delivery instead scores 500, 500, and 465.70
+at those same checkpoints. On this controlled seed, experience-visibility
+timing therefore causes the previously observed late collapse; the earlier
+FIFO corrected the average fresh-data amount but not when those rows became
+available.
+
+The final logged cumulative online fraction is `4.776%`, inside the required
+3--7% interval. Replay received 1,521 chunks containing 21,257 rows by the last
+scalar sample; 1,098 chunks arrived before their episode terminated. The
+online descriptor queue is empty at that sample, no descriptor was dropped,
+and one currently active partial episode is bounded in replay. Trainer and
+collector RSS remained bounded and eventually decreased, rejecting repeated
+prefix copying or chunk-queue growth as hidden explanations for the result.
+
+The preregistered boundary probe is retained under
+`experiments/2026-07-24_cartpole_continuous_delivery_recovery_value_boundary/`.
+It uses the identical 760 update-2,000 source-history states, real horizon 30,
+and 64 model samples as the complete-episode result.
+
+At update 2,500, only 51 states are real-policy-actionable: trusted branches
+prefer action 0 on 20 and action 1 on 31. Actor and posterior critic choose
+action 0 on all 51; the one-step prior chooses action 1 three times and the
+full dream once. Balanced accuracies are actor/posterior `0.500`, prior
+`0.507`, and full dream `0.516`; full-dream/real margin correlation is
+`-0.031`. The actor's trusted-preferred-action probability has mean `0.407`,
+median `0.124`, and is never below 1%.
+
+At final, only 35 states are actionable, with nearly balanced trusted labels:
+18 prefer action 0 and 17 prefer action 1. The actor, one-step prior, and full
+dream choose action 0 on all 35; the posterior chooses action 1 on five.
+Balanced accuracies are actor/prior/full dream `0.500` and posterior `0.418`;
+full-dream/real margin correlation is `0.054`. Actor trusted-preferred-action
+probability has mean `0.503`, median `0.566`, and is never below 1%. Among 313
+confident full-dream states, actor/target agreement is `0.981`.
+
+The primary boundary gate is underpowered rather than passed: neither
+checkpoint supplies the required 100 actionable rows, and learned target
+ordering remains near constant and chance-level where the first action still
+matters. The preregistered behavioral alternative does pass. Both trusted
+action classes are retained with substantially balanced support, while the
+number of action-sensitive old states falls from 142 to 51 at update 2,500 and
+from 624 to 35 at final relative to complete-episode delivery. In most fixed
+recovery states either initial action now survives the full real horizon. The
+actor also retains soft support instead of collapsing: complete-episode final
+median preferred probability was `0.005` with `98.1%` below 1%, versus `0.566`
+and zero below 1% here.
+
+Continuous delivery is therefore sufficient to prevent the controlled
+seed-0 late collapse and makes the residual value-ordering error far less
+behaviorally material. It does not prove that recovery value targets are
+correct, that CartPole is stable across seeds, or that the fix transfers to
+Pong. The next evidence step should be a small fixed-seed CartPole confirmation
+contract before promoting this from a one-seed causal result to a stable
+benchmark correction; only after that should the same transport semantics be
+treated as a prerequisite, not a solution, for Pong.
