@@ -6748,3 +6748,18 @@ replay delivery were healthy, so this is no longer the old throughput failure.
 The reference bundle repairs acquisition but not stability. No parameter
 tuning is selected. Trained best/final carry parity, fixed-policy component
 crossing, and rollout fidelity are the required next diagnostics.
+
+Trained carry parity from clean commit `ad905bb` shows that the initialized
+20-row gate is not preserved by training. Best-checkpoint median feature cosine,
+p95 relative L2, and actor agreement are `0.98505`, `0.41128`, and `0.93525`;
+final-checkpoint values are `0.99565`, `0.31928`, and `0.99281`. Both fail, but
+final carry is better than best carry, so worsening truncation error cannot by
+itself explain the best-to-final collapse. This remains a replay/deployment
+conformance gap that must qualify later experiments, not an evidence-selected
+training change yet.
+
+The frozen offline follow-up is: best/final matched rollout fidelity on 20
+episodes (seeds 17--36, horizons 1/3/5/10/15, 64 samples), then a full 16-cell
+best/final component cross using one immutable set of best-checkpoint real
+continuation labels over best replay evidence. No model parameters or training
+settings change; stop after the summaries identify the first broken boundary.

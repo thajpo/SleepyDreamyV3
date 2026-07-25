@@ -590,3 +590,39 @@ diagnostic: run trained carry parity on `checkpoint_best.pt` and
 rollout-fidelity probes to the best/final pair. Those measurements decide
 whether the first post-acquisition break is replay carry, policy-conditioned
 representation drift, or imagined dynamics/value error.
+
+### Trained carry result and next diagnostic contract
+
+The trained carry probe ran from clean commit `ad905bb` on the same 20 random
+CartPole episodes and the selected 20-row context. The best checkpoint fails:
+median full-prefix feature cosine `0.98505`, p95 relative L2 `0.41128`, and
+actor agreement `0.93525`. The final checkpoint also fails the feature gate,
+with `0.99565`, `0.31928`, and `0.99281`, respectively. At 24 rows the best
+checkpoint still fails (`0.98708`, `0.32714`, `0.93939`), while final remains
+better but still misses the L2 gate (`0.99776`, `0.23407`, `1.0`).
+
+Training therefore makes the initialized model's 20-row carry qualification
+non-stationary. This is a real replay/deployment mismatch and disqualifies an
+unqualified causal reading of truncated replay features. It does **not** by
+itself explain best-to-final collapse: the failed final controller has better,
+not worse, carry parity than the best controller on this frozen off-policy
+panel. Cached replay state or a trained-policy carry contract remains a likely
+future conformance requirement, but changing replay now would violate the
+diagnostic stop rule.
+
+The next bounded diagnostic uses no training and changes no model parameters:
+
+- matched rollout fidelity on best and final, CPU, seeds 17--36, 20 episodes,
+  horizons 1/3/5/10/15, 64 prior samples, batch 64;
+- fixed real labels generated once from `checkpoint_best.pt` over
+  `replay_evidence_best.npz`, real horizon 30, seed 17, 64 model samples, cap
+  760;
+- the complete 16-cell representation/heads/critic/actor cross on those same
+  labels and evidence, CPU, one Torch thread, seed 17, 64 model samples.
+
+The fixed label policy and evidence prevent the target from changing between
+cells. Stop after the matrix and rollout summaries. If matched final components
+retain the best policy's real action ordering while the deployed final actor
+does not, select policy/representation tracking. If model action values lose
+ordering first, select imagined dynamics/value targets. Cross-coordinate cell
+failures alone are not evidence that one module is broken.
