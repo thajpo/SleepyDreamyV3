@@ -6054,3 +6054,43 @@ Pong. The next evidence step should be a small fixed-seed CartPole confirmation
 contract before promoting this from a one-seed causal result to a stable
 benchmark correction; only after that should the same transport semantics be
 treated as a prerequisite, not a solution, for Pong.
+
+### Preregistered continuous-delivery seed confirmation
+
+- **Question:** does the seed-0 continuous-delivery result replicate under the
+  next two fixed seeds strongly enough to call the current CartPole contract
+  preliminarily stable, rather than a one-seed rescue?
+- **Hypothesis:** prompt chunk visibility removes the episode-length stale-data
+  interval for every seed, so seeds 1 and 2 will acquire and retain CartPole in
+  the same 3,500-update budget as seed 0.
+- **Frozen contract:** retain implementation `b1166c9` and every seed-0 setting:
+  `d_hidden=128`, four blocks, batch 8, sequence 16, burn-in 4, replay ratio 16,
+  capacity 512 episodes, minimum 16, one collector, online FIFO plus continuous
+  delivery, zero explicit recency, 15-step dreams, equal `4e-5` rates with
+  1,000-step optimizer warmup, actor unimix `0.01`, entropy `0.001`, online
+  value targets, 20 deterministic evaluations every 100 updates, and
+  checkpoints every 500. The only run variable is seed: preserve completed seed
+  0 and add seeds 1 and 2. Use clean current source containing documentation
+  only after `b1166c9`.
+- **Per-seed mechanism gate:** normal completion and collector join, cumulative
+  online fraction 3--7%, zero descriptor drops, observed pre-terminal chunks,
+  and no sustained queue or host-memory growth.
+- **Per-seed behavioral gate:** reach return 475 by update 3,500, never fall
+  below 300 afterward, finish at least 400, and keep best-to-final gap at most
+  100. The aggregate confirmation passes only if all three fixed seeds pass.
+  Report acquisition step and every evaluation for failures; do not replace a
+  failing seed.
+- **Execution:** run seeds 1 and 2 sequentially. The seed-0 profile showed one
+  trainer plus collector is comfortably bounded, but concurrent ROCm trainers
+  would add GPU-memory and scheduling variation without reducing experimental
+  uncertainty. Analysis and ledger updates may proceed between runs.
+- **Failure diagnostic:** if a new seed fails behavior, use its update-2,500 and
+  final checkpoints with the existing fixed recovery-history probe after the
+  run. This characterizes the failure but cannot change the confirmation
+  verdict.
+- **Stop rule:** exactly the two additional seeds, even if the first fails, so
+  the bounded result distinguishes a universal failure from seed variability.
+  Do not tune delivery/chunk/replay settings, extend budgets, or add replacement
+  seeds. If all pass, treat continuous delivery as a necessary current CartPole
+  correction and return to unresolved value/Pong transfer questions. If any
+  fail, characterize the failing boundary before further algorithm changes.
