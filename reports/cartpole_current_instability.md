@@ -6263,3 +6263,59 @@ measuring target error on the subset that is demonstrably replay-near. If the
 target is wrong despite local replay support, the online objective/optimization
 is implicated; if error tracks loss of nearby starts, recovery-history support
 is implicated. Do not infer either cause from physical reachability alone.
+
+### Preregistered exact replay-history support diagnostic
+
+The earlier prospective coverage run rejected loss of sampled large-|x|
+physical states, but it did not retain the action/reset histories that define
+the RSSM posterior used as an imagination start. A physically similar CartPole
+state is not evidence that the learner saw the same recurrent coordinate. The
+continuous-delivery seed-2 replay itself was not checkpointed, so this boundary
+requires one prospective replication rather than another post-hoc inference.
+
+- **Question:** is the constant wrong recovery target present on recurrent
+  histories drawn directly from the contemporaneous replay selector, or only on
+  older fixed histories outside the current training distribution?
+- **Observability change:** add an opt-in, state-only replay evidence sample at
+  every model checkpoint. Using an independent local RNG, draw 256 complete
+  `sequence_length=16` streams from the same uniform valid-start selector and
+  save states, actions, rewards, terminal/reset markers, and selection metadata
+  atomically beside the checkpoint. Do not save pixels, mutate the trainer RNG,
+  consume the online FIFO, or include the evidence file in model resume state.
+  The option defaults off and rejects vision-only configurations.
+- **Frozen run:** repeat the continuous-delivery seed-2 3,500-update contract:
+  `d_hidden=128`, four blocks, batch 8, sequence 16, burn-in 4, replay ratio 16,
+  capacity 512 episodes, minimum 16, one collector, uniform selector plus online
+  FIFO and continuous delivery, 15-step dreams, equal `4e-5` rates with
+  1,000-step optimizer warmup, actor unimix `0.01`, entropy `0.001`, online
+  value targets, 20 deterministic evaluations every 100 updates, and model
+  checkpoints every 500. The only training-semantic variable is asynchronous
+  execution of a new run; the diagnostic sampling itself must be read-only.
+- **Mechanical gate:** tests must prove deterministic local sampling, unchanged
+  global Python/NumPy/Torch RNG state, unchanged online queue/counters, exact
+  stream/reset alignment across episode boundaries, atomic files loadable with
+  `allow_pickle=False`, rejection without vector state, and historical default
+  off. Run focused/full tests, compile/type checks, and a multiprocess CPU smoke
+  that produces and reloads one evidence file.
+- **Offline boundary:** for update 2,500, the best checkpoint, update 3,000, and
+  final, feed each retained sequence through its matching checkpoint using the
+  training burn-in/reset contract. From every post-burn-in physical state,
+  force both real CartPole actions and follow the matching deterministic actor
+  for 30 steps. Report actionable prevalence and class counts over all sampled
+  rows. On a fixed-seed uniform cap of 760 actionable rows, report actor,
+  real-next-observation posterior critic, one-step prior critic, and 64-sample
+  full-dream ordering, margins, and actor/target agreement using the existing
+  recovery-value equations.
+- **Decision rule:** at least 100 directly sampled actionable histories with a
+  constant learned preference or posterior/full-dream balanced accuracy at or
+  below `0.55` selects value-target/objective failure despite contemporaneous
+  replay support. Fewer than 100 actionable histories while the existing fixed
+  cohort remains amply actionable selects recovery-history support as the
+  proximal gap. Useful non-constant ordering above `0.60` on replay histories
+  but not the fixed cohort is a mixed distribution/generalization result. These
+  thresholds classify the boundary; they are not a CartPole success metric.
+- **Stop rule:** one seed and the four retained checkpoint/evidence pairs. Do
+  not change a loss, tune sampling, add seeds, or start Pong until this result is
+  documented. Include interrupted or behaviorally different replication
+  outcomes; do not require the new run to reproduce the exact old curve before
+  analyzing its directly supported histories.
