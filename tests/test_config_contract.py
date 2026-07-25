@@ -26,6 +26,7 @@ def test_hydra_yaml_defines_every_runtime_field():
     assert runtime_config.posterior_head_layers == 1
     assert runtime_config.replay_sequence_mode == "stream"
     assert runtime_config.replay_row_alignment == "reference"
+    assert runtime_config.replay_burn_in == 20
     assert runtime_config.online_replay is True
     assert runtime_config.continuous_replay_delivery is True
     assert runtime_config.replay_evidence_samples == 0
