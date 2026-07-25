@@ -4,6 +4,7 @@ import json
 import logging
 import random
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import NamedTuple, Optional
 import torch
 import torch.nn.functional as F
@@ -16,6 +17,7 @@ import time
 from .logging import create_step_metrics, log_step_metrics, log_progress
 from .forward import dreamer_step
 from .gradient_diagnostics import measure_gradient_alignment
+from .replay_evidence import save_replay_evidence
 from ..runtime.replay_buffer import EpisodeReplayBuffer
 from .checkpoints import save_checkpoint, load_checkpoint
 from ..models import (
@@ -727,7 +729,7 @@ class WorldModelTrainer:
         self, *, final: bool = False, label: str | None = None
     ) -> str:
         """Persist the complete trainer state using the shared checkpoint contract."""
-        return save_checkpoint(
+        path = save_checkpoint(
             self.checkpoint_dir,
             self.train_step,
             self.encoder,
@@ -753,6 +755,26 @@ class WorldModelTrainer:
             config_snapshot=asdict(self.config),
             continuation_terminal_ema=self.continuation_terminal_ema,
         )
+        evidence_samples = int(
+            getattr(self.config, "replay_evidence_samples", 0)
+        )
+        if evidence_samples > 0:
+            checkpoint_name = Path(path).stem.removeprefix("checkpoint_")
+            evidence = self.replay_buffer.sample_state_evidence(
+                evidence_samples,
+                seed=int(self.config.seed) + 9_000_000 + self.train_step,
+            )
+            evidence_path = Path(self.checkpoint_dir) / (
+                f"replay_evidence_{checkpoint_name}.npz"
+            )
+            save_replay_evidence(
+                evidence_path,
+                evidence,
+                train_step=self.train_step,
+                checkpoint_name=checkpoint_name,
+            )
+            logger.info("replay_evidence_saved path=%s", evidence_path)
+        return path
 
     def should_skip_ac_update(self) -> bool:
         """Decide if we should skip the Actor-Critic update this batch based on WM:AC ratio."""

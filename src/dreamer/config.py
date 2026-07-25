@@ -193,6 +193,9 @@ class Config:
     # Publish fixed-size transition chunks during an episode so replay can make
     # current-policy rows sampleable without waiting for episode termination.
     continuous_replay_delivery: bool = False
+    # Opt-in research evidence: save this many read-only state replay sequences
+    # beside each model checkpoint. Zero keeps normal training artifact size.
+    replay_evidence_samples: int = 0
 
     # ===== Training: replay ratio gating =====
     replay_ratio: float = 1.0
@@ -359,6 +362,14 @@ def validate_config(cfg: Config) -> None:
             "continuous_replay_delivery is incompatible with "
             "critic_real_return_scale > 0"
         )
+    if cfg.replay_evidence_samples < 0:
+        errors.append("replay_evidence_samples must be >= 0")
+    if cfg.replay_evidence_samples > 0 and cfg.replay_sequence_mode != "stream":
+        errors.append(
+            "replay_evidence_samples requires replay_sequence_mode='stream'"
+        )
+    if cfg.replay_evidence_samples > 0 and cfg.n_observations <= 0:
+        errors.append("replay_evidence_samples requires vector observations")
     if cfg.replay_ratio <= 0:
         errors.append("replay_ratio must be > 0")
     if not 0.0 <= cfg.recent_fraction <= 1.0:

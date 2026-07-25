@@ -6319,3 +6319,40 @@ requires one prospective replication rather than another post-hoc inference.
   documented. Include interrupted or behaviorally different replication
   outcomes; do not require the new run to reproduce the exact old curve before
   analyzing its directly supported histories.
+
+#### Exact replay-history mechanical gate result
+
+The opt-in evidence path is implemented with authored default
+`replay_evidence_samples=0`. When enabled for a vector-observation stream run,
+each model checkpoint draws the configured number of uniform valid starts with
+a private Python RNG while holding replay's read lock. It records the exact
+state/action/reward/reset/terminal sequences and stable collector, episode, and
+offset identifiers. It neither consumes online descriptors nor changes global
+Python, NumPy, or Torch RNG state. Evidence is compressed atomically beside the
+model checkpoint and its loader always uses `allow_pickle=False`; vision-only
+and episode-mode requests fail validation before run side effects.
+
+The matching offline probe applies the checkpoint's own sequence length and
+burn-in, resets posterior carry at the retained `is_first` markers, and uses
+posterior mode like deterministic deployment. It first measures trusted
+30-step actionability on every retained post-burn-in replay occurrence, then
+uses an independently seeded uniform cap for the existing posterior/prior/full-
+dream boundary equations. It reports both sampled occurrences and unique replay
+starts so sampling with replacement is visible rather than mistaken for unique
+history support.
+
+Focused replay/config/artifact/probe tests passed (`67`), the full fast suite
+passed (`254`), source/test/script compilation passed, and the supported scoped
+Pyright gate plus direct checks of the new module and script reported zero
+errors. A one-update multiprocess CPU run is retained under
+`experiments/2026-07-25_replay_evidence_cpu_smoke/` with manifest
+`269c7bb0781c402589adb7cd55fc33e2`. It reached replay readiness after 17
+pre-terminal chunks and 72 delivered rows, wrote both step and final evidence
+files, reloaded them without pickle, and joined its collector normally. Each
+four-sequence smoke artifact occupies 4 KiB. A two-step end-to-end probe over
+the step checkpoint processed 12 post-burn-in rows and correctly reported zero
+actionable rows rather than manufacturing a boundary classification.
+
+This smoke is intentionally dirty-source mechanical evidence because it ran
+before the implementation commit. No long run has started. The frozen seed-2
+replication is authorized only from the clean implementation-and-ledger commit.

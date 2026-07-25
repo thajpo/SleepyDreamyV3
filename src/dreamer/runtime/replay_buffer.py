@@ -757,10 +757,14 @@ class EpisodeReplayBuffer:
                     )
         return candidates
 
-    def _sample_stream_subsequence(self, candidate):
-        """Sample one full sequence from a same-collector episode stream."""
+    def _sample_stream_subsequence_with_position(self, candidate, *, rng=None):
+        """Sample a stream and return its stable collector/episode position."""
+        if rng is None:
+            rng = random
         segment, episode_index, valid_count, _buffer_index = candidate
-        offset = random.randint(0, valid_count - 1)
+        offset = rng.randint(0, valid_count - 1)
+        start_episode = segment[episode_index][1]
+        position = (int(start_episode[8]), int(start_episode[9]), int(offset))
         remaining = self.sequence_length
         pieces = []
         while remaining:
@@ -774,7 +778,76 @@ class EpisodeReplayBuffer:
             episode_index += 1
             offset = 0
 
-        return self._compose_stream_pieces(pieces)
+        return self._compose_stream_pieces(pieces), position
+
+    def _sample_stream_subsequence(self, candidate, *, rng=None):
+        """Sample one full sequence from a same-collector episode stream."""
+        sample, _position = self._sample_stream_subsequence_with_position(
+            candidate, rng=rng
+        )
+        return sample
+
+    def sample_state_evidence(self, count: int, *, seed: int) -> dict[str, np.ndarray]:
+        """Read-only uniform stream sample for checkpoint-local diagnostics.
+
+        A private RNG prevents observability from changing the trainer's future
+        replay choices. Online descriptors are intentionally neither consumed nor
+        copied: this estimates the uniform valid-start population that supplies
+        the large majority of authored replay batches.
+        """
+        if count <= 0:
+            raise ValueError("replay evidence sample count must be positive")
+        if self.sequence_mode != "stream":
+            raise ValueError("replay evidence sampling requires stream mode")
+
+        rng = random.Random(int(seed))
+        with self.lock:
+            candidates = self._stream_start_candidates()
+            if not candidates:
+                raise RuntimeError("replay stream has no complete sequence")
+            selected = rng.choices(
+                candidates,
+                weights=[item[2] for item in candidates],
+                k=count,
+            )
+            sampled = [
+                self._sample_stream_subsequence_with_position(candidate, rng=rng)
+                for candidate in selected
+            ]
+            samples = [sample for sample, _position in sampled]
+            positions = [position for _sample, position in sampled]
+
+        def stack(field: int) -> np.ndarray:
+            values = [sample[field] for sample in samples]
+            if any(value is None for value in values):
+                raise ValueError("state replay evidence cannot contain missing fields")
+            return np.stack([np.asarray(value) for value in values])
+
+        states = stack(1)
+        if states.shape[-1] == 0:
+            raise ValueError("replay evidence sampling requires vector observations")
+        return {
+            "states": states,
+            "actions": stack(2),
+            "rewards": stack(3),
+            "is_last": stack(4),
+            "is_terminal": stack(5),
+            "mask": stack(8),
+            "is_first": stack(9),
+            "start_collector_id": np.asarray(
+                [position[0] for position in positions], dtype=np.int64
+            ),
+            "start_episode_id": np.asarray(
+                [position[1] for position in positions], dtype=np.int64
+            ),
+            "start_offset": np.asarray(
+                [position[2] for position in positions], dtype=np.int64
+            ),
+            "sample_count": np.asarray(count, dtype=np.int64),
+            "sequence_length": np.asarray(self.sequence_length, dtype=np.int64),
+            "seed": np.asarray(seed, dtype=np.int64),
+            "selector": np.asarray("uniform_stream"),
+        }
 
     def _sample_stream(self, batch_size, recent_fraction, candidates=None):
         if candidates is None:
