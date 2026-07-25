@@ -6715,3 +6715,12 @@ feature cosine is `0.9801` and p95 relative L2 is `0.2752`. Sixteen rows improve
 these to `0.9971` and `0.1199`, narrowly missing the frozen L2 threshold. One
 bounded 20/24-row extension is selected; training remains stopped until the
 shortest passing context is known or cached carry is implemented.
+
+The bounded extension passes at 20 rows: median feature cosine `0.99868`, p95
+relative L2 `0.08486`, and actor agreement `1.0`. Twenty-four rows also passes,
+so the shorter context is selected. Batch 8, sequence 32, and context 20 retain
+12 trained rows per sequence and 96 trained rows per update, exactly matching
+the old batch-8, sequence-16, context-4 diagnostic's trained-row count. The
+single-seed qualification canary is frozen in
+`reports/contracts/cartpole_reference_v3_state_v1.yaml`; an exact-config short
+profile is its final preflight.

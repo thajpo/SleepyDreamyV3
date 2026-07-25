@@ -19,6 +19,10 @@ def test_frozen_contract_totals_are_internally_consistent():
     assert results["official_e3f0224_atari100k"]["raw_environment_frames"] == 440_000
     assert results["official_e3f0224_atari100k"]["expected_gradient_updates"] == 27_500
     assert results["cartpole_drift_v1"]["expected_gradient_updates"] == 3_500
+    assert (
+        results["cartpole_reference_v3_state_v1"]["expected_gradient_updates"]
+        == 3_500
+    )
 
 
 def test_paper_and_current_source_contracts_remain_distinct():
@@ -47,6 +51,18 @@ def test_cartpole_contract_exposes_world_model_accounting_mismatch():
     assert world_model_ratio == pytest.approx(
         training["effective_world_model_replay_ratio"]
     )
+
+
+def test_reference_cartpole_contract_aligns_all_trained_row_counts():
+    contract = load_contract(
+        CONTRACT_DIR / "cartpole_reference_v3_state_v1.yaml"
+    )
+    training = contract["training"]
+
+    assert training["sampled_sequence_length"] - training["replay_context_rows"] == 12
+    assert training["trained_rows_per_update"] == 8 * 12
+    assert training["world_model_rows_per_update"] == 8 * 12
+    assert training["actor_value_starts_per_update"] == 8 * 12
 
 
 def test_contract_validation_fails_closed_on_unit_drift():

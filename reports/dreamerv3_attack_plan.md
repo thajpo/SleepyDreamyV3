@@ -500,3 +500,42 @@ same three thresholds. If neither passes, stop and implement replay-cached carry
 Because sequence length is 32, a passing 20-row context would leave 12 trained
 rows per sample and a 24-row context would leave eight; replay pacing must use
 that exact trained-row count.
+
+### Carry extension result
+
+The identical clean-source extension retained under
+`experiments/2026-07-25_cartpole_reference_carry_parity/extension_20_24.json`
+completed in 1.76 seconds with peak RSS 235 MiB. Burn-in 20 produced 139
+comparisons, median cosine `0.99868`, p95 relative L2 `0.08486`, and actor
+agreement `1.0`; burn-in 24 produced 99 comparisons, `0.99931`, `0.06032`, and
+`1.0`. Both pass, so the stop rule selects the shorter 20-row context.
+
+This result changes the proposed CartPole sample from length 16/context 4 to
+length 32/context 20. With batch size 8, both contracts train exactly 96 rows
+per update. At replay ratio 16, both therefore authorize one update per six
+agent decisions and preserve the 21,000-decision/3,500-update comparison.
+
+## Phase 2 qualification canary preregistration
+
+The complete machine-readable contract is
+`reports/contracts/cartpole_reference_v3_state_v1.yaml`.
+
+- **Hypothesis:** after removing runtime, replay-throughput, row-alignment,
+  architecture, and context-accounting confounds, the pinned state-only model
+  will acquire and retain a CartPole controller through update 3,500.
+- **Causal bundle:** `reference_v3_state`, reference reset rows, loss-free
+  20-row context, and exact trained-row replay accounting. This is a replication
+  conformance bundle, not a single-component causal canary.
+- **Frozen run:** ROCm device, training seed 0, one collector, 3,500 updates,
+  expected 21,000 decisions, batch 8, sequence 32, context 20, replay ratio 16,
+  buffer 512, startup 16 completed episodes, uniform selector, 20 deterministic
+  evaluation episodes every 100 updates, checkpoints/evidence every 500, no
+  early stop.
+- **Behavior gate:** reach mean return 475; never fall below 400 afterward;
+  finish at least 475; best-to-final gap at most 25.
+- **Evidence gate:** retain the manifest, all evaluation points, periodic/best/
+  final checkpoints, and 256 replay evidence sequences per checkpoint. Repeat
+  carry parity on trained checkpoints before interpreting a pass or failure.
+- **Stop rule:** first profile an exact-config short run. If memory and projected
+  runtime are safe, run seed 0 once. Failure selects diagnostics, not tuning.
+  Passing selects unchanged seeds 1 and 2.
