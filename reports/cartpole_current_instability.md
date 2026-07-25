@@ -6446,3 +6446,37 @@ completed from unchanged evidence. Focused probe tests, compile, and direct
 Pyright passed, followed by the full `255`-test fast suite. The failed derived
 artifact attempt did not alter checkpoints, replay evidence, or experimental
 disposition.
+
+### Preregistered replay-history model/distribution cross
+
+- **Question:** did final failure arise because the solved model cannot
+  generalize to a newly entered replay corridor, because final parameter drift
+  damaged ordering on the previously solved replay distribution, or both?
+- **Frozen matrix:** retain the completed diagonal cells (update-3,000 model on
+  update-3,000 evidence and final model on final evidence). Add exactly two
+  crossed cells: update-3,000 model on final evidence, and final model on
+  update-3,000 evidence. Do not regenerate evidence or alter checkpoints.
+- **Equations:** apply each target checkpoint's deterministic posterior, actor,
+  online critic, 30-step real continuation policy, one-step prior, and 64-sample
+  full dream to every post-burn-in history in the supplied evidence. Retain the
+  760-row actionable cap and seed 17. The evidence step mismatch must be an
+  explicit CLI opt-in and recorded in the summary; matching remains the safe
+  default.
+- **Primary readouts:** actionable support and real class counts; actor,
+  posterior critic, prior critic, and full-dream balanced accuracy; dream/real
+  margin correlation; and confident actor/dream agreement. Compare each cross
+  against its matching diagonal, not against live return alone.
+- **Interpretation:** a solved update-3,000 target above `0.70` on final evidence
+  while the final target remains poor selects parameter/target drift. A solved
+  target below `0.60` on final evidence while the final target remains above
+  `0.70` on update-3,000 evidence selects new-corridor generalization/arrival.
+  Final failure on update-3,000 evidence selects forgetting or drift on an
+  already learned distribution. Both crosses below `0.60` retain a coupled
+  distribution-plus-drift explanation.
+- **Limitation:** trusted real continuation follows the target checkpoint's own
+  actor, so the cross asks whether each complete controller/value system can
+  recover from the retained histories. It does not hold the continuation policy
+  fixed across cells. A mixed result may require that narrower control.
+- **Stop rule:** two read-only crossed cells. Do not launch training, tune replay,
+  or change target/optimizer equations from this matrix alone. Document the
+  result and select at most one further boundary if the matrix is mixed.
