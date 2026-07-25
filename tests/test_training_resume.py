@@ -75,6 +75,7 @@ def test_cli_resume_restores_checkpoint_model_and_target_semantics(tmp_path):
         original_dir,
         extra_overrides=[
             "models.rssm_core=legacy",
+            "models.architecture_contract=historical",
             "models.continue_head_layers=0",
             "models.vector_encoder_mode=legacy",
             "models.posterior_head_layers=0",

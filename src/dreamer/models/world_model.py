@@ -3,6 +3,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from .decoder import ObservationDecoder, StateOnlyDecoder
 from .math_utils import unimix_logits
+from .reference import (
+    ReferenceMLP,
+    ReferenceRMSNorm,
+    initialize_reference_module,
+    reference_truncated_normal_,
+)
 
 
 class RSSMWorldModel(nn.Module):
@@ -29,6 +35,14 @@ class RSSMWorldModel(nn.Module):
     ):
         super().__init__()
         self.d_hidden = models_config.d_hidden
+        self.architecture_contract = str(
+            getattr(models_config, "architecture_contract", "historical")
+        )
+        norm = (
+            ReferenceRMSNorm
+            if self.architecture_contract == "reference_v3_state"
+            else nn.RMSNorm
+        )
         num_classes = self.d_hidden // 16
 
         # GatedRecurrentUnit | Uses n_blocks independent GRUs computed in parallel
@@ -65,17 +79,17 @@ class RSSMWorldModel(nn.Module):
             # one grouped projection.
             self.dynin_deter = nn.Sequential(
                 nn.Linear(h_dim, self.d_hidden),
-                nn.RMSNorm(self.d_hidden),
+                norm(self.d_hidden),
                 nn.SiLU(),
             )
             self.z_embedding = nn.Sequential(
                 nn.Linear(stoch_dim, self.d_hidden),
-                nn.RMSNorm(self.d_hidden),
+                norm(self.d_hidden),
                 nn.SiLU(),
             )
             self.dynin_action = nn.Sequential(
                 nn.Linear(env_config.n_actions, self.d_hidden),
-                nn.RMSNorm(self.d_hidden),
+                norm(self.d_hidden),
                 nn.SiLU(),
             )
             self.dynhid = BlockLinear(
@@ -83,7 +97,7 @@ class RSSMWorldModel(nn.Module):
                 4 * self.d_hidden,
                 self.d_hidden,
             )
-            self.dynhid_norm = nn.RMSNorm(h_dim)
+            self.dynhid_norm = norm(h_dim)
             self.dyngru = BlockLinear(
                 self.n_blocks,
                 self.d_hidden,
@@ -99,6 +113,7 @@ class RSSMWorldModel(nn.Module):
             d_hidden=self.d_hidden,
             num_latents=models_config.num_latents,
             num_classes=num_classes,
+            architecture_contract=self.architecture_contract,
         )
 
         self.n_latents = models_config.num_latents
@@ -118,7 +133,7 @@ class RSSMWorldModel(nn.Module):
         elif posterior_head_layers == 1:
             self.posterior_head = nn.Sequential(
                 nn.Linear(posterior_in_dim, self.d_hidden),
-                nn.RMSNorm(self.d_hidden, eps=1e-4),
+                norm(self.d_hidden, eps=1e-4),
                 nn.SiLU(),
                 nn.Linear(self.d_hidden, posterior_out_dim),
             )
@@ -136,9 +151,18 @@ class RSSMWorldModel(nn.Module):
 
         # Rewards use two-hot encoding
         reward_out = int(num_bins)
-        self.reward_predictor = nn.Linear(h_z_dim, reward_out)
-        nn.init.zeros_(self.reward_predictor.weight)
-        nn.init.zeros_(self.reward_predictor.bias)
+        if self.architecture_contract == "reference_v3_state":
+            self.reward_predictor = ReferenceMLP(
+                d_in=h_z_dim,
+                d_hidden=self.d_hidden,
+                d_out=reward_out,
+                hidden_layers=1,
+                outscale=0.0,
+            )
+        else:
+            self.reward_predictor = nn.Linear(h_z_dim, reward_out)
+            nn.init.zeros_(self.reward_predictor.weight)
+            nn.init.zeros_(self.reward_predictor.bias)
         continue_head_layers = int(
             getattr(models_config, "continue_head_layers", 0)
         )
@@ -146,12 +170,20 @@ class RSSMWorldModel(nn.Module):
             # Preserve the parameter layout of historical checkpoints.
             self.continue_predictor = nn.Linear(h_z_dim, 1)
         elif continue_head_layers == 1:
-            self.continue_predictor = nn.Sequential(
-                nn.Linear(h_z_dim, self.d_hidden),
-                nn.RMSNorm(self.d_hidden),
-                nn.SiLU(),
-                nn.Linear(self.d_hidden, 1),
-            )
+            if self.architecture_contract == "reference_v3_state":
+                self.continue_predictor = ReferenceMLP(
+                    d_in=h_z_dim,
+                    d_hidden=self.d_hidden,
+                    d_out=1,
+                    hidden_layers=1,
+                )
+            else:
+                self.continue_predictor = nn.Sequential(
+                    nn.Linear(h_z_dim, self.d_hidden),
+                    nn.RMSNorm(self.d_hidden),
+                    nn.SiLU(),
+                    nn.Linear(self.d_hidden, 1),
+                )
         else:
             raise ValueError("continue_head_layers must be 0 or 1")
 
@@ -169,7 +201,20 @@ class RSSMWorldModel(nn.Module):
                 d_in=h_z_dim,
                 d_hidden=models_config.d_hidden,
                 n_observations=env_config.n_observations,
+                architecture_contract=self.architecture_contract,
             )
+
+        if self.architecture_contract == "reference_v3_state":
+            initialize_reference_module(self)
+            for block in self.modules():
+                if isinstance(block, BlockLinear):
+                    reference_truncated_normal_(block.weight, fan_in=block.d_in)
+                    nn.init.zeros_(block.bias)
+            assert isinstance(self.reward_predictor, ReferenceMLP)
+            reward_output = self.reward_predictor.mlp[-1]
+            assert isinstance(reward_output, nn.Linear)
+            nn.init.zeros_(reward_output.weight)
+            nn.init.zeros_(reward_output.bias)
 
     def step_dynamics(self, z_embed, action, h_prev):
         """
@@ -412,19 +457,31 @@ class DynamicsPredictor(nn.Module):
     Takes logits over the bins (final dimension)
     """
 
-    def __init__(self, d_in, d_hidden, num_latents, num_classes):
+    def __init__(
+        self,
+        d_in,
+        d_hidden,
+        num_latents,
+        num_classes,
+        architecture_contract="historical",
+    ):
         super().__init__()
         d_out = num_latents * num_classes
         self.num_latents = num_latents
         self.num_classes = num_classes
 
         # Paper: "RMSNorm normalization, SiLU activation"
+        norm = (
+            ReferenceRMSNorm
+            if architecture_contract == "reference_v3_state"
+            else nn.RMSNorm
+        )
         self.layers = nn.Sequential(
             nn.Linear(d_in, d_hidden, bias=True),
-            nn.RMSNorm(d_hidden),
+            norm(d_hidden),
             nn.SiLU(),
             nn.Linear(d_hidden, d_hidden),
-            nn.RMSNorm(d_hidden),
+            norm(d_hidden),
             nn.SiLU(),
             nn.Linear(d_hidden, d_out),
         )

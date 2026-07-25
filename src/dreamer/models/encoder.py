@@ -2,6 +2,8 @@ import torch.nn as nn
 import torch
 import torch.nn.functional as F
 
+from .reference import ReferenceFeatureMLP
+
 
 class ObservationEncoder(nn.Module):
     """
@@ -213,11 +215,20 @@ class ReferenceVectorMLP(nn.Module):
         return self.mlp(x)
 
 
-def make_vector_encoder_mlp(mode, d_in, d_hidden, n_layers=3):
+def make_vector_encoder_mlp(
+    mode, d_in, d_hidden, n_layers=3, architecture_contract="historical"
+):
     """Construct a checkpoint-stable historical or reference vector encoder."""
     if mode == "legacy":
         return ThreeLayerMLP(d_in=d_in, d_hidden=d_hidden, d_out=d_hidden)
     if mode == "reference":
+        if architecture_contract == "reference_v3_state":
+            return ReferenceFeatureMLP(
+                d_in=d_in,
+                d_hidden=d_hidden,
+                hidden_layers=n_layers,
+                symlog_input=True,
+            )
         return ReferenceVectorMLP(
             d_in=d_in,
             d_hidden=d_hidden,
@@ -242,6 +253,7 @@ class StateOnlyEncoder(nn.Module):
         n_observations,
         num_latents=32,
         vector_encoder_mode="legacy",
+        architecture_contract="historical",
     ):
         super().__init__()
         self.MLP = make_vector_encoder_mlp(
@@ -249,6 +261,7 @@ class StateOnlyEncoder(nn.Module):
             d_in=n_observations,
             d_hidden=d_hidden,
             n_layers=mlp_config.n_layers,
+            architecture_contract=architecture_contract,
         )
 
         num_classes = d_hidden // 16

@@ -176,6 +176,8 @@ def dictconfig_to_config(cfg: DictConfig) -> Config:
             d["d_hidden"] = models.d_hidden
         if "num_latents" in models:
             d["num_latents"] = models.num_latents
+        if "architecture_contract" in models:
+            d["architecture_contract"] = models.architecture_contract
         if "rssm_core" in models:
             d["rssm_core"] = models.rssm_core
         if "continue_head_layers" in models:
@@ -237,6 +239,7 @@ def resolve_resume_config(
     if checkpoint_config is not None:
         return replace(
             flat_cfg,
+            architecture_contract=checkpoint_config.architecture_contract,
             rssm_core=checkpoint_config.rssm_core,
             continue_head_layers=checkpoint_config.continue_head_layers,
             vector_encoder_mode=checkpoint_config.vector_encoder_mode,
@@ -311,6 +314,7 @@ def resolve_resume_config(
         )
     return replace(
         flat_cfg,
+        architecture_contract="historical",
         rssm_core=rssm_core,
         continue_head_layers=continue_head_layers,
         vector_encoder_mode=vector_encoder_mode,

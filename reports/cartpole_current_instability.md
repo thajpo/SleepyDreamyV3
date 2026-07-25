@@ -6658,3 +6658,26 @@ steps and that imagination fails to warn against their real consequences.
 
 Phase 1 stops here. The evidence selects reference numerical and architecture
 conformance—not an actor-only optimizer tweak—as the next controlled step.
+
+#### Independent reference-conformance result
+
+An independent JAX 0.4.33 fixture now checks the local symlog, symexp, two-hot,
+lambda-return, and percentile equations against pinned source
+`e3f02248693a79dc8b0ebd62c93683888ddaccfe`. All six comparisons pass. The
+exercise also corrected one audit-process error: a first fixture omitted the
+initial value from the local `H+1` imagination layout and appeared to show an
+off-by-one; end-to-end tracing showed the production indexing already matches
+the pinned equation.
+
+The same audit established that the existing “reference” modules were still
+numerically incomplete. Official RMSNorm has a learned shift in addition to
+scale, and official vector encoding symlogs observations before its hidden
+stack. A versioned `reference_v3_state` contract now composes those semantics
+with exact size-1M dimensions, normalized head depths, fan-in truncated-normal
+initialization, and pinned output scales. It rejects pixel use and hybrid
+component settings, while historical checkpoints retain their old contract.
+
+This is an evidence-selected conformance repair, not a claim that architecture
+was the unique cause of collapse. The representation/policy trace makes it the
+right boundary to standardize before the next causal run. Replay context/reset
+parity remains the final mechanical prerequisite.

@@ -37,3 +37,10 @@ from .math_utils import (
     twohot_expectation,
 )
 from .optimizers import LaProp, adaptive_gradient_clipping
+from .reference import (
+    ReferenceFeatureMLP,
+    ReferenceMLP,
+    ReferenceRMSNorm,
+    initialize_reference_module,
+    reference_truncated_normal_,
+)

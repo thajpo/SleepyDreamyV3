@@ -12,6 +12,9 @@ environment:
 
 models:
   d_hidden: 64
+  architecture_contract: reference_v3_state
+  rnn:
+    n_blocks: 8
 
 train:
   batch_size: 32

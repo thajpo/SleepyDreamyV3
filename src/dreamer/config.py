@@ -50,6 +50,9 @@ class Config:
     # ===== Model architecture =====
     d_hidden: int = 64
     num_latents: int = 32
+    # Historical composes the checkpoint-compatible local modules below.
+    # reference_v3_state selects the complete pinned state-only architecture.
+    architecture_contract: str = "historical"  # historical, reference_v3_state
     # Legacy preserves historical checkpoint construction. Authored Hydra
     # configs select the grouped, normalized reference recurrent core.
     rssm_core: str = "legacy"  # legacy, reference
@@ -317,6 +320,10 @@ def validate_config(cfg: Config) -> None:
 
     if cfg.d_hidden < 16 or cfg.d_hidden % 16 != 0:
         errors.append("d_hidden must be at least 16 and divisible by 16")
+    if cfg.architecture_contract not in {"historical", "reference_v3_state"}:
+        errors.append(
+            "architecture_contract must be 'historical' or 'reference_v3_state'"
+        )
     if cfg.rssm_core not in {"legacy", "reference"}:
         errors.append("rssm_core must be 'legacy' or 'reference'")
     if cfg.continue_head_layers not in {0, 1}:
@@ -325,6 +332,19 @@ def validate_config(cfg: Config) -> None:
         errors.append("vector_encoder_mode must be 'legacy' or 'reference'")
     if cfg.posterior_head_layers not in {0, 1}:
         errors.append("posterior_head_layers must be 0 or 1")
+    if cfg.architecture_contract == "reference_v3_state":
+        if cfg.use_pixels:
+            errors.append("reference_v3_state does not yet support pixel observations")
+        if cfg.rssm_core != "reference":
+            errors.append("reference_v3_state requires rssm_core='reference'")
+        if cfg.continue_head_layers != 1:
+            errors.append("reference_v3_state requires continue_head_layers=1")
+        if cfg.vector_encoder_mode != "reference":
+            errors.append("reference_v3_state requires vector_encoder_mode='reference'")
+        if cfg.posterior_head_layers != 1:
+            errors.append("reference_v3_state requires posterior_head_layers=1")
+        if cfg.rnn_n_blocks != 8:
+            errors.append("reference_v3_state requires rnn_n_blocks=8")
     if cfg.optimizer_contract not in {"legacy", "reference"}:
         errors.append("optimizer_contract must be 'legacy' or 'reference'")
     if cfg.critic_ema_target not in {"distribution", "mean_twohot"}:
