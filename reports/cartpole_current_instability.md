@@ -6763,3 +6763,22 @@ episodes (seeds 17--36, horizons 1/3/5/10/15, 64 samples), then a full 16-cell
 best/final component cross using one immutable set of best-checkpoint real
 continuation labels over best replay evidence. No model parameters or training
 settings change; stop after the summaries identify the first broken boundary.
+
+The best-evidence diagnostics completed from clean commit `a870eb2`. On their
+own policy distributions, final matched rollouts have lower one-step state MSE
+and higher target correlation than best (`0.121` versus `0.218`, `0.880` versus
+`0.625`), so global model degradation is rejected; continuation calibration is
+worse, but the terminal cohorts differ. The immutable best-evidence panel has
+317 actionable rows. All-best versus all-final actor balanced accuracy is
+`0.866` versus `0.863`, and full-dream accuracy is `0.890` versus `0.866`.
+Final representation with the old critic collapses posterior accuracy to
+`0.175`, while the matching final critic restores `0.752`: latent and critic
+coadaptation, not one portable failed component.
+
+Decision: final parameters retain the best controller's action ordering on the
+best trajectory support, despite final deployed return 141.9. The selected
+boundary is policy-conditioned coverage/recovery. One last offline cohort is
+frozen: use the best checkpoint as the fixed real continuation policy on final
+replay evidence and repeat the identical 16-cell cross (CPU, one thread, real
+horizon 30, seed 17, 64 samples, cap 760). This tests recovery ordering on the
+collapsed policy's actual state distribution; no training or tuning is allowed.

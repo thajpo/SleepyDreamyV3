@@ -626,3 +626,44 @@ retain the best policy's real action ordering while the deployed final actor
 does not, select policy/representation tracking. If model action values lose
 ordering first, select imagined dynamics/value targets. Cross-coordinate cell
 failures alone are not evidence that one module is broken.
+
+### Best-evidence diagnostic result
+
+The frozen offline diagnostics completed from clean commit `a870eb2`. Matched
+rollout fidelity took 6:23.37 and peaked at 607 MiB RSS. The best policy averaged
+443.85 over seeds 17--36; final averaged 137.35. On each policy's own states,
+the final model had *lower* one-step state MSE (`0.121` versus `0.218`) and
+higher one-step target correlation (`0.880` versus `0.625`). Continuation Brier
+error worsened (`0.00775` versus `0.00195`), but these cohorts have different
+state and terminal distributions. The result rejects a simple global loss of
+world-model fidelity; it cannot establish policy-conditioned causality.
+
+Fixed-label generation over best replay evidence took 4:25.55, peaked at 435
+MiB, and produced 317 actionable rows among 3,072 trained rows. The complete
+16-cell matrix took 5:26.47 with 1,095 MiB peak RSS. On the immutable best-policy
+states and real continuation labels:
+
+| Cell | Actor BA | Posterior BA | One-step prior BA | Full dream BA |
+|---|---:|---:|---:|---:|
+| all best | 0.866 | 0.647 | 0.891 | 0.890 |
+| final representation, best heads/critic/actor | 0.855 | 0.175 | 0.481 | 0.861 |
+| final representation/critic, best heads/actor | 0.855 | 0.752 | 0.866 | 0.864 |
+| all final | 0.863 | 0.752 | 0.842 | 0.866 |
+
+The matched final system retains useful best-policy action ordering. Swapping
+only the latent representation breaks the old critic coordinate system, while
+the matched final representation and critic restore it. That is coadaptation,
+not a portable broken critic. The final actor also remains aligned on the best
+policy's states. Consequently, the 338.65-point behavioral collapse is not
+encoded as one independently failed component on the old trajectory support.
+
+This selects the policy-conditioned coverage/recovery boundary: small policy
+changes move deployment onto histories not represented by the best-evidence
+panel, where an error can compound even though the old corridor remains solved.
+One final offline cohort is authorized before any intervention. Reuse the best
+checkpoint as the immutable real continuation policy, but label
+`replay_evidence_final.npz`; then run the same complete 16-cell cross with CPU,
+one Torch thread, horizon 30, seed 17, 64 samples, and cap 760. This asks which
+components preserve the trusted best controller's recovery ordering on states
+actually visited by the collapsed policy. Stop after this cohort and select
+the first failed boundary; do not train or tune.
