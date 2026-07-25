@@ -290,6 +290,48 @@ the exact real terminal transitions selects the model target seen by
 imagination. Stop after this read-only trace and complete the reference oracle;
 do not modify training from this local implementation alone.
 
+### Final-only trajectory-trace result
+
+The frozen trace ran from clean source `d0015b1` and is retained under
+`experiments/2026-07-25_cartpole_final_only_policy_trace/`. It selected 32
+histories, executed both forced branches from each, and reproduced all retained
+final-controller branch scores exactly (`0.0` maximum error). The 64 branches
+contained 1,589 transitions and 58 physical terminations.
+
+Every branch contained a solved/final deployed-action divergence. The first
+divergence occurred at mean depth `2.97`; 40 of 64 branches diverged by depth
+three. Across the 1,531 decision rows, solved/solved and final/final actions
+agreed on `63.42%`, leaving 560 changed rows. On those changed rows:
+
+- replacing solved actor weights with final actor weights while retaining the
+  solved representation transferred the final action on `0%` of rows;
+- replacing solved representation coordinates with final representation
+  coordinates while retaining solved actor weights transferred the final action
+  on `100%` of rows.
+
+The action histograms make the same interaction visible. The solved actor emits
+action 1 on 1,407 of 1,531 solved-coordinate rows but action 0 on 1,527 of 1,531
+final-coordinate rows. The final actor partly compensates on final coordinates,
+emitting action 1 on 847 rows rather than four. This is not evidence that one
+semantic feature vanished: latent coordinates are free to move, and checkpoint-
+crossed heads are not invariant to that movement. It is direct evidence that
+the representation/policy interface moved faster or farther than the coupled
+policy could harmlessly track on the realized failure histories.
+
+The model-side failure remains independently visible. Final priors predict
+continuation `0.99597` on physical terminal transitions and `0.99580` on
+nonterminal transitions; they rank terminal transitions as very slightly *more*
+likely to continue. Mean next-state MSE is `0.0459` overall and `0.0980` at
+termination. Thus the changed latent-policy closed loop enters failure within a
+few actions while imagination supplies almost no terminal warning.
+
+The selected boundary is therefore **representation/policy tracking under a
+model-exploited failure corridor**. The evidence rejects actor parameters alone
+as the initiator on these histories, but it does not distinguish harmless latent
+reparameterization plus lag from loss of dynamically useful state. Phase 1 now
+stops as preregistered. The next action is independent numerical and architecture
+conformance against pinned source before any training intervention.
+
 ## Execution ladder
 
 1. Complete the offline component/target cross and independent JAX fixtures.

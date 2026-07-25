@@ -6630,3 +6630,31 @@ read-only trace is preregistered in `reports/dreamerv3_attack_plan.md`: 32
 final-only replay histories, both forced actions, exact final real continuation,
 the 2x2 actor/representation action cross, and 64-sample prior predictions.
 Training remains stopped.
+
+#### Final-only real-trajectory trace result
+
+The final Phase 1 trace ran from clean source `d0015b1` and is retained under
+`experiments/2026-07-25_cartpole_final_only_policy_trace/`. All 64 forced real
+branches reproduced their retained final-policy score with zero error. They
+yielded 1,589 transitions, including 58 physical terminations.
+
+Solved and final deployed actions diverged on every branch, at mean depth
+`2.97`; 560 of 1,531 decision rows changed action. On exactly those rows,
+swapping final actor weights onto the solved representation transferred none of
+the final actions, while swapping final representation coordinates beneath the
+solved actor transferred every final action. The solved actor changes from
+1,407 action-1 decisions on solved coordinates to 1,527 action-0 decisions on
+final coordinates. The final actor partially compensates for that coordinate
+movement, rather than initiating the observed action changes by itself.
+
+The final prior remains blind at the realized physical boundary: mean predicted
+continuation is `0.99597` on terminal transitions versus `0.99580` on
+nonterminal transitions, with terminal next-state MSE `0.0980`. The supported
+boundary is representation/policy tracking inside a model-exploited failure
+corridor. Because latent coordinates can be reparameterized without losing
+information, this does not prove that the final representation is intrinsically
+bad; it shows that the coupled interface produces changed actions within a few
+steps and that imagination fails to warn against their real consequences.
+
+Phase 1 stops here. The evidence selects reference numerical and architecture
+conformance—not an actor-only optimizer tweak—as the next controlled step.
