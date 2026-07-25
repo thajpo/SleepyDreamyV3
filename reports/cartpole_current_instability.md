@@ -6552,3 +6552,51 @@ movement before selecting any stabilizer. In parallel, deterministic numerical
 fixtures will compare the local implementation with pinned source
 `e3f02248693a79dc8b0ebd62c93683888ddaccfe`. The paper-v2, current-source, and
 CartPole diagnostic contracts are frozen separately under `reports/contracts/`.
+
+#### Fixed-policy component/target cross result
+
+The complete component matrix ran from clean source `ab04ed0` against both
+update-3,000 and final replay evidence. It crossed solved/final representation,
+reward/continuation heads, online critic, and actor while reusing immutable real
+branch labels from the complete update-3,000 controller. Every matrix cell used
+seed 17, 64 model samples, and all actionable rows. The 32 cells completed on
+CPU with peak RSS below 814 MiB; outputs are retained under
+`experiments/2026-07-25_cartpole_fixed_policy_component_cross/`.
+
+Against stable solved-policy labels, the matching final system remains useful.
+On update-3,000 evidence its actor, posterior critic, and full dream have
+balanced accuracies `0.912`, `0.691`, and `0.895`; on final evidence they have
+accuracies `0.882`, `0.760`, and `0.888`. Matching solved components score
+`0.907`, `0.820`, `0.895` and `0.887`, `0.853`, `0.867`, respectively. Final
+parameters therefore do not simply erase the solved controller's stable value
+ordering.
+
+Crossed components are strongly coordinate-dependent. On final evidence, final
+representation with solved reward/continuation heads and final critic/actor
+gives dream accuracy `0.511`, while matching final heads restores `0.888`.
+Final critic on solved representation gives posterior accuracy `0.494`; solved
+critic on final representation gives `0.376`; the matched final pair gives
+`0.760`. These cells measure compatibility across moving latent coordinates,
+not independent component quality, so no individual head is selected as the
+cause.
+
+The decisive change is in the policy-conditioned real labels. On final
+evidence, the solved controller has 202 actionable histories and the final
+controller has 597. The 196 histories actionable under both agree on 98.47% of
+preferences with margin correlation `0.9988`. The other 401 are ties under
+solved continuation, whose two branch scores average `29.79/30`, but become
+failure-sensitive under final continuation, with mean branch scores `23.80`
+and `25.77`. The final actor and dream score only `0.420` and `0.360` balanced
+accuracy on that new corridor. Across all 3,072 rows, deployed solved/final
+actions agree on 71.03%; final behavior changes from a roughly balanced
+`1522/1550` action histogram to action-0-heavy `2410/662`. The actors agree
+exactly on the shared actionable cohort, so drift occurs mainly in previously
+safe/indifferent states.
+
+This supersedes both the critic-specific and stable-target-forgetting readings.
+Policy drift makes formerly safe states failure-sensitive; the final imagined
+target does not order this newly induced failure corridor correctly, and the
+actor follows it. The next read-only boundary is the exact deployed-action
+matched-rollout probe preregistered in `reports/dreamerv3_attack_plan.md`. It
+will distinguish world-model rollout error from posterior value fitting before
+any training intervention.

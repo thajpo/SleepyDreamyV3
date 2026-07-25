@@ -130,6 +130,107 @@ recovery-ordering loss.
 - Do not start a training intervention until the offline matrix and independent
   numerical fixture are documented.
 
+### Fixed-policy component-cross result
+
+The complete 16-cell matrix ran from clean source `ab04ed0` on both retained
+evidence cohorts. Outputs are under
+`experiments/2026-07-25_cartpole_fixed_policy_component_cross/`. Each cell used
+the exact real branch labels produced earlier by the complete update-3,000
+controller. Both runs used CPU, one Torch thread, seed 17, 64 model samples,
+and every actionable row. Final-evidence execution took 266.69 seconds with
+peak RSS 806 MiB; update-3,000 evidence took 333.96 seconds with peak RSS
+813 MiB.
+
+| Fixed solved-policy labels | Solved representation/heads/critic/actor | Final representation/heads/critic/actor |
+|---|---:|---:|
+| Update-3,000 evidence: actor balanced accuracy | 0.907 | 0.912 |
+| Update-3,000 evidence: posterior critic balanced accuracy | 0.820 | 0.691 |
+| Update-3,000 evidence: full-dream balanced accuracy | 0.895 | 0.895 |
+| Final evidence: actor balanced accuracy | 0.887 | 0.882 |
+| Final evidence: posterior critic balanced accuracy | 0.853 | 0.760 |
+| Final evidence: full-dream balanced accuracy | 0.867 | 0.888 |
+
+The matched final system therefore retains useful ordering for the solved
+controller's fixed real target. This rejects the previous interpretation that
+final parameters simply destroy the already learned stable-policy value
+function. The earlier complete-checkpoint cross changed the continuation
+policy and therefore changed the real target being measured.
+
+Crossed parameter groups show strong coordinate co-adaptation rather than one
+portable failed head. On final evidence:
+
+- final representation plus solved reward/continuation heads yields full-dream
+  balanced accuracy `0.511` with the final critic/actor;
+- restoring the matching final heads raises it to `0.888`;
+- final critic on solved representation gives posterior accuracy `0.494`;
+- solved critic on final representation gives `0.376`;
+- matching final representation and critic gives `0.760`.
+
+Those crossed failures cannot be called independent head or representation
+defects: a head trained in one moving latent coordinate system need not remain
+valid in the other.
+
+The fixed and checkpoint-specific real labels reveal the changed boundary. On
+final evidence, the solved controller has 202 actionable histories while the
+final controller has 597. Among the 196 histories actionable for both,
+preferences agree on 98.47% and action-margin correlation is `0.9988`. The
+additional 401 histories were ties under solved continuation—mean score
+`29.79/30` for both first actions—but under final continuation their mean
+scores fall to `23.80` and `25.77`.
+
+The final actor remains good on the shared actionable cohort (`0.905` balanced
+accuracy), but scores only `0.420` on the 401 newly failure-sensitive histories.
+The final full-dream target scores `0.360` there. Across all replay rows, solved
+and final deployed actions agree only 71.03%; the final actor changes from a
+roughly balanced action histogram (`1522/1550`) to an action-0-heavy histogram
+(`2410/662`). On the shared actionable cohort the two actors agree exactly; the
+drift occurs mainly in states where the solved controller made both forced
+actions safe.
+
+The first supported boundary is now:
+
+> Policy drift in formerly safe/indifferent states makes the real closed loop
+> failure-sensitive. The final imagined target does not correctly rank the new
+> failure corridor, and the actor follows that target. Stable old-policy
+> ordering is retained by matched final components.
+
+This does not yet distinguish actor optimization noise, actor/representation
+coordinate drift, or model exploitation under multi-step final-policy
+rollouts.
+
+## Phase 1 next preregistration: deployed-policy matched rollout
+
+### Question
+
+When the final policy creates the new failure corridor, does its world model
+accurately predict the consequences of the exact actions it executes in the
+real environment?
+
+### Frozen read-only probe
+
+- Evaluate update-3,000 and final checkpoints with
+  `scripts/probe_cartpole_rollout_fidelity.py`.
+- Use CPU, evaluation seeds 17--36, 20 episodes, horizons 1, 3, 5, 10, and 15,
+  64 prior samples, batch size 64.
+- Replay each deployed controller's exact real action sequence through its own
+  prior. Do not substitute planner actions or compare different action
+  sequences inside one error decomposition.
+- Report real return, posterior critic return error, decoded-state MSE,
+  predicted continuation, model/target correlation, and the existing reward,
+  continuation, final-discount, and critic-transport error decomposition.
+
+### Interpretation and stop rule
+
+- Accurate posterior/oracle values with worsening prior rollout error selects
+  model exploitation or rollout-distribution error.
+- Accurate matched rollout with worsening posterior critic error selects value
+  fitting on the final-policy distribution.
+- Movement in both retains a coupled boundary and selects one final-only
+  trajectory trace that crosses actor weights versus representation coordinates
+  at the first real action divergence.
+- This is one read-only comparison. Do not change training from it alone, and do
+  not begin the replay-accounting canary until the result is documented.
+
 ## Execution ladder
 
 1. Complete the offline component/target cross and independent JAX fixtures.
