@@ -450,3 +450,26 @@ The next gate is a read-only carry-parity measurement over the exact proposed
 CartPole burn-in. If the first trained latent materially differs from a full-
 episode rollout, increase or redesign context before training. If parity is
 adequate, preregister one reference-state CartPole canary.
+
+### Carry-parity preregistration
+
+- **Question:** does eight-row truncated recurrent replay reconstruct the first
+  trained latent closely enough to stand in for a full episode prefix under the
+  new reference-state model?
+- **Frozen setup:** clean source after the Phase 2 repair; seed-0 initialized
+  `reference_v3_state` size-1M model; 20 random-policy CartPole episodes with
+  environment seeds 17--36; deterministic posterior probabilities rather than
+  categorical samples; burn-ins 1, 2, 4, 8, and 16.
+- **Comparison:** for every episode depth supported by each burn-in, compare the
+  latent obtained by replaying only the preceding context from zero with the
+  latent obtained from the complete reset-state prefix. Report joined-feature
+  relative L2 and cosine similarity, stochastic-probability error, actor
+  probability L1, and modal-action agreement.
+- **Primary gate at burn-in 8:** at least 99% modal-action agreement, median
+  feature cosine at least 0.99, and 95th-percentile relative feature L2 at most
+  0.10. These thresholds concern policy-interface parity, not exact floating-
+  point identity.
+- **Stop rule:** one initialized-model measurement. Failure blocks training and
+  selects longer context or cached carry. Passing permits one preregistered
+  CartPole canary but must be repeated on its trained checkpoints because
+  recurrent memory can change during learning.
