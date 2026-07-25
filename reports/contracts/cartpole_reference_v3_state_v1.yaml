@@ -9,8 +9,10 @@ implementation:
 environment:
   task: CartPole-v1
   action_repeat: 1
+  decision_budget_semantics: replay_pacing_authorization_excluding_startup_debt
   agent_decisions: 21000
   raw_environment_frames: 21000
+  report_actual_manifest_steps: true
 
 training:
   training_seed: 0

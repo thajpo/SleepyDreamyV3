@@ -539,3 +539,24 @@ The complete machine-readable contract is
 - **Stop rule:** first profile an exact-config short run. If memory and projected
   runtime are safe, run seed 0 once. Failure selects diagnostics, not tuning.
   Passing selects unchanged seeds 1 and 2.
+
+### Exact-config preflight result
+
+The clean-source ROCm preflight at commit `c2925ae` completed 50 updates in
+41.68 seconds wall time, including roughly 22 seconds of collector startup. It
+peaked at 3,883,804 KiB resident memory and retained 17 MiB of run artifacts.
+The run finished normally at 50 updates and 728 observed environment steps;
+its manifest run ID is `23b3c52982d84503bebe30ddd5387a7b` and its MLflow
+run ID is `d1fff3ef8ab242ef9a7166e696a1abb1`.
+
+This is safe on the 24 GiB ROCm host and projects the frozen 3,500-update run at
+roughly 30--40 minutes plus deterministic evaluation and checkpoint overhead.
+The contract's 21,000 decisions are the replay-pacing authorization
+(`3,500 * 96 / 16`), not a hard final counter: the manifest also includes the
+completed-episode startup debt and collection overshoot while the trainer
+stops. The canary must report its actual final environment-step count rather
+than silently treating those two quantities as identical.
+
+The preflight therefore passes its stop rule. The next and only authorized
+behavioral run is the frozen seed-0 canary. No hyperparameter change is selected
+from this profile.

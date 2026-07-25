@@ -6724,3 +6724,13 @@ the old batch-8, sequence-16, context-4 diagnostic's trained-row count. The
 single-seed qualification canary is frozen in
 `reports/contracts/cartpole_reference_v3_state_v1.yaml`; an exact-config short
 profile is its final preflight.
+
+The exact-config ROCm preflight passed. On clean commit `c2925ae`, 50 updates
+completed normally in 41.68 seconds wall time with 3,883,804 KiB peak RSS and
+17 MiB of retained artifacts. The manifest run ID is
+`23b3c52982d84503bebe30ddd5387a7b`; it ended at 728 actual environment steps.
+That count makes an accounting distinction explicit: 21,000 is the canary's
+replay-pacing-funded decision count, while the final manifest count also
+contains completed-episode startup debt and bounded collector overshoot. The
+projected 30--40 minute seed-0 run is safe, so the frozen canary is authorized
+without a configuration change.
