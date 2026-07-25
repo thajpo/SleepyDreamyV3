@@ -25,6 +25,7 @@ def test_hydra_yaml_defines_every_runtime_field():
     assert runtime_config.vector_encoder_mode == "reference"
     assert runtime_config.posterior_head_layers == 1
     assert runtime_config.replay_sequence_mode == "stream"
+    assert runtime_config.replay_row_alignment == "reference"
     assert runtime_config.online_replay is True
     assert runtime_config.continuous_replay_delivery is True
     assert runtime_config.replay_evidence_samples == 0
@@ -47,6 +48,7 @@ def test_hydra_yaml_defines_every_runtime_field():
     ("config", "message"),
     [
         (replace(Config(), replay_burn_in=64), "burn-in < sequence_length"),
+        (replace(Config(), replay_row_alignment="mystery"), "replay_row_alignment"),
         (replace(Config(), checkpoint_interval=0), "checkpoint_interval"),
         (replace(Config(), d_hidden=63), "divisible by 16"),
         (replace(Config(), encoder_mlp_n_layers=0), "encoder_mlp_n_layers"),

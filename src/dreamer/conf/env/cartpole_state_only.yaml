@@ -17,5 +17,6 @@ models:
     n_blocks: 8
 
 train:
+  replay_row_alignment: reference
   batch_size: 32
   max_train_steps: 30000

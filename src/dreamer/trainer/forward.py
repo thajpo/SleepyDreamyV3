@@ -396,6 +396,15 @@ def dreamer_step(
             posterior_logits,
         ) = world_model(tokens_t, action_t, is_first=batch.is_first[:, t_step])
 
+        if t_step < train_start_t:
+            # Context reconstructs an approximate recurrent carry only. It is
+            # neither a supervised row nor part of the gradient graph, matching
+            # the pinned replay-prefix role and the replay-ratio denominator.
+            if t_step + 1 == train_start_t:
+                world_model.h_prev = world_model.h_prev.detach()
+                world_model.z_prev = world_model.z_prev.detach()
+            continue
+
         # World model loss
         wm_loss, wm_loss_dict = compute_wm_loss(
             obs_reconstruction,
@@ -452,19 +461,9 @@ def dreamer_step(
             posterior_logits, batch, use_pixels,
         )
 
-        # Default zero AC losses for burn-in timesteps
+        # Default zero AC losses for this timestep.
         actor_loss = torch.tensor(0.0, device=device)
         critic_loss = torch.tensor(0.0, device=device)
-
-        if t_step < train_start_t:
-            # Burn-in: only accumulate WM loss, skip AC
-            if total_wm_loss is None:
-                total_wm_loss = wm_loss
-                total_actor_loss = actor_loss
-                total_critic_loss = critic_loss
-            else:
-                total_wm_loss = total_wm_loss + wm_loss
-            continue
 
         # --- Post-burn-in: accumulate WM components for logging ---
         state_prediction = obs_reconstruction.get("state")
@@ -980,7 +979,7 @@ def dreamer_step(
         total_wm_loss,
         total_actor_loss,
         total_critic_loss,
-        replay_length=T,
+        replay_length=effective_train_steps,
         imagination_starts=effective_train_steps,
         replay_representation_loss=replay_representation_loss,
     )

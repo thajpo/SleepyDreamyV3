@@ -100,3 +100,38 @@ def test_is_first_resets_selected_rows_and_blocks_cross_episode_gradients():
     assert first_z.grad[0].norm().item() == pytest.approx(0.0)
     assert first_h.grad[1].norm().item() > 0.0
     assert first_z.grad[1].norm().item() > 0.0
+
+
+def test_reference_reset_masks_previous_action_before_dynamics():
+    cfg = Config(
+        architecture_contract="reference_v3_state",
+        d_hidden=16,
+        num_latents=4,
+        rnn_n_blocks=8,
+        n_observations=4,
+        n_actions=2,
+        use_pixels=False,
+        rssm_core="reference",
+        continue_head_layers=1,
+        vector_encoder_mode="reference",
+        posterior_head_layers=1,
+        replay_row_alignment="reference",
+    )
+    encoder, world_model = initialize_world_model("cpu", cfg, batch_size=1)
+    captured = {}
+
+    def capture_action(_module, inputs):
+        captured["action"] = inputs[0].detach().clone()
+
+    handle = world_model.dynin_action[0].register_forward_pre_hook(capture_action)
+    try:
+        tokens = encoder(torch.randn(1, cfg.n_observations))
+        world_model(
+            tokens,
+            torch.tensor([[0.25, 0.75]]),
+            is_first=torch.tensor([True]),
+        )
+    finally:
+        handle.remove()
+
+    torch.testing.assert_close(captured["action"], torch.zeros(1, 2))

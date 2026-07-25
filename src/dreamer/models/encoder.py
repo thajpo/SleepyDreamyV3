@@ -227,7 +227,9 @@ def make_vector_encoder_mlp(
                 d_in=d_in,
                 d_hidden=d_hidden,
                 hidden_layers=n_layers,
-                symlog_input=True,
+                # The shared trainer/collector pipeline already applies
+                # symlog before vector encoding.
+                symlog_input=False,
             )
         return ReferenceVectorMLP(
             d_in=d_in,

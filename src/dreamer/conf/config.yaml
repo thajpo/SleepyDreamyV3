@@ -163,6 +163,7 @@ train:
   min_buffer_episodes: 64
   steps_per_weight_sync: 5
   replay_burn_in: 8
+  replay_row_alignment: post_action
   # Reference-style same-collector windows may cross consecutive episode resets.
   replay_sequence_mode: stream
   # Present each new non-overlapping stream sequence once before uniform replay.

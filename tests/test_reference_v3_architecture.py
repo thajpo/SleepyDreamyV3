@@ -35,6 +35,7 @@ def reference_config(**changes) -> Config:
         n_observations=4,
         n_actions=2,
         use_pixels=False,
+        replay_row_alignment="reference",
     )
     values.update(changes)
     return Config(**values)
@@ -90,7 +91,7 @@ def test_reference_state_architecture_matches_pinned_size1m_topology() -> None:
     critic = initialize_critic("cpu", cfg)
 
     assert isinstance(encoder.MLP, ReferenceFeatureMLP)
-    assert encoder.MLP.symlog_input is True
+    assert encoder.MLP.symlog_input is False
     assert module_types(encoder.MLP.mlp) == [
         torch.nn.Linear,
         ReferenceRMSNorm,
@@ -129,12 +130,12 @@ def test_reference_state_architecture_matches_pinned_size1m_topology() -> None:
     assert len(critic.mlp) == 10
 
 
-def test_reference_vector_encoder_applies_symlog_before_hidden_stack() -> None:
+def test_reference_vector_encoder_receives_once_symlogged_pipeline_input() -> None:
     cfg = reference_config()
     encoder, _world_model = initialize_world_model("cpu", cfg, batch_size=2)
     observations = torch.tensor([[0.0, 1.0, -10.0, 100.0]])
 
-    actual = encoder(observations)
+    actual = encoder(symlog(observations))
     expected = encoder.MLP.mlp(symlog(observations))
     torch.testing.assert_close(actual, expected)
 

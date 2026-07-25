@@ -187,6 +187,9 @@ class Config:
     min_buffer_episodes: int = 64
     steps_per_weight_sync: int = 5
     replay_burn_in: int = 8
+    # post_action preserves historical rows. reference includes the reset
+    # observation with zero previous action/reward at every episode start.
+    replay_row_alignment: str = "post_action"  # post_action, reference
     # Episode preserves historical replay snapshots. Authored Hydra runs use
     # reference-style per-collector streams that can cross reset boundaries.
     replay_sequence_mode: str = "episode"  # episode, stream
@@ -371,6 +374,13 @@ def validate_config(cfg: Config) -> None:
         errors.append("min_buffer_episodes cannot exceed replay_buffer_size")
     if cfg.replay_sequence_mode not in {"episode", "stream"}:
         errors.append("replay_sequence_mode must be 'episode' or 'stream'")
+    if cfg.replay_row_alignment not in {"post_action", "reference"}:
+        errors.append("replay_row_alignment must be 'post_action' or 'reference'")
+    if (
+        cfg.architecture_contract == "reference_v3_state"
+        and cfg.replay_row_alignment != "reference"
+    ):
+        errors.append("reference_v3_state requires replay_row_alignment='reference'")
     if cfg.online_replay and cfg.replay_sequence_mode != "stream":
         errors.append("online_replay requires replay_sequence_mode='stream'")
     if cfg.continuous_replay_delivery and cfg.replay_sequence_mode != "stream":

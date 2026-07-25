@@ -362,12 +362,14 @@ fixture initially exposed an apparent imagination-index difference; tracing the
 actual `H+1` value layout proved the production equation correct and the first
 fixture translation wrong. The corrected independent comparisons all pass.
 
-The source audit found two additional architecture mismatches relevant to the
+The source audit found an additional architecture mismatch relevant to the
 observed representation/policy movement. Official RMSNorm learns both a scale
-and a shift; `torch.nn.RMSNorm` learns no shift. Official vector observations
-are symlogged before the encoder; the local normalized encoder consumed raw
-state. The previous use of the word “reference” therefore described topology,
-not complete numerical conformance.
+and a shift; `torch.nn.RMSNorm` learns no shift. An end-to-end follow-up also
+corrected the initial audit note about vector preprocessing: the shared local
+trainer/collector pipeline already symlogs state before the encoder. The new
+encoder preserves that single transform instead of applying it a second time.
+The previous use of the word “reference” therefore described topology, not
+complete numerical conformance.
 
 A new checkpointed `reference_v3_state` contract now composes the pinned
 state-only size-1M architecture as one unit:
@@ -395,3 +397,56 @@ requests the historical contract explicitly.
 No behavioral claim follows from mechanical conformance. Before a CartPole
 canary, Phase 2 must correct and prove replay context/reset accounting so the
 new architecture is not evaluated under a known data-semantics mismatch.
+
+## Phase 2 result: replay context, reset, and accounting
+
+The end-to-end row audit found two concrete defects in the authored CartPole
+path.
+
+First, `replay_burn_in=4` excluded four rows from actor/value starts and from
+the replay-ratio denominator, but the trainer still summed world-model loss on
+all 16 sampled rows and divided that loss by 16. At nominal replay ratio 16,
+the world model therefore received 16/12 times as many supervised rows per
+environment decision: effective ratio `21.33`. This was not merely a reporting
+error; context observations supplied real encoder, dynamics, reconstruction,
+reward, continuation, and KL gradients.
+
+Second, the collector stored only observations reached *after* actions. Replay
+then labeled the first stored successor as `is_first`, reset recurrent and
+stochastic state, but supplied the action that caused the successor. Pinned
+Dreamer instead records the reset observation itself with reward zero and zero
+previous action, forms its posterior, and only then transitions under the first
+environment action. Uniform stream samples also marked arbitrary mid-episode
+starts as `is_first`, conflating a sampled truncation with a genuine reset.
+
+The versioned reference path now:
+
+- inserts the true reset observation with zero reward and previous action;
+- preserves `is_first` only at real episode boundaries, including boundaries
+  crossed inside a stream sample;
+- masks recurrent state, stochastic state, and previous action at those genuine
+  reset rows;
+- runs leading burn-in rows only to reconstruct an approximate carry, detaches
+  that carry at the train boundary, and applies no loss or diagnostic weighting
+  to the context rows;
+- divides world-model, actor, and value losses by the same trained-row count and
+  uses that count for fresh and resumed replay pacing.
+
+`replay_row_alignment=post_action` preserves every historical checkpoint and
+probe. `reference_v3_state` requires `replay_row_alignment=reference`, so a new
+run cannot silently combine the corrected model with old row semantics.
+
+Focused evidence covers collector chunk contents and environment-step counts,
+mid-episode versus crossed-reset stream masks, reset action masking, and zero
+gradient on context tokens with nonzero gradient on the first trained row. The
+complete 288-test fast suite, compile and scoped type checks, and a one-update
+multiprocess CPU smoke all pass under the corrected reference row contract. The
+remaining difference from pinned source is explicit: local replay reconstructs
+carry from a bounded burn-in, whereas upstream can reuse replay-cached model
+entries. This is truncated recurrent replay, not exact cached-carry parity; it
+must be measured as a limitation rather than described as full replay identity.
+
+The next gate is a read-only carry-parity measurement over the exact proposed
+CartPole burn-in. If the first trained latent materially differs from a full-
+episode rollout, increase or redesign context before training. If parity is
+adequate, preregister one reference-state CartPole canary.

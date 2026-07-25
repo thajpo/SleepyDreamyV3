@@ -332,6 +332,10 @@ class RSSMWorldModel(nn.Module):
             keep = (~reset).to(self.h_prev.dtype).unsqueeze(-1)
             self.h_prev = self.h_prev * keep
             self.z_prev = self.z_prev * keep.unsqueeze(-1)
+            if self.architecture_contract == "reference_v3_state":
+                # Reference rows include the reset observation itself. No
+                # environment action precedes that observation.
+                action = action * keep.to(action.dtype)
 
         # 1. Step GRU using PREVIOUS z and action
         z_prev_flat = self.z_prev.view(self.z_prev.size(0), -1)

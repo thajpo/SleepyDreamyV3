@@ -164,6 +164,7 @@ class EpisodeReplayBuffer:
         compute_future_returns=False,
         throttle_collection=False,
         sequence_mode="episode",
+        row_alignment="post_action",
         online_replay=False,
         continuous_delivery=False,
     ):
@@ -179,6 +180,8 @@ class EpisodeReplayBuffer:
                 the startup population is ready
             sequence_mode: ``episode`` for historical contained windows or
                 ``stream`` for per-collector windows that cross episode resets
+            row_alignment: Whether episode starts contain a true reset
+                observation or a historical post-action row.
             online_replay: Prefer each new non-overlapping stream sequence once
                 before filling batches from the configured replay selector.
             continuous_delivery: Accept append-only partial-episode chunk packets.
@@ -193,6 +196,9 @@ class EpisodeReplayBuffer:
         self.sequence_mode = str(sequence_mode)
         if self.sequence_mode not in {"episode", "stream"}:
             raise ValueError("sequence_mode must be 'episode' or 'stream'")
+        self.row_alignment = str(row_alignment)
+        if self.row_alignment not in {"post_action", "reference"}:
+            raise ValueError("row_alignment must be 'post_action' or 'reference'")
         self.online_replay = bool(online_replay)
         if self.online_replay and self.sequence_mode != "stream":
             raise ValueError("online_replay requires sequence_mode='stream'")
@@ -505,16 +511,12 @@ class EpisodeReplayBuffer:
         # Use states for length - pixels may be None in state-only mode
         ep_len = len(states)
         seq_len = self.sequence_length
-        is_first = np.concatenate(
-            [
-                np.ones(1, dtype=np.bool_),
-                np.zeros(seq_len - 1, dtype=np.bool_),
-            ]
-        )
-
         if ep_len >= seq_len:
             # Sample random start point
             start = random.randint(0, ep_len - seq_len)
+            is_first = np.zeros(seq_len, dtype=np.bool_)
+            if start == 0 or self.row_alignment == "post_action":
+                is_first[0] = True
             mask = np.ones(seq_len, dtype=np.float32)  # All real steps
             continue_weights = continuation_inclusion_weights(
                 ep_len, seq_len, start
@@ -538,6 +540,8 @@ class EpisodeReplayBuffer:
         else:
             # Pad short episode
             pad_len = seq_len - ep_len
+            is_first = np.zeros(seq_len, dtype=np.bool_)
+            is_first[0] = True
 
             # Create padding arrays (pixels may be None in state-only mode)
             if pixels is not None:
@@ -691,9 +695,11 @@ class EpisodeReplayBuffer:
                 part[0] = True
             is_first_parts.append(part)
         is_first = np.concatenate(is_first_parts)
-        # Every sampled sequence starts with a zero carry. Preserve additional
-        # true episode boundaries inside the sequence.
-        is_first[0] = True
+        # Historical post-action rows used an artificial reset at every sample
+        # start. Reference rows preserve only genuine environment resets; their
+        # leading burn-in rows reconstruct an approximate carry from zero.
+        if self.row_alignment == "post_action":
+            is_first[0] = True
         return (
             concatenate(0),
             concatenate(1),

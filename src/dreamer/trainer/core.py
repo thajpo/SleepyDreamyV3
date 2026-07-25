@@ -200,6 +200,7 @@ class WorldModelTrainer:
             compute_future_returns=config.critic_real_return_scale > 0.0,
             throttle_collection=True,
             sequence_mode=config.replay_sequence_mode,
+            row_alignment=config.replay_row_alignment,
             online_replay=config.online_replay,
             continuous_delivery=config.continuous_replay_delivery,
         )
@@ -290,10 +291,15 @@ class WorldModelTrainer:
             if checkpoint_metric is not None:
                 self.best_eval_metric = checkpoint_metric
             denom = max(1e-8, config.replay_ratio)
+            trained_rows = max(
+                1,
+                config.sequence_length
+                - min(config.replay_burn_in, config.sequence_length - 1),
+            )
             self._resume_env_steps_offset = int(
                 self.train_step
                 * config.batch_size
-                * config.sequence_length
+                * trained_rows
                 * config.action_repeat
                 / denom
             )

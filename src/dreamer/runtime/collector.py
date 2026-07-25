@@ -167,6 +167,20 @@ def collect_experiences(
             episode_is_terminal,
         ) = ([], [], [], [], [], [])
 
+        if getattr(config, "replay_row_alignment", "post_action") == "reference":
+            # Reference replay contains the environment reset observation. Its
+            # aligned model input is the zero previous action and its reward is
+            # zero because no transition has occurred yet.
+            if use_pixels:
+                episode_pixels.append(obs["pixels"])
+                episode_vec_obs.append(np.zeros(1, dtype=np.float32))
+            else:
+                episode_vec_obs.append(obs)
+            episode_actions.append(np.zeros(n_actions, dtype=np.float32))
+            episode_rewards.append(0.0)
+            episode_is_last.append(False)
+            episode_is_terminal.append(False)
+
         h = None
         action_onehot = None
         z_prev_embed = None

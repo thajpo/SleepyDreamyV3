@@ -275,6 +275,7 @@ def resolve_resume_config(
             ),
             actor_warmup_steps=checkpoint_config.actor_warmup_steps,
             actor_unimix=checkpoint_config.actor_unimix,
+            replay_row_alignment=checkpoint_config.replay_row_alignment,
         )
 
     world_model_state = checkpoint.get("world_model", {})
@@ -336,6 +337,7 @@ def resolve_resume_config(
         contdisc=True,
         weight_imagination_starts=False,
         replay_sequence_mode="episode",
+        replay_row_alignment="post_action",
         online_replay=False,
         continuous_replay_delivery=False,
         actor_warmup_steps=0,

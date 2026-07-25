@@ -6671,9 +6671,11 @@ the pinned equation.
 
 The same audit established that the existing “reference” modules were still
 numerically incomplete. Official RMSNorm has a learned shift in addition to
-scale, and official vector encoding symlogs observations before its hidden
-stack. A versioned `reference_v3_state` contract now composes those semantics
-with exact size-1M dimensions, normalized head depths, fan-in truncated-normal
+scale. A first source-local comparison also appeared to find missing vector
+symlog, but end-to-end tracing corrected that claim: the shared local input
+pipeline already applies symlog before the encoder. A versioned
+`reference_v3_state` contract preserves that single transform and adds exact
+size-1M dimensions, normalized head depths, fan-in truncated-normal
 initialization, and pinned output scales. It rejects pixel use and hybrid
 component settings, while historical checkpoints retain their old contract.
 
@@ -6681,3 +6683,28 @@ This is an evidence-selected conformance repair, not a claim that architecture
 was the unique cause of collapse. The representation/policy trace makes it the
 right boundary to standardize before the next causal run. Replay context/reset
 parity remains the final mechanical prerequisite.
+
+#### Replay context/reset audit and repair
+
+The frozen 16-row samples with four burn-in rows were not applying one replay
+ratio to every model. Actor/value starts and pacing used 12 trained rows, while
+the world model trained on all 16, giving it effective replay ratio `21.33`
+under the nominal ratio-16 contract. Burn-in also carried gradients through the
+encoder and recurrent model rather than acting only as context.
+
+The collector omitted the environment reset observation. Its first replay row
+was the successor of the first action, but replay marked that row `is_first`.
+This reset latent/recurrent state before a post-action observation instead of
+forming the reset-state posterior first. Arbitrary mid-episode stream starts
+were marked the same way, so sampled truncations and environment resets were
+indistinguishable.
+
+The new reference row contract stores the actual reset observation with zero
+reward and previous action, retains only genuine reset flags, masks action and
+latent carry at those resets, and uses detached loss-free burn-in. Every module
+is now trained, normalized, and paced with the same post-context row count.
+Historical post-action row semantics remain checkpoint-selectable.
+
+This still uses bounded burn-in reconstructed from zero at arbitrary stream
+starts, not upstream's replay-cached model entries. A carry-parity measurement
+is therefore required before the first behavioral canary.

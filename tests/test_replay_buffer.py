@@ -245,6 +245,32 @@ def test_stream_default_sampling_is_uniform_over_every_valid_start(monkeypatch):
     assert calls == [(candidates, [item[2] for item in candidates], 4)]
 
 
+def test_reference_stream_marks_only_genuine_episode_resets(monkeypatch):
+    replay = EpisodeReplayBuffer(
+        data_queue=None,
+        max_episodes=10,
+        min_episodes=1,
+        sequence_length=3,
+        sequence_mode="stream",
+        row_alignment="reference",
+    )
+    replay.add_episode((*_episode(4, marker=1.0), 0, 1))
+    replay.add_episode((*_episode(3, marker=2.0), 0, 2))
+    candidates = replay._stream_start_candidates()
+
+    monkeypatch.setattr(
+        "dreamer.runtime.replay_buffer.random.randint", lambda _lo, _hi: 1
+    )
+    within_episode = replay._sample_stream_subsequence(candidates[0])
+    assert within_episode[9].tolist() == [False, False, False]
+
+    monkeypatch.setattr(
+        "dreamer.runtime.replay_buffer.random.randint", lambda _lo, _hi: 3
+    )
+    crossing_reset = replay._sample_stream_subsequence(candidates[0])
+    assert crossing_reset[9].tolist() == [False, True, False]
+
+
 def test_stream_online_fifo_precedes_uniform_and_consumes_each_sequence_once(
     monkeypatch,
 ):
