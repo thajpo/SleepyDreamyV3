@@ -6356,3 +6356,93 @@ actionable rows rather than manufacturing a boundary classification.
 This smoke is intentionally dirty-source mechanical evidence because it ran
 before the implementation commit. No long run has started. The frozen seed-2
 replication is authorized only from the clean implementation-and-ledger commit.
+
+#### Exact replay-history execution and result
+
+The preregistered run completed normally under
+`experiments/2026-07-25_cartpole_replay_history_support_seed2_3500/`. Its
+manifest run ID is `1adf567637bc437c9053cdc62ad98dce` (MLflow
+`c61a123e687d498a8c55809f73707dfe`) and records clean source `709b106`, ROCm
+6.4, 3,500 updates, 21,431 environment steps, 1,054.66 seconds, maximum-step
+completion, final/best/periodic checkpoints, and normal collector shutdown.
+The mechanism remained bounded: final logged online fraction is `4.779%`, zero
+descriptor drops, 1,097 pre-terminal chunks, 21,273 delivered rows, and one
+bounded active partial episode. Observed trainer RSS remained approximately
+3.1 GiB throughout.
+
+The complete evaluation curve is:
+
+```text
+100: 13.50, 200: 10.95, 300: 9.35, 400: 9.35,
+500: 9.35, 600: 9.35, 700: 9.35, 800: 9.35,
+900: 9.35, 1000: 24.75, 1100: 56.65, 1200: 66.90,
+1300: 76.80, 1400: 140.50, 1500: 143.80, 1600: 81.80,
+1700: 137.20, 1800: 70.25, 1900: 139.45, 2000: 79.75,
+2100: 140.70, 2200: 223.90, 2300: 259.65, 2400: 500.00,
+2500: 500.00, 2600: 500.00, 2700: 500.00, 2800: 500.00,
+2900: 500.00, 3000: 500.00, 3100: 500.00, 3200: 500.00,
+3300: 500.00, 3400: 105.80, 3500: 44.25
+```
+
+This independently reproduces a long solved plateau followed by sharp late
+collapse. The curve matches the earlier seed-2 run exactly through update
+1,400, then diverges while retaining the same oscillatory acquisition and
+collapse shape. The evidence sampler is RNG- and data-read-only, but live
+console timestamps showed checkpoint-time sequence assembly taking several
+seconds once replay contained long episodes. That pause can change asynchronous
+collector scheduling in a brittle closed-loop system. Therefore use this run's
+own replay evidence for the support boundary; do not treat its behavior as a
+controlled estimate of evidence-capture overhead or a bitwise continuation of
+the earlier run.
+
+The retained boundary outputs are under
+`experiments/2026-07-25_cartpole_replay_history_support_seed2_probe/`. Every
+cell contains 256 selector draws and 3,072 post-burn-in replay occurrences;
+252--255 starts are unique in each cell. All actionable rows fit below the
+preregistered cap, so no boundary result is subsampled:
+
+| Matching checkpoint/evidence | Live return | Actionable rows; real labels 0 / 1 | Actor balanced | Posterior critic balanced | One-step prior balanced | Full dream balanced | Dream/real margin corr. |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Best, 2,400 | 500.0 | 230; 105 / 125 | 0.990 | 0.983 | 0.967 | 0.990 | 0.834 |
+| Step 2,500 | 500.0 | 213; 119 / 94 | 0.952 | 0.945 | 0.944 | 0.950 | 0.889 |
+| Step 3,000 | 500.0 | 265; 126 / 139 | 0.907 | 0.820 | 0.735 | 0.899 | 0.826 |
+| Final, 3,500 | 44.25 | 597; 137 / 460 | 0.562 | 0.477 | 0.509 | 0.562 | 0.733 |
+
+The solved checkpoints prove that the current stack can learn excellent action
+ordering on recurrent histories drawn directly from its replay selector. At
+final, directly supported actionable histories become more common rather than
+disappearing, yet the real-next-observation posterior critic falls below chance
+and both prior and full dream approach chance. The actor agrees with the dream
+on `99.6%` of confident dream states. Its trusted-preferred-action probability
+has median `0.00628` and is below 1% on `54.8%` of actionable rows. This crosses
+the preregistered objective-failure gate: 597 directly sampled actionable rows
+exceed the 100-row floor and posterior balanced accuracy is below `0.55`.
+
+An exploratory episode-age readout localizes the change further. Among final
+actionable rows starting within 25 episode IDs of the newest sampled episode,
+there are 326 occurrences with 27 action-0 and 299 action-1 labels; actor,
+posterior, and full-dream balanced accuracies are `0.488`, `0.498`, and `0.407`.
+The 117 rows at least 100 episode IDs old retain corresponding accuracies
+`0.955`, `0.756`, and `0.955`. Thus the final critic has not globally forgotten
+the replay buffer. A new recovery corridor becomes common and immediately
+sampleable, but the online policy-conditioned target is wrong there and the
+actor faithfully reinforces it.
+
+This rejects absence of replay/history support as a sufficient explanation and
+selects a moving-target/optimization failure on newly supported histories. It
+does not prove a particular loss equation is wrong: presence in the final
+buffer does not reveal how many gradient updates each recent start received,
+and the evidence sample excludes the small online-FIFO path. The next bounded
+diagnostic should cross the solved update-3,000 model with final replay evidence
+and the final model with update-3,000 evidence. That read-only matrix can
+separate a new-corridor generalization/arrival gap from parameter drift on the
+previously solved replay distribution before any target or optimizer change.
+
+The first probe execution completed all calculations but failed while writing
+heterogeneous rows because selected actionable rows contain additional
+prior/dream columns. The corrected writer constructs the union schema in
+first-seen order; a regression test covers this case. All four probes then
+completed from unchanged evidence. Focused probe tests, compile, and direct
+Pyright passed, followed by the full `255`-test fast suite. The failed derived
+artifact attempt did not alter checkpoints, replay evidence, or experimental
+disposition.

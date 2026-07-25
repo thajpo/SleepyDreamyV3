@@ -1,4 +1,5 @@
 from scripts.probe_cartpole_replay_history_support import (
+    csv_fieldnames,
     select_actionable_rows,
     summarize_support_rows,
 )
@@ -37,3 +38,9 @@ def test_support_summary_preserves_occurrence_and_unique_start_counts():
     assert summary["sampled_real_policy_pref_hist"] == {"-1": 1, "1": 2, "0": 1}
     assert summary["sampled_sequence_starts"] == 2
     assert summary["unique_replay_sequence_starts"] == 1
+
+
+def test_csv_schema_includes_fields_added_only_to_selected_rows():
+    rows = [{"state": 1}, {"state": 2, "policy_q": 3}]
+
+    assert csv_fieldnames(rows) == ["state", "policy_q"]

@@ -89,6 +89,11 @@ def summarize_support_rows(rows: list[dict], selected: list[dict]) -> dict:
     }
 
 
+def csv_fieldnames(rows: list[dict]) -> list[str]:
+    """Preserve first-seen order across heterogeneous derived probe rows."""
+    return list(dict.fromkeys(key for row in rows for key in row))
+
+
 def _reset_latent(cfg, world_model, device: str):
     h = torch.zeros(1, cfg.d_hidden * cfg.rnn_n_blocks, device=device)
     z = torch.zeros(
@@ -339,7 +344,7 @@ def run_replay_history_probe(
     out_dir.mkdir(parents=True, exist_ok=True)
     all_serialized = [serializable(row) for row in rows]
     with (out_dir / "all_rows.csv").open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(all_serialized[0]))
+        writer = csv.DictWriter(handle, fieldnames=csv_fieldnames(all_serialized))
         writer.writeheader()
         writer.writerows(all_serialized)
     if selected:
