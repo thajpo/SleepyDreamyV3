@@ -6094,3 +6094,33 @@ treated as a prerequisite, not a solution, for Pong.
   seeds. If all pass, treat continuous delivery as a necessary current CartPole
   correction and return to unresolved value/Pong transfer questions. If any
   fail, characterize the failing boundary before further algorithm changes.
+
+#### Seed-1 confirmation result
+
+Seed 1 completed normally under
+`experiments/2026-07-24_cartpole_continuous_delivery_seed1_3500/` at clean
+preregistration source `f988c25`. Its manifest reports 3,500 updates, 21,326
+environment steps, 1,214.04 seconds, maximum-step completion, final/best/
+periodic checkpoints, and normal process shutdown. The evaluation curve is:
+
+```text
+100: 20.05, 200: 9.40, 300: 9.40, 400: 9.40,
+500: 9.40, 600: 9.40, 700: 9.40, 800: 9.40,
+900: 9.40, 1000: 9.35, 1100: 12.90, 1200: 73.25,
+1300: 101.25, 1400: 55.80, 1500: 93.70, 1600: 90.50,
+1700: 32.85, 1800: 56.95, 1900: 100.60, 2000: 29.75,
+2100: 34.80, 2200: 38.60, 2300: 37.30, 2400: 29.45,
+2500: 172.20, 2600: 164.85, 2700: 85.15, 2800: 170.20,
+2900: 156.15, 3000: 152.70, 3100: 124.90, 3200: 96.00,
+3300: 26.75, 3400: 500.00, 3500: 500.00
+```
+
+Seed 1 passes the literal behavioral gate: it first reaches 475 at update 3,400
+and remains at 500 through final, giving a best-to-final gap of zero. It also
+passes the mechanism gate with final logged cumulative online fraction
+`4.758%`, zero descriptor drops, 1,023 pre-terminal chunks, and 21,183 delivered
+rows. However, acquisition nearly exhausts the budget and remains severely
+unstable beforehand, including a fall from 172.20 at update 2,500 to 26.75 at
+3,300. Continuous delivery has now prevented post-solution collapse in two
+fixed seeds, but seed 1 demonstrates that it has not made acquisition smooth or
+sample-efficient. Seed 2 remains required before the aggregate verdict.
