@@ -6963,3 +6963,19 @@ fidelity and counterfactual value ordering are separate boundaries. The next
 controlled run must test natural-prior-preserving terminal calibration with a
 held-out Brier/terminal-live calibration gate. Seeds 1/2 and Pong remain
 stopped.
+
+#### Preregistered natural-prior one-step continuation supervision
+
+The next intervention will add only `train.prior_continue_pred_scale=1.0`.
+It applies the ordinary natural continuation target to the expected one-step
+prior latent (with the existing 1% unimix and `contdisc` semantics), matching
+the state representation consumed by imagination. It does not class-balance
+terminal rows, add a terminal reward, or change actor/critic/replay settings.
+
+The frozen contract is the v3 cached-carry seed-0 run: 3,500 updates, batch 8,
+sequence 32, burn-in 20, replay ratio 16, and 20 deterministic evaluations
+every 100 updates. The behavior gate remains acquisition at 450, retention
+above 300, final at least 400, and best-to-final gap at most 100. The held-out
+continuation probe must also reach final prior Brier error at most `0.00351`,
+terminal continuation at most `0.95`, and live continuation at least `0.98`.
+No seeds 1/2 or Pong are authorized from this one-seed intervention alone.

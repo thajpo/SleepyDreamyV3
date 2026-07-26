@@ -1055,3 +1055,38 @@ the policy-conditioned value/continuation target, or in how that target is
 optimized and retained. The next intervention must preserve the natural
 continuation prior and directly measure held-out terminal calibration; do not
 add seeds, tune the actor, or return to Pong.
+
+### Phase 5 preregistration: natural-prior one-step continuation supervision
+
+The prior-state canary improved decoded state error without improving
+counterfactual action ordering. The next intervention therefore trains the
+existing continuation head on the expected one-step **prior** latent used by
+imagination, rather than only on the observation-conditioned posterior latent.
+
+- **Hypothesis:** the continuation head is calibrated on posterior states but
+  optimistic on the prior states that imagination visits. A direct prior-head
+  loss on real transitions will reduce terminal optimism without changing the
+  natural terminal/live prevalence.
+- **Causal variable:** add `train.prior_continue_pred_scale=1.0`; baseline is
+  `0.0`. Compute the expected prior categorical latent with the same 1% unimix,
+  join it with the observed recurrent state, and apply the ordinary natural
+  continuation target and `contdisc` semantics. Do not class-balance, alter
+  actor/critic losses, add terminal rewards, or change replay/carry settings.
+- **Frozen contract:** current v3 state architecture, cached carry, seed `0`,
+  3,500 updates, batch `8`, sequence `32`, burn-in `20`, replay ratio `16`,
+  20 deterministic evaluation episodes every `100` updates, and the same
+  checkpoints and resource limits as the prior-state canary. Artifact prefix:
+  `experiments/2026-07-26_cartpole_reference_v3_prior_continue_loss_seed0_3500`.
+- **Behavior gate:** reach mean return `450`, never fall below `300` after
+  first reaching it, finish at least `400`, and keep the best-to-final gap at
+  most `100`. Failure stops this seed and authorizes no seeds or Pong.
+- **Calibration gate:** run the held-out 20-episode, seeds `17--36`, 64-sample
+  continuation probe at steps `2,000`, `3,000`, and final. At final, require
+  prior Brier error no worse than the cached-carry reference (`0.00351`), mean
+  terminal continuation at most `0.95`, and mean live continuation at least
+  `0.98`. These are model-target gates, not substitutes for behavior.
+- **Decision:** behavior plus calibration passes select this as the next
+  current CartPole correction. Calibration improvement with behavioral failure
+  rejects it as insufficient but retains the target-localization evidence.
+  Behavioral success without calibration improvement is treated as an
+  incidental canary and does not authorize Pong.
