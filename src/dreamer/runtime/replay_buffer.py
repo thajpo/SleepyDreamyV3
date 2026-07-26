@@ -34,6 +34,10 @@ class EnvData(NamedTuple):
     mask: torch.Tensor  # (B, T) — 1=real, 0=padded
     pixels: Optional[torch.Tensor] = None  # (B, T, C, H, W)
     pixels_original: Optional[torch.Tensor] = None  # (B, T, C, H, W)
+    step_ids: Optional[torch.Tensor] = None  # (B, T, 3): collector, episode, row
+    replay_carry_h: Optional[torch.Tensor] = None  # (B, deterministic_width)
+    replay_carry_z: Optional[torch.Tensor] = None  # (B, latents, classes)
+    replay_carry_available: Optional[torch.Tensor] = None  # (B,)
 
 
 class _ChunkedArray:
@@ -240,6 +244,11 @@ class EpisodeReplayBuffer:
         self._chunks_added = 0
         self._chunk_rows_added = 0
         self._preterminal_chunks_added = 0
+        # Reference replay updates these entries by stable row identity. The
+        # cache is deliberately in-memory: old checkpoint/replay contracts do
+        # not claim to serialize replay state.
+        self._carry_cache: dict[tuple[int, int, int], tuple[np.ndarray, np.ndarray]] = {}
+        self._carry_stale_updates = 0
 
     def start(self):
         """Start background queue draining thread."""
@@ -469,9 +478,75 @@ class EpisodeReplayBuffer:
             return
         for index, episode in enumerate(self.buffer):
             if bool(episode[10]):
+                collector_id = int(episode[8])
+                episode_id = int(episode[9])
+                self._drop_carry_for_episode(collector_id, episode_id)
                 del self.buffer[index]
                 return
         raise RuntimeError("replay capacity contains only active partial episodes")
+
+    def _drop_carry_for_episode(self, collector_id: int, episode_id: int) -> None:
+        """Remove cached entries for an evicted episode."""
+
+        prefix = (int(collector_id), int(episode_id))
+        stale = [key for key in self._carry_cache if key[:2] == prefix]
+        for key in stale:
+            del self._carry_cache[key]
+
+    def update_carry(self, updates) -> None:
+        """Write detached RSSM entries keyed by stable replay row identity.
+
+        Updates for rows evicted before the trainer reaches this method are
+        ignored and counted. A reused episode ID can never overwrite a live
+        entry because collectors' episode IDs are monotonic per collector.
+        """
+
+        if not updates:
+            return
+        with self.lock:
+            lookup = self._episode_lookup()
+            for step_ids, h_values, z_values in updates:
+                step_ids = step_ids.detach().cpu().numpy()
+                h_values = h_values.detach().cpu().numpy()
+                z_values = z_values.detach().cpu().numpy()
+                for step_id, h_value, z_value in zip(
+                    step_ids, h_values, z_values
+                ):
+                    collector_id, episode_id, offset = map(int, step_id)
+                    if collector_id < 0 or episode_id < 0 or offset < 0:
+                        continue
+                    key = (collector_id, episode_id, offset)
+                    episode = lookup.get((collector_id, episode_id))
+                    if (
+                        episode is None
+                        or offset >= len(episode[1])
+                    ):
+                        self._carry_stale_updates += 1
+                        continue
+                    self._carry_cache[key] = (
+                        np.asarray(h_value, dtype=np.float32).copy(),
+                        np.asarray(z_value, dtype=np.float32).copy(),
+                    )
+
+    @property
+    def carry_stale_updates(self) -> int:
+        with self.lock:
+            return int(self._carry_stale_updates)
+
+    @property
+    def carry_cache_entries(self) -> int:
+        """Number of replay rows with a cached detached RSSM carry."""
+        with self.lock:
+            return len(self._carry_cache)
+
+    @property
+    def carry_cache_bytes(self) -> int:
+        """Approximate NumPy payload bytes held by the carry cache."""
+        with self.lock:
+            return sum(
+                int(h_values.nbytes + z_values.nbytes)
+                for h_values, z_values in self._carry_cache.values()
+            )
 
     def _update_readiness(self, was_ready: bool) -> None:
         completed_in_buffer = sum(bool(episode[10]) for episode in self.buffer)
@@ -521,6 +596,15 @@ class EpisodeReplayBuffer:
             continue_weights = continuation_inclusion_weights(
                 ep_len, seq_len, start
             )
+            step_ids = np.stack(
+                [
+                    np.asarray(
+                        [int(episode[8]), int(episode[9]), offset],
+                        dtype=np.int64,
+                    )
+                    for offset in range(start, start + seq_len)
+                ]
+            )
             return (
                 pixels[start : start + seq_len] if pixels is not None else None,
                 states[start : start + seq_len],
@@ -536,6 +620,7 @@ class EpisodeReplayBuffer:
                 continue_weights,
                 mask,
                 is_first,
+                step_ids,
             )
         else:
             # Pad short episode
@@ -572,6 +657,16 @@ class EpisodeReplayBuffer:
                 [np.ones(ep_len, dtype=np.float32), np.zeros(pad_len, dtype=np.float32)]
             )
             continue_weights = continuation_inclusion_weights(ep_len, seq_len, 0)
+            step_ids = np.full((seq_len, 3), -1, dtype=np.int64)
+            step_ids[:ep_len] = np.stack(
+                [
+                    np.asarray(
+                        [int(episode[8]), int(episode[9]), offset],
+                        dtype=np.int64,
+                    )
+                    for offset in range(ep_len)
+                ]
+            )
 
             return (
                 pixels_out,
@@ -584,6 +679,7 @@ class EpisodeReplayBuffer:
                 continue_weights,
                 mask,
                 is_first,
+                step_ids,
             )
 
     def _stream_segments(self):
@@ -689,11 +785,23 @@ class EpisodeReplayBuffer:
             return np.concatenate(values, axis=0)
 
         is_first_parts = []
+        step_id_parts = []
         for _episode, start, stop in pieces:
             part = np.zeros(stop - start, dtype=np.bool_)
             if start == 0:
                 part[0] = True
             is_first_parts.append(part)
+            step_id_parts.append(
+                np.stack(
+                    [
+                        np.asarray(
+                            [int(_episode[8]), int(_episode[9]), offset],
+                            dtype=np.int64,
+                        )
+                        for offset in range(start, stop)
+                    ]
+                )
+            )
         is_first = np.concatenate(is_first_parts)
         # Historical post-action rows used an artificial reset at every sample
         # start. Reference rows preserve only genuine environment resets; their
@@ -711,6 +819,7 @@ class EpisodeReplayBuffer:
             np.ones(self.sequence_length, dtype=np.float32),
             np.ones(self.sequence_length, dtype=np.float32),
             is_first,
+            np.concatenate(step_id_parts),
         )
 
     def _sample_stream_position(self, position):
@@ -975,6 +1084,8 @@ class EpisodeReplayBuffer:
         use_pixels=False,
         target_size=None,
         recent_fraction=0.0,
+        replay_context=0,
+        use_cached_carry=False,
     ) -> EnvData:
         """
         Samples a batch and returns an EnvData namedtuple with ready-to-use PyTorch tensors.
@@ -986,6 +1097,12 @@ class EpisodeReplayBuffer:
         batch_states, batch_actions, batch_rewards = [], [], []
         batch_is_first, batch_is_last, batch_is_terminal = [], [], []
         batch_future_returns, batch_continue_weights, batch_mask = [], [], []
+        batch_step_ids = []
+        batch_carry_h, batch_carry_z, batch_carry_available = [], [], []
+
+        carry_context = max(0, int(replay_context))
+        with self.lock:
+            carry_cache = dict(self._carry_cache) if use_cached_carry else {}
 
         for (
             pixels,
@@ -998,6 +1115,7 @@ class EpisodeReplayBuffer:
             continue_weights,
             mask,
             is_first,
+            step_ids,
         ) in raw_batch:
             if use_pixels and pixels is not None:
                 pixels_tensor = torch.from_numpy(pixels).permute(0, 3, 1, 2)
@@ -1016,6 +1134,24 @@ class EpisodeReplayBuffer:
                 batch_future_returns.append(torch.from_numpy(future_returns))
             batch_continue_weights.append(torch.from_numpy(continue_weights))
             batch_mask.append(torch.from_numpy(mask))
+            batch_step_ids.append(torch.from_numpy(step_ids))
+
+            if use_cached_carry and carry_context > 0:
+                endpoint = step_ids[carry_context - 1]
+                key = (
+                    int(endpoint[0]),
+                    int(endpoint[1]),
+                    int(endpoint[2]),
+                )
+                cached = carry_cache.get(key)
+                if cached is None:
+                    batch_carry_h.append(None)
+                    batch_carry_z.append(None)
+                    batch_carry_available.append(False)
+                else:
+                    batch_carry_h.append(torch.from_numpy(cached[0]))
+                    batch_carry_z.append(torch.from_numpy(cached[1]))
+                    batch_carry_available.append(True)
 
         if use_pixels and batch_pixels:
             pixels_out = torch.stack(batch_pixels).to(device).float()
@@ -1030,6 +1166,40 @@ class EpisodeReplayBuffer:
             else None
         )
 
+        replay_carry_h = replay_carry_z = replay_carry_available = None
+        if use_cached_carry and carry_context > 0:
+            if not any(value is not None for value in batch_carry_h):
+                replay_carry_available = torch.zeros(
+                    len(batch_carry_available), dtype=torch.bool, device=device
+                )
+            elif any(value is None for value in batch_carry_h):
+                h_shape = next(
+                    (value.shape for value in batch_carry_h if value is not None),
+                    (1,),
+                )
+                z_shape = next(
+                    (value.shape for value in batch_carry_z if value is not None),
+                    (1, 1),
+                )
+                replay_carry_h = torch.stack(
+                    [
+                        value if value is not None else torch.zeros(h_shape)
+                        for value in batch_carry_h
+                    ]
+                ).to(device)
+                replay_carry_z = torch.stack(
+                    [
+                        value if value is not None else torch.zeros(z_shape)
+                        for value in batch_carry_z
+                    ]
+                ).to(device)
+            else:
+                replay_carry_h = torch.stack(batch_carry_h).to(device)
+                replay_carry_z = torch.stack(batch_carry_z).to(device)
+            replay_carry_available = torch.tensor(
+                batch_carry_available, dtype=torch.bool, device=device
+            )
+
         return EnvData(
             states=states_out,
             actions=torch.stack(batch_actions).to(device),
@@ -1042,6 +1212,10 @@ class EpisodeReplayBuffer:
             mask=torch.stack(batch_mask).to(device),
             pixels=pixels_out,
             pixels_original=pixels_original_out,
+            step_ids=torch.stack(batch_step_ids).to(device),
+            replay_carry_h=replay_carry_h,
+            replay_carry_z=replay_carry_z,
+            replay_carry_available=replay_carry_available,
         )
 
     def __len__(self):

@@ -23,6 +23,12 @@ acquisition and loss of a controller, not a clean pass. Its manifest is
 `b4e461097bb841afbea1b3dd5e425f3e`, runtime was 27:36.67, peak RSS was
 3,349,780 KiB, and replay descriptor drops were zero.
 
+The selected repair is now present as opt-in `train.replay_carry_mode=cached`.
+It assigns stable replay row IDs, reuses detached RSSM carries at the burn-in
+boundary, rejects stale writebacks after eviction, and logs cache warm-up and
+memory. The existing `bounded_burn` mode remains the compatibility default for
+older checkpoint/config snapshots.
+
 ## Decision
 
 The current warmup/reinforce configuration does not reliably learn CartPole.

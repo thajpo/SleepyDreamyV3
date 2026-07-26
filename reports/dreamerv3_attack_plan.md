@@ -834,21 +834,25 @@ carry mismatch is the sole cause; they do prove the initialized parity gate is
 not retained by training. The missing final checkpoint is a hardware-evidence
 limitation, not a reason to reinterpret the best/periodic results.
 
-If v2 fails, implement reference-style cached carry before another behavioral
-intervention:
+The carry repair is now implemented and covered by focused replay,
+forward-pass, configuration, and full-suite tests. It remains an experimental
+mode until the frozen behavioral contract is rerun:
 
-1. Give every replay row a stable identity and cache the encoder/RSSM carry
-   needed immediately before that row. Sample the cached entry as context and
-   return refreshed, detached entries after training, matching the pinned
+1. Give every replay row a stable identity and cache the detached RSSM carry
+   produced at that row. Sample the cached entry at the burn-in endpoint and
+   return refreshed entries after training, matching the pinned
    `stepid -> enc/dyn/dec` update contract.
 2. Invalidate or reset entries at genuine episode boundaries and eviction;
    reject stale identities rather than applying an update to a reused slot.
 3. Preserve the current historical and bounded-burn contracts for checkpoint
    compatibility. The reference contract alone selects cached carry.
-4. Add deterministic tests for cache writeback, stale-update rejection,
-   reset-boundary behavior, eviction, resume semantics, and multiprocess
-   shutdown. Add a full-prefix numerical probe whose trained-checkpoint feature,
-   continuation, and actor outputs agree with cached-context replay.
+4. The implementation adds deterministic tests for stable IDs, cache writeback,
+   stale-update rejection, eviction, mixed cache availability, and the forward
+   path. Cache entry count, stale updates, availability, and payload memory are
+   logged. On the CartPole contract, a full cache can hold roughly 256,000 rows;
+   with the current 640-float carry this is about 625 MiB of NumPy payload before
+   Python/container overhead. The telemetry is therefore part of the acceptance
+   evidence, not an optional optimization detail.
 5. Rerun the frozen seed-0 qualification contract with the carry mechanism as
    the only causal change. Keep the same 3,500 updates, replay ratio, trained
    rows per update, environment-step authorization, evaluation seeds, and

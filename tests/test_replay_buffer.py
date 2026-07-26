@@ -81,6 +81,81 @@ def test_short_episode_is_padded_and_masked():
     assert replay.total_env_steps == 3
 
 
+def test_stream_samples_include_stable_row_ids():
+    replay = EpisodeReplayBuffer(
+        data_queue=None,
+        max_episodes=10,
+        min_episodes=1,
+        sequence_length=3,
+        sequence_mode="stream",
+        row_alignment="reference",
+    )
+    replay.add_episode((*_episode(2, marker=1.0), 7, 11))
+    replay.add_episode((*_episode(2, marker=2.0), 7, 12))
+
+    # The only valid stream start crosses the genuine episode boundary.
+    sample = replay._sample_stream_position((7, 11, 1))
+
+    assert sample is not None
+    assert np.array_equal(
+        sample[10],
+        np.array([[7, 11, 1], [7, 12, 0], [7, 12, 1]], dtype=np.int64),
+    )
+
+
+def test_cached_carry_is_returned_by_stable_endpoint_and_evicted_with_episode():
+    replay = EpisodeReplayBuffer(
+        data_queue=None,
+        max_episodes=1,
+        min_episodes=1,
+        sequence_length=3,
+        sequence_mode="stream",
+        row_alignment="reference",
+    )
+    replay.add_episode((*_episode(3, marker=1.0), 4, 9))
+    h = torch.arange(5, dtype=torch.float32).reshape(1, 5)
+    z = torch.arange(6, dtype=torch.float32).reshape(1, 2, 3)
+    step_ids = torch.tensor([[4, 9, 0]], dtype=torch.int64)
+    replay.update_carry([(step_ids, h, z)])
+
+    batch = replay.sample_tensors(
+        1,
+        "cpu",
+        replay_context=1,
+        use_cached_carry=True,
+    )
+    assert batch.replay_carry_available.tolist() == [True]
+    torch.testing.assert_close(batch.replay_carry_h, h)
+    torch.testing.assert_close(batch.replay_carry_z, z)
+
+    replay.add_episode((*_episode(3, marker=2.0), 4, 10))
+    assert replay._carry_cache == {}
+
+
+def test_cached_carry_rejects_rows_evicted_before_writeback():
+    replay = EpisodeReplayBuffer(
+        data_queue=None,
+        max_episodes=1,
+        min_episodes=1,
+        sequence_length=2,
+        sequence_mode="stream",
+    )
+    replay.add_episode((*_episode(2), 2, 1))
+    replay.add_episode((*_episode(2), 2, 2))
+    replay.update_carry(
+        [
+            (
+                torch.tensor([[2, 1, 0]], dtype=torch.int64),
+                torch.zeros(1, 3),
+                torch.zeros(1, 1, 2),
+            )
+        ]
+    )
+
+    assert replay.carry_stale_updates == 1
+    assert replay._carry_cache == {}
+
+
 def test_continuation_weights_remove_window_edge_bias() -> None:
     episode_length = 7
     sequence_length = 3

@@ -43,6 +43,7 @@ class ForwardResult:
     ret_lo: Optional[float] = None
     ret_hi: Optional[float] = None
     continuation_terminal_ema: Optional[float] = None
+    replay_carry_updates: Optional[list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]] = None
 
 
 @dataclass
@@ -351,6 +352,20 @@ def dreamer_step(
     replay_posterior_states_with_grad: list[torch.Tensor] = []
     replay_representation_loss: Optional[torch.Tensor] = None
     dreamed_recurrent_states: Optional[torch.Tensor] = None
+    replay_carry_updates: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
+
+    cached_carry_enabled = (
+        batch.replay_carry_h is not None
+        and batch.replay_carry_z is not None
+        and batch.replay_carry_available is not None
+    )
+    cached_carry_available = (
+        batch.replay_carry_available
+        if cached_carry_enabled
+        else torch.zeros(B, dtype=torch.bool, device=device)
+    )
+    cached_carry_h = batch.replay_carry_h if cached_carry_enabled else None
+    cached_carry_z = batch.replay_carry_z if cached_carry_enabled else None
 
     (
         continuation_loss_weights,
@@ -396,6 +411,31 @@ def dreamer_step(
             prior_logits,
             posterior_logits,
         ) = world_model(tokens_t, action_t, is_first=batch.is_first[:, t_step])
+
+        if cached_carry_enabled and t_step < train_start_t:
+            # Cached entries are the carry *after* the final context row. The
+            # context rows are still replayed for rows lacking a cache, while
+            # cached rows are restored after each context step. This supports
+            # partially warmed caches without mixing training semantics.
+            keep_cached = cached_carry_available.unsqueeze(-1)
+            world_model.h_prev = torch.where(
+                keep_cached, cached_carry_h, world_model.h_prev
+            )
+            world_model.z_prev = torch.where(
+                keep_cached.unsqueeze(-1), cached_carry_z, world_model.z_prev
+            )
+
+        if t_step >= train_start_t and batch.step_ids is not None:
+            h_dim = world_model.d_hidden * world_model.n_blocks
+            replay_carry_updates.append(
+                (
+                    batch.step_ids[:, t_step],
+                    h_z_joined[:, :h_dim],
+                    h_z_joined[:, h_dim:].view(
+                        B, world_model.n_latents, world_model.n_classes
+                    ),
+                )
+            )
 
         if t_step < train_start_t:
             # Context reconstructs an approximate recurrent carry only. It is
@@ -1005,4 +1045,5 @@ def dreamer_step(
         ret_lo=next_ret_lo,
         ret_hi=next_ret_hi,
         continuation_terminal_ema=next_continuation_terminal_ema,
+        replay_carry_updates=replay_carry_updates,
     )

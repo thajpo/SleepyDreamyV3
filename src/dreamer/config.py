@@ -203,6 +203,9 @@ class Config:
     # Opt-in research evidence: save this many read-only state replay sequences
     # beside each model checkpoint. Zero keeps normal training artifact size.
     replay_evidence_samples: int = 0
+    # ``bounded_burn`` preserves historical replay. Reference runs use stable
+    # row identities and cached detached RSSM carry at the train boundary.
+    replay_carry_mode: str = "bounded_burn"  # bounded_burn, cached
 
     # ===== Training: replay ratio gating =====
     replay_ratio: float = 1.0
@@ -410,6 +413,8 @@ def validate_config(cfg: Config) -> None:
         )
     if cfg.replay_evidence_samples < 0:
         errors.append("replay_evidence_samples must be >= 0")
+    if cfg.replay_carry_mode not in {"bounded_burn", "cached"}:
+        errors.append("replay_carry_mode must be 'bounded_burn' or 'cached'")
     if cfg.replay_evidence_samples > 0 and cfg.replay_sequence_mode != "stream":
         errors.append(
             "replay_evidence_samples requires replay_sequence_mode='stream'"

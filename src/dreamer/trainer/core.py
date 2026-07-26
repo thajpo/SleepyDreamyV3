@@ -368,6 +368,8 @@ class WorldModelTrainer:
                 use_pixels=self.use_pixels,
                 target_size=self.config.encoder_cnn_target_size,
                 recent_fraction=self.config.recent_fraction,
+                replay_context=self.config.replay_burn_in,
+                use_cached_carry=(self.config.replay_carry_mode == "cached"),
             )
             B, T = batch.states.shape[:2]
 
@@ -409,6 +411,14 @@ class WorldModelTrainer:
             metrics.replay_active_partial_episodes = (
                 self.replay_buffer.active_partial_episodes
             )
+            if batch.replay_carry_available is not None:
+                metrics.replay_carry_available_fraction = float(
+                    batch.replay_carry_available.float().mean().item()
+                )
+            metrics.replay_carry_cache_entries = (
+                self.replay_buffer.carry_cache_entries
+            )
+            metrics.replay_carry_cache_bytes = self.replay_buffer.carry_cache_bytes
 
             # Initialize loss variables in case loop doesn't execute
             t0 = time.perf_counter()
@@ -543,6 +553,12 @@ class WorldModelTrainer:
                     self.actor.parameters(), clip_factor=agc_clip
                 )
                 self.actor_optimizer.step()
+
+            if result.replay_carry_updates is not None:
+                self.replay_buffer.update_carry(result.replay_carry_updates)
+            metrics.replay_carry_stale_updates = (
+                self.replay_buffer.carry_stale_updates
+            )
 
             # Polyak update for critic EMA whenever the critic trained.
             if has_critic_grad:

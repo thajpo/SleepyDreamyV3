@@ -172,6 +172,7 @@ train:
   continuous_replay_delivery: true
   # Opt-in state-only replay evidence saved beside checkpoints for diagnostics.
   replay_evidence_samples: 0
+  replay_carry_mode: bounded_burn
 
   # Replay ratio gating (DreamerV3 paper)
   replay_ratio: 1.0  # replayed non-burn-in transitions per raw env frame

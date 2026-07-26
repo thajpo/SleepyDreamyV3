@@ -36,6 +36,7 @@ def test_hydra_yaml_defines_every_runtime_field():
     assert runtime_config.online_replay is True
     assert runtime_config.continuous_replay_delivery is True
     assert runtime_config.replay_evidence_samples == 0
+    assert runtime_config.replay_carry_mode == "cached"
     assert runtime_config.critic_slow_target is False
     assert runtime_config.critic_ema_target == "mean_twohot"
     assert runtime_config.optimizer_contract == "reference"
@@ -109,6 +110,10 @@ def test_hydra_yaml_defines_every_runtime_field():
         (
             replace(Config(), replay_evidence_samples=-1),
             "replay_evidence_samples must be >= 0",
+        ),
+        (
+            replace(Config(), replay_carry_mode="mystery"),
+            "replay_carry_mode must be",
         ),
         (
             replace(Config(), replay_evidence_samples=1),
