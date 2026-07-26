@@ -15,17 +15,19 @@ def initialize_actor(device, cfg):
     # This import is here to avoid circular dependencies
     import torch.nn as nn
     from .encoder import ThreeLayerMLP
-    from .reference import ReferenceMLP
+    from .reference import ReferenceMLP, is_reference_state_contract
 
     num_classes = cfg.d_hidden // 16
     d_in = (cfg.d_hidden * cfg.rnn_n_blocks) + (cfg.num_latents * num_classes)
-    if getattr(cfg, "architecture_contract", "historical") == "reference_v3_state":
+    architecture_contract = getattr(cfg, "architecture_contract", "historical")
+    if is_reference_state_contract(architecture_contract):
         actor = ReferenceMLP(
             d_in=d_in,
             d_hidden=cfg.d_hidden,
             d_out=cfg.n_actions,
             hidden_layers=3,
             outscale=0.01,
+            architecture_contract=architecture_contract,
         )
     else:
         historical_actor = ThreeLayerMLP(
@@ -55,18 +57,20 @@ def initialize_critic(device, cfg):
     """
     import torch.nn as nn
     from .encoder import ThreeLayerMLP
-    from .reference import ReferenceMLP
+    from .reference import ReferenceMLP, is_reference_state_contract
 
     num_bins = int(getattr(cfg, "num_bins", 255))
     num_classes = cfg.d_hidden // 16
     d_in = (cfg.d_hidden * cfg.rnn_n_blocks) + (cfg.num_latents * num_classes)
-    if getattr(cfg, "architecture_contract", "historical") == "reference_v3_state":
+    architecture_contract = getattr(cfg, "architecture_contract", "historical")
+    if is_reference_state_contract(architecture_contract):
         critic = ReferenceMLP(
             d_in=d_in,
             d_hidden=cfg.d_hidden,
             d_out=num_bins,
             hidden_layers=3,
             outscale=0.0,
+            architecture_contract=architecture_contract,
         )
     else:
         historical_critic = ThreeLayerMLP(
@@ -86,18 +90,20 @@ def initialize_q_critic(device, cfg):
     """Initialize an action-value critic that predicts two-hot Q(s, a)."""
     import torch.nn as nn
     from .encoder import ThreeLayerMLP
-    from .reference import ReferenceMLP
+    from .reference import ReferenceMLP, is_reference_state_contract
 
     num_bins = int(getattr(cfg, "num_bins", 255))
     num_classes = cfg.d_hidden // 16
     d_in = (cfg.d_hidden * cfg.rnn_n_blocks) + (cfg.num_latents * num_classes)
-    if getattr(cfg, "architecture_contract", "historical") == "reference_v3_state":
+    architecture_contract = getattr(cfg, "architecture_contract", "historical")
+    if is_reference_state_contract(architecture_contract):
         q_critic = ReferenceMLP(
             d_in=d_in,
             d_hidden=cfg.d_hidden,
             d_out=cfg.n_actions * num_bins,
             hidden_layers=3,
             outscale=0.0,
+            architecture_contract=architecture_contract,
         )
     else:
         historical_q_critic = ThreeLayerMLP(

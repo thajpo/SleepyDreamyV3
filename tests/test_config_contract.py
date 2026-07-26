@@ -2,9 +2,15 @@ import json
 from dataclasses import asdict, replace
 
 import pytest
+import torch
 from hydra import compose, initialize_config_module
 
-from dreamer.config import Config, ConfigValidationError, validate_config
+from dreamer.config import (
+    Config,
+    ConfigValidationError,
+    load_checkpoint_config,
+    validate_config,
+)
 from dreamer.main import dictconfig_to_config, resolve_resume_config, run_training
 from dreamer.trainer.core import WorldModelTrainer
 
@@ -368,6 +374,45 @@ def test_resume_restores_all_objective_semantics_by_default(tmp_path):
     assert resumed.prior_state_pred_scale == 0.25
     assert resumed.replay_ratio == 4.0
     assert resumed.recent_fraction == 0.2
+
+
+def test_shifted_reference_checkpoint_gets_v1_compatibility_contract(tmp_path):
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    checkpoint = {
+        "config_snapshot": asdict(
+            replace(Config(), architecture_contract="reference_v3_state")
+        ),
+        "encoder": {
+            "MLP.mlp.0.weight": torch.zeros(2, 2),
+            "MLP.mlp.1.weight": torch.ones(2),
+            "MLP.mlp.1.bias": torch.zeros(2),
+        },
+    }
+    torch.save(checkpoint, checkpoint_path)
+
+    loaded = load_checkpoint_config(checkpoint_path)
+
+    assert loaded is not None
+    assert loaded.architecture_contract == "reference_v3_state_v1"
+
+
+def test_scale_only_reference_checkpoint_keeps_current_contract(tmp_path):
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    checkpoint = {
+        "config_snapshot": asdict(
+            replace(Config(), architecture_contract="reference_v3_state")
+        ),
+        "encoder": {
+            "MLP.mlp.0.weight": torch.zeros(2, 2),
+            "MLP.mlp.1.weight": torch.ones(2),
+        },
+    }
+    torch.save(checkpoint, checkpoint_path)
+
+    loaded = load_checkpoint_config(checkpoint_path)
+
+    assert loaded is not None
+    assert loaded.architecture_contract == "reference_v3_state"
 
 
 def test_resume_infers_reference_rssm_core_without_config_snapshot(tmp_path):

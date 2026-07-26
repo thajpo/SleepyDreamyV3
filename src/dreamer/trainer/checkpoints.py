@@ -22,7 +22,7 @@ def _migrate_reference_norm_state(model, state_dict):
     obsolete = {
         f"{name}.bias" if name else "bias"
         for name, module in model.named_modules()
-        if isinstance(module, ReferenceRMSNorm)
+        if type(module) is ReferenceRMSNorm
     }
     obsolete.intersection_update(state_dict)
     if not obsolete:
@@ -163,10 +163,11 @@ def load_checkpoint(
 ):
     """Load models, optimizers, and resumable trainer state.
 
-    Shift-bearing reference RMSNorm checkpoints are migrated to the pinned
-    scale-only modules together with their optimizer slots. The returned state
-    contains the step, return normalizer, best-evaluation metadata, run ID, and
-    continuation-prevalence EMA.
+    A shift-bearing v1 checkpoint remains exact when its compatibility contract
+    is selected. If the caller explicitly constructs the corrected scale-only
+    contract, obsolete shifts and their optimizer slots are migrated. The
+    returned state contains the step, return normalizer, best-evaluation
+    metadata, run ID, and continuation-prevalence EMA.
     """
     checkpoint: dict[str, Any] = torch.load(
         checkpoint_path, map_location=device, weights_only=False

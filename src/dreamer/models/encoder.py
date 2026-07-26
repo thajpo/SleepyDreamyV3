@@ -2,7 +2,7 @@ import torch.nn as nn
 import torch
 import torch.nn.functional as F
 
-from .reference import ReferenceFeatureMLP
+from .reference import ReferenceFeatureMLP, is_reference_state_contract
 
 
 class ObservationEncoder(nn.Module):
@@ -222,7 +222,7 @@ def make_vector_encoder_mlp(
     if mode == "legacy":
         return ThreeLayerMLP(d_in=d_in, d_hidden=d_hidden, d_out=d_hidden)
     if mode == "reference":
-        if architecture_contract == "reference_v3_state":
+        if is_reference_state_contract(architecture_contract):
             return ReferenceFeatureMLP(
                 d_in=d_in,
                 d_hidden=d_hidden,
@@ -230,6 +230,7 @@ def make_vector_encoder_mlp(
                 # The shared trainer/collector pipeline already applies
                 # symlog before vector encoding.
                 symlog_input=False,
+                architecture_contract=architecture_contract,
             )
         return ReferenceVectorMLP(
             d_in=d_in,

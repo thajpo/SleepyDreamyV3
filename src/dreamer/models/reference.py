@@ -17,6 +17,17 @@ from .math_utils import symlog
 
 REFERENCE_NORM_EPS = 1e-4
 TRUNCATED_NORMAL_CORRECTION = 1.1368
+REFERENCE_STATE_CONTRACT = "reference_v3_state"
+SHIFTED_REFERENCE_STATE_CONTRACT = "reference_v3_state_v1"
+
+
+def is_reference_state_contract(contract: str) -> bool:
+    """Return whether a contract uses the complete reference-state topology."""
+
+    return str(contract) in {
+        REFERENCE_STATE_CONTRACT,
+        SHIFTED_REFERENCE_STATE_CONTRACT,
+    }
 
 
 class ReferenceRMSNorm(nn.Module):
@@ -35,6 +46,25 @@ class ReferenceRMSNorm(nn.Module):
         outputs = values * torch.rsqrt(mean_square + self.eps)
         outputs = outputs * self.weight.float()
         return outputs.to(dtype=dtype)
+
+
+class ShiftedReferenceRMSNorm(ReferenceRMSNorm):
+    """Superseded shift-bearing norm retained only for v1 checkpoints."""
+
+    def __init__(self, features: int, eps: float = REFERENCE_NORM_EPS):
+        super().__init__(features, eps=eps)
+        self.bias = nn.Parameter(torch.zeros(self.features))
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        return super().forward(inputs) + self.bias.to(dtype=inputs.dtype)
+
+
+def reference_norm_type(contract: str) -> type[nn.Module]:
+    """Select the exact or compatibility norm for a state contract."""
+
+    if str(contract) == SHIFTED_REFERENCE_STATE_CONTRACT:
+        return ShiftedReferenceRMSNorm
+    return ReferenceRMSNorm
 
 
 @torch.no_grad()
@@ -85,16 +115,18 @@ class ReferenceMLP(nn.Module):
         hidden_layers: int,
         outscale: float = 1.0,
         symlog_input: bool = False,
+        architecture_contract: str = REFERENCE_STATE_CONTRACT,
     ):
         super().__init__()
         self.symlog_input = bool(symlog_input)
         layers: list[nn.Module] = []
+        norm = reference_norm_type(architecture_contract)
         in_features = int(d_in)
         for _ in range(int(hidden_layers)):
             layers.extend(
                 [
                     nn.Linear(in_features, d_hidden),
-                    ReferenceRMSNorm(d_hidden),
+                    norm(d_hidden),
                     nn.SiLU(),
                 ]
             )
@@ -126,16 +158,18 @@ class ReferenceFeatureMLP(nn.Module):
         *,
         hidden_layers: int,
         symlog_input: bool = False,
+        architecture_contract: str = REFERENCE_STATE_CONTRACT,
     ):
         super().__init__()
         self.symlog_input = bool(symlog_input)
         layers: list[nn.Module] = []
+        norm = reference_norm_type(architecture_contract)
         in_features = int(d_in)
         for _ in range(int(hidden_layers)):
             layers.extend(
                 [
                     nn.Linear(in_features, d_hidden),
-                    ReferenceRMSNorm(d_hidden),
+                    norm(d_hidden),
                     nn.SiLU(),
                 ]
             )

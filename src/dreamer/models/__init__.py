@@ -38,9 +38,14 @@ from .math_utils import (
 )
 from .optimizers import LaProp, adaptive_gradient_clipping
 from .reference import (
+    REFERENCE_STATE_CONTRACT,
+    SHIFTED_REFERENCE_STATE_CONTRACT,
     ReferenceFeatureMLP,
     ReferenceMLP,
     ReferenceRMSNorm,
+    ShiftedReferenceRMSNorm,
     initialize_reference_module,
+    is_reference_state_contract,
+    reference_norm_type,
     reference_truncated_normal_,
 )

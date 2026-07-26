@@ -17,6 +17,7 @@ from dreamer.inspect import infer_config_from_checkpoint
 from dreamer.models import (
     initialize_actor,
     initialize_world_model,
+    is_reference_state_contract,
     symlog,
     unimix_logits,
 )
@@ -63,7 +64,7 @@ def load_probe_models(
         if (
             config.environment_name != "CartPole-v1"
             or config.use_pixels
-            or config.architecture_contract != "reference_v3_state"
+            or not is_reference_state_contract(config.architecture_contract)
         ):
             raise ValueError(
                 "carry parity requires a reference_v3_state CartPole checkpoint"

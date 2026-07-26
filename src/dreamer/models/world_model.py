@@ -5,8 +5,9 @@ from .decoder import ObservationDecoder, StateOnlyDecoder
 from .math_utils import unimix_logits
 from .reference import (
     ReferenceMLP,
-    ReferenceRMSNorm,
     initialize_reference_module,
+    is_reference_state_contract,
+    reference_norm_type,
     reference_truncated_normal_,
 )
 
@@ -39,8 +40,8 @@ class RSSMWorldModel(nn.Module):
             getattr(models_config, "architecture_contract", "historical")
         )
         norm = (
-            ReferenceRMSNorm
-            if self.architecture_contract == "reference_v3_state"
+            reference_norm_type(self.architecture_contract)
+            if is_reference_state_contract(self.architecture_contract)
             else nn.RMSNorm
         )
         num_classes = self.d_hidden // 16
@@ -151,13 +152,14 @@ class RSSMWorldModel(nn.Module):
 
         # Rewards use two-hot encoding
         reward_out = int(num_bins)
-        if self.architecture_contract == "reference_v3_state":
+        if is_reference_state_contract(self.architecture_contract):
             self.reward_predictor = ReferenceMLP(
                 d_in=h_z_dim,
                 d_hidden=self.d_hidden,
                 d_out=reward_out,
                 hidden_layers=1,
                 outscale=0.0,
+                architecture_contract=self.architecture_contract,
             )
         else:
             self.reward_predictor = nn.Linear(h_z_dim, reward_out)
@@ -170,12 +172,13 @@ class RSSMWorldModel(nn.Module):
             # Preserve the parameter layout of historical checkpoints.
             self.continue_predictor = nn.Linear(h_z_dim, 1)
         elif continue_head_layers == 1:
-            if self.architecture_contract == "reference_v3_state":
+            if is_reference_state_contract(self.architecture_contract):
                 self.continue_predictor = ReferenceMLP(
                     d_in=h_z_dim,
                     d_hidden=self.d_hidden,
                     d_out=1,
                     hidden_layers=1,
+                    architecture_contract=self.architecture_contract,
                 )
             else:
                 self.continue_predictor = nn.Sequential(
@@ -204,7 +207,7 @@ class RSSMWorldModel(nn.Module):
                 architecture_contract=self.architecture_contract,
             )
 
-        if self.architecture_contract == "reference_v3_state":
+        if is_reference_state_contract(self.architecture_contract):
             initialize_reference_module(self)
             for block in self.modules():
                 if isinstance(block, BlockLinear):
@@ -332,7 +335,7 @@ class RSSMWorldModel(nn.Module):
             keep = (~reset).to(self.h_prev.dtype).unsqueeze(-1)
             self.h_prev = self.h_prev * keep
             self.z_prev = self.z_prev * keep.unsqueeze(-1)
-            if self.architecture_contract == "reference_v3_state":
+            if is_reference_state_contract(self.architecture_contract):
                 # Reference rows include the reset observation itself. No
                 # environment action precedes that observation.
                 action = action * keep.to(action.dtype)
@@ -476,8 +479,8 @@ class DynamicsPredictor(nn.Module):
 
         # Paper: "RMSNorm normalization, SiLU activation"
         norm = (
-            ReferenceRMSNorm
-            if architecture_contract == "reference_v3_state"
+            reference_norm_type(architecture_contract)
+            if is_reference_state_contract(architecture_contract)
             else nn.RMSNorm
         )
         self.layers = nn.Sequential(

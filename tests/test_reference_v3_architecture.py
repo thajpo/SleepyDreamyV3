@@ -11,6 +11,7 @@ from dreamer.models import (
     ReferenceFeatureMLP,
     ReferenceMLP,
     ReferenceRMSNorm,
+    ShiftedReferenceRMSNorm,
     initialize_actor,
     initialize_critic,
     initialize_world_model,
@@ -134,6 +135,24 @@ def test_reference_state_architecture_matches_pinned_size1m_topology() -> None:
         if parameter.requires_grad
     )
     assert trainable_parameters == 637_381
+
+
+def test_shifted_v1_reference_state_architecture_remains_exactly_loadable() -> None:
+    cfg = reference_config(architecture_contract="reference_v3_state_v1")
+    encoder, world_model = initialize_world_model("cpu", cfg, batch_size=2)
+    actor = initialize_actor("cpu", cfg)
+    critic = initialize_critic("cpu", cfg)
+
+    assert isinstance(encoder.MLP.mlp[1], ShiftedReferenceRMSNorm)
+    assert isinstance(world_model.dynin_deter[1], ShiftedReferenceRMSNorm)
+    assert isinstance(actor.mlp[1], ShiftedReferenceRMSNorm)
+    trainable_parameters = sum(
+        parameter.numel()
+        for module in (encoder, world_model, actor, critic)
+        for parameter in module.parameters()
+        if parameter.requires_grad
+    )
+    assert trainable_parameters == 639_173
 
 
 def test_reference_vector_encoder_receives_once_symlogged_pipeline_input() -> None:

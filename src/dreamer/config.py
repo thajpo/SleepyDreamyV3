@@ -52,7 +52,8 @@ class Config:
     num_latents: int = 32
     # Historical composes the checkpoint-compatible local modules below.
     # reference_v3_state selects the complete pinned state-only architecture.
-    architecture_contract: str = "historical"  # historical, reference_v3_state
+    # reference_v3_state_v1 is the superseded shift-bearing compatibility form.
+    architecture_contract: str = "historical"
     # Legacy preserves historical checkpoint construction. Authored Hydra
     # configs select the grouped, normalized reference recurrent core.
     rssm_core: str = "legacy"  # legacy, reference
@@ -214,11 +215,25 @@ def default_config() -> Config:
     return Config()
 
 
-def config_from_snapshot(data: dict) -> Config:
+def _checkpoint_uses_shifted_reference_norm(checkpoint: dict | None) -> bool:
+    """Identify the superseded v1 norm from an unambiguous state-dict key."""
+
+    if not isinstance(checkpoint, dict):
+        return False
+    encoder = checkpoint.get("encoder")
+    return isinstance(encoder, dict) and "MLP.mlp.1.bias" in encoder
+
+
+def config_from_snapshot(data: dict, checkpoint: dict | None = None) -> Config:
     """Construct a config while supplying historical compatibility defaults."""
     normalized = dict(data)
     normalized.setdefault("laprop_bias_correction", False)
     normalized.setdefault("actor_unimix", 0.01)
+    if (
+        normalized.get("architecture_contract") == "reference_v3_state"
+        and _checkpoint_uses_shifted_reference_norm(checkpoint)
+    ):
+        normalized["architecture_contract"] = "reference_v3_state_v1"
     return Config(**normalized)
 
 
@@ -227,16 +242,7 @@ def load_checkpoint_config(
     checkpoint: dict | None = None,
 ) -> Config | None:
     """Load the authored config carried by or stored beside a checkpoint."""
-    if checkpoint is not None:
-        snapshot = checkpoint.get("config_snapshot")
-        if isinstance(snapshot, dict):
-            return config_from_snapshot(snapshot)
-
     checkpoint_path = Path(checkpoint_path)
-    config_path = checkpoint_path.parent.parent / "config.json"
-    if config_path.exists():
-        return config_from_snapshot(json.loads(config_path.read_text()))
-
     if checkpoint is None and checkpoint_path.exists():
         import torch
 
@@ -245,9 +251,14 @@ def load_checkpoint_config(
         )
         if checkpoint is None:
             return None
+    if checkpoint is not None:
         snapshot = checkpoint.get("config_snapshot")
         if isinstance(snapshot, dict):
-            return config_from_snapshot(snapshot)
+            return config_from_snapshot(snapshot, checkpoint)
+
+    config_path = checkpoint_path.parent.parent / "config.json"
+    if config_path.exists():
+        return config_from_snapshot(json.loads(config_path.read_text()), checkpoint)
     return None
 
 
@@ -323,9 +334,14 @@ def validate_config(cfg: Config) -> None:
 
     if cfg.d_hidden < 16 or cfg.d_hidden % 16 != 0:
         errors.append("d_hidden must be at least 16 and divisible by 16")
-    if cfg.architecture_contract not in {"historical", "reference_v3_state"}:
+    reference_state_contracts = {
+        "reference_v3_state",
+        "reference_v3_state_v1",
+    }
+    if cfg.architecture_contract not in {"historical", *reference_state_contracts}:
         errors.append(
-            "architecture_contract must be 'historical' or 'reference_v3_state'"
+            "architecture_contract must be 'historical', 'reference_v3_state', "
+            "or 'reference_v3_state_v1'"
         )
     if cfg.rssm_core not in {"legacy", "reference"}:
         errors.append("rssm_core must be 'legacy' or 'reference'")
@@ -335,7 +351,7 @@ def validate_config(cfg: Config) -> None:
         errors.append("vector_encoder_mode must be 'legacy' or 'reference'")
     if cfg.posterior_head_layers not in {0, 1}:
         errors.append("posterior_head_layers must be 0 or 1")
-    if cfg.architecture_contract == "reference_v3_state":
+    if cfg.architecture_contract in reference_state_contracts:
         if cfg.use_pixels:
             errors.append("reference_v3_state does not yet support pixel observations")
         if cfg.rssm_core != "reference":
@@ -377,7 +393,7 @@ def validate_config(cfg: Config) -> None:
     if cfg.replay_row_alignment not in {"post_action", "reference"}:
         errors.append("replay_row_alignment must be 'post_action' or 'reference'")
     if (
-        cfg.architecture_contract == "reference_v3_state"
+        cfg.architecture_contract in reference_state_contracts
         and cfg.replay_row_alignment != "reference"
     ):
         errors.append("reference_v3_state requires replay_row_alignment='reference'")
