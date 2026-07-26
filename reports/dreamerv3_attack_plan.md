@@ -715,3 +715,64 @@ The bounded correction is to trace all four eligible histories with the same
 checkpoints, evidence, labels, seed, horizon, samples, and actor cross. This is
 an exhaustive cohort, not a smaller random sample. Its limitation must remain
 explicit; no population conclusion may rest on four histories.
+
+### Closed-loop trace result and selected engineering boundary
+
+The exhaustive four-history trace completed from clean commit `b71b1a4` in
+1.60 seconds with 386 MiB peak RSS. Across eight real first-action branches and
+206 nonterminal successor decisions, matched best/final actions agree only
+`0.641`; every branch diverges by depth eight, at mean depth `4.75`. Among 74
+changed decisions, swapping final actor weights onto the best representation
+transfers the final action `0.311` of the time, while swapping the final
+representation under the best actor transfers it `0.568`. This weakly points to
+recurrent representation/policy-state drift, but the four-history selection is
+too small for a population claim.
+
+The sharper mechanistic warning is prior continuation on the five actual
+terminal transitions: final imagination predicts mean continuation `0.989`,
+higher than `0.977` on the 206 nonterminal transitions. The final controller is
+therefore locally self-consistent with its actor/value target while its model
+can label rare closed-loop failure branches as especially safe. That is model
+exploitation, not evidence that actor optimization stopped running.
+
+This warning does not authorize class-balanced continuation. The retained
+balanced-BCE canary already showed why: it improved terminal classification by
+changing the learned class prior, then fed the uncorrected score into
+imagination as a probability and destroyed live-state discount calibration.
+Nor do five terminal rows establish that continuation alone is the root cause.
+
+The selected engineering boundary is the remaining pinned-reference replay
+carry mismatch. Official DreamerV3 stores and refreshes model carry entries in
+replay and uses them as context. This implementation reconstructs carry from
+zero over 20 rows. Its initialized-model gate passed, but trained best/final
+feature p95 relative errors are `0.411`/`0.319`; every subsequent critic,
+continuation, and actor measurement is therefore conditioned on a training
+latent that can differ materially from deployment.
+
+## Phase 3: exact replay carry conformance
+
+Implement reference-style cached carry before another behavioral intervention:
+
+1. Give every replay row a stable identity and cache the encoder/RSSM carry
+   needed immediately before that row. Sample the cached entry as context and
+   return refreshed, detached entries after training, matching the pinned
+   `stepid -> enc/dyn/dec` update contract.
+2. Invalidate or reset entries at genuine episode boundaries and eviction;
+   reject stale identities rather than applying an update to a reused slot.
+3. Preserve the current historical and bounded-burn contracts for checkpoint
+   compatibility. The reference contract alone selects cached carry.
+4. Add deterministic tests for cache writeback, stale-update rejection,
+   reset-boundary behavior, eviction, resume semantics, and multiprocess
+   shutdown. Add a full-prefix numerical probe whose trained-checkpoint feature,
+   continuation, and actor outputs agree with cached-context replay.
+5. Rerun the frozen seed-0 qualification contract with the carry mechanism as
+   the only causal change. Keep the same 3,500 updates, replay ratio, trained
+   rows per update, environment-step authorization, evaluation seeds, and
+   retention gate. Do not run seeds 1/2 unless seed 0 passes.
+
+If exact carry still collapses, the next isolated intervention is direct
+one-step **prior** continuation supervision on real transitions, because
+imagination consumes prior rather than posterior features. It must preserve the
+natural continuation probability and be gated on held-out prior Brier error,
+terminal/live calibration, and behavior. Do not revisit balanced BCE, generic
+loss scaling, Pong, or hyperparameter sweeps before that decision point.

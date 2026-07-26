@@ -6806,3 +6806,27 @@ despite poor return. The frozen 32-history trace was rejected because only four
 rows are tied under best continuation but actionable under final continuation.
 The failure is retained. Trace all four eligible rows with every other setting
 unchanged, report the small-cohort limitation, and do not resample.
+
+The exhaustive four-history trace completed from clean commit `b71b1a4` in
+1.60 seconds (386 MiB peak RSS). All eight branches diverge within eight steps,
+at mean depth `4.75`. On 74 changed decisions, final actor weights on the best
+representation transfer the final action `0.311` of the time; final
+representation under the best actor transfers it `0.568`. This is only weak
+representation-drift evidence because the selection contains four histories.
+
+The five actual terminal transitions expose a stronger warning: final-prior
+continuation averages `0.989`, above the `0.977` nonterminal mean. Thus the
+failed actor/value/model can be locally self-consistent while rare closed-loop
+failure looks especially safe in imagination. The sample is too small to call
+continuation the sole cause, and the prior balanced-continuation canary already
+rejects class-prior distortion as the fix.
+
+The remaining reference-conformance blocker is now selected: trained replay
+carry. Local replay reconstructs from zero over 20 rows; pinned upstream stores
+and refreshes model carry in replay. Although initialized parity passed,
+trained best/final p95 feature errors are `0.411`/`0.319`. Implement stable
+row identities plus cached detached carry, safe writeback, boundary/eviction
+invalidation, compatibility modes, and full-prefix parity tests. Then rerun
+the exact frozen seed-0 canary with no other causal change. If that still
+collapses, test direct natural-prior continuation supervision; do not use
+balanced BCE or return to Pong first.
