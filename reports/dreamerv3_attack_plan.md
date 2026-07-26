@@ -1161,3 +1161,38 @@ policy. No further training intervention is selected from this audit alone.
 The next preregistration must isolate whether a separate terminal-risk
 auxiliary signal can improve the shared representation without replacing the
 natural-probability discount head. Seeds 1/2 and Pong remain stopped.
+
+### Phase 6 preregistration: detached terminal-risk auxiliary head
+
+The audit shows that a fresh balanced head can read terminal information from
+the latent while the natural continuation head remains nearly all-live. The
+next intervention tests representation support without using a reweighted
+classifier as an imagination discount.
+
+- **Hypothesis:** a separate terminal-risk head trained with balanced terminal
+  exposure will improve prior latent separation and stabilize the existing
+  natural continuation head through shared RSSM gradients. The risk score is a
+  diagnostic/representation auxiliary only; Dreamer continues to discount with
+  the ordinary natural-prior continuation head.
+- **Causal variable:** add `train.terminal_risk_aux_scale=0.25` (baseline `0.0`).
+  The new head consumes the expected one-step prior feature, uses per-batch
+  equal terminal/live mass weighting, and receives gradients through the prior
+  representation. Do not alter the natural continuation head, actor/critic
+  objectives, replay, carry, terminal rewards, or actor entropy.
+- **Frozen contract:** current v3 cached-carry CartPole state contract, seed `0`,
+  3,500 updates, batch `8`, sequence `32`, burn-in `20`, replay ratio `16`,
+  20 deterministic evaluations every `100` updates, and the same resource cap.
+  Artifact prefix:
+  `experiments/2026-07-26_cartpole_reference_v3_terminal_risk_aux_seed0_3500`.
+- **Behavior gate:** reach mean return `450`, never fall below `300` after
+  first reaching it, finish at least `400`, and keep best-to-final gap at most
+  `100`. Failure stops this seed and authorizes no seeds or Pong.
+- **Natural-discount gate:** held-out prior continuation at final must have
+  Brier error no worse than `0.00351`, terminal continuation at most `0.97`,
+  and live continuation at least `0.98`. The auxiliary risk score is not
+  accepted as a replacement discount.
+- **Boundary readout:** report existing Q/true-action metrics plus the
+  auxiliary risk head's held-out terminal/live probabilities and failure AUC.
+  Improved risk separation with unchanged natural continuation and behavioral
+  failure rejects the intervention as insufficient but localizes representation
+  support. No seeds or Pong run follows a one-seed partial result.

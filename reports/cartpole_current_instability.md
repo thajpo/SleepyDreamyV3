@@ -7030,3 +7030,18 @@ calibration under joint representation/value drift, not missing terminal
 information or a simple prior-transport defect. The next experiment must
 isolate a separate terminal-risk auxiliary signal from the natural-probability
 discount head. No new seeds or Pong run is authorized yet.
+
+#### Preregistered detached terminal-risk auxiliary head
+
+The next one-seed intervention adds `train.terminal_risk_aux_scale=0.25`.
+It trains a separate terminal-risk head on the expected prior feature with
+equal terminal/live mass weighting and shared RSSM gradients. The score is not
+used as an imagination discount; the existing natural continuation head
+remains the only discount signal.
+
+The frozen contract remains the cached-carry v3 CartPole seed-0 run at 3,500
+updates. The behavior gate is acquisition at 450, retention above 300, final
+at least 400, and best-to-final gap at most 100. The natural continuation gate
+requires final prior Brier error at most `0.00351`, terminal continuation at
+most `0.97`, and live continuation at least `0.98`. A partial result may
+localize representation support but cannot authorize seeds or Pong.
