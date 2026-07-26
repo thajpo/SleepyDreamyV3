@@ -94,6 +94,23 @@ def test_corrected_cartpole_contract_changes_only_reference_norm_topology():
     )
 
 
+def test_cached_carry_contract_changes_only_replay_carry_mode():
+    v2 = load_contract(CONTRACT_DIR / "cartpole_reference_v3_state_v2.yaml")
+    v3 = load_contract(CONTRACT_DIR / "cartpole_reference_v3_state_v3.yaml")
+
+    assert v3["implementation"]["commit"] == "5cc7fbf"
+    assert v3["environment"] == v2["environment"]
+    assert v3["evaluation"] == v2["evaluation"]
+    assert v3["model"] == v2["model"]
+    assert v3["training"]["replay_carry_mode"] == "cached"
+    v3_training_without_carry = dict(v3["training"])
+    v3_training_without_carry.pop("replay_carry_mode")
+    assert v3_training_without_carry == v2["training"]
+    assert v3["causal_comparison"]["only_authored_change"] == (
+        "bounded_burn_to_cached_replay_carry"
+    )
+
+
 def test_contract_validation_fails_closed_on_unit_drift():
     contract = load_contract(CONTRACT_DIR / "paper_v2_atari100k.yaml")
     broken = deepcopy(contract)

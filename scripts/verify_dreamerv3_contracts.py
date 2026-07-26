@@ -17,6 +17,7 @@ CONTRACT_NAMES = (
     "cartpole_drift_v1",
     "cartpole_reference_v3_state_v1",
     "cartpole_reference_v3_state_v2",
+    "cartpole_reference_v3_state_v3",
 )
 
 
