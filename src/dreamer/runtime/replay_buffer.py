@@ -1101,10 +1101,27 @@ class EpisodeReplayBuffer:
         batch_carry_h, batch_carry_z, batch_carry_available = [], [], []
 
         carry_context = max(0, int(replay_context))
-        with self.lock:
-            carry_cache = dict(self._carry_cache) if use_cached_carry else {}
+        cached_endpoints = []
+        if use_cached_carry and carry_context > 0:
+            for raw_sequence in raw_batch:
+                endpoint = raw_sequence[-1][carry_context - 1]
+                cached_endpoints.append(
+                    (
+                        int(endpoint[0]),
+                        int(endpoint[1]),
+                        int(endpoint[2]),
+                    )
+                )
+            # Snapshot only this batch's keys. Copying the complete cache here
+            # would make every optimizer step O(replay-buffer-size).
+            with self.lock:
+                cached_values = [
+                    self._carry_cache.get(key) for key in cached_endpoints
+                ]
+        else:
+            cached_values = []
 
-        for (
+        for batch_index, (
             pixels,
             states,
             actions,
@@ -1116,7 +1133,7 @@ class EpisodeReplayBuffer:
             mask,
             is_first,
             step_ids,
-        ) in raw_batch:
+        ) in enumerate(raw_batch):
             if use_pixels and pixels is not None:
                 pixels_tensor = torch.from_numpy(pixels).permute(0, 3, 1, 2)
                 batch_pixels_original.append(pixels_tensor)
@@ -1137,13 +1154,7 @@ class EpisodeReplayBuffer:
             batch_step_ids.append(torch.from_numpy(step_ids))
 
             if use_cached_carry and carry_context > 0:
-                endpoint = step_ids[carry_context - 1]
-                key = (
-                    int(endpoint[0]),
-                    int(endpoint[1]),
-                    int(endpoint[2]),
-                )
-                cached = carry_cache.get(key)
+                cached = cached_values[batch_index]
                 if cached is None:
                     batch_carry_h.append(None)
                     batch_carry_z.append(None)
