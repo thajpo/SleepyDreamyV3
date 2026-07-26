@@ -54,10 +54,7 @@ def symexp_twohot_bins(
             )
             half = symexp(half)
             return torch.cat((half, -half[:-1].flip(0)), dim=0)
-        center_offset = float(start) / float(num_bins - 1)
-        half = torch.linspace(
-            start, center_offset, num_bins // 2, device=device, dtype=dtype
-        )
+        half = torch.linspace(start, 0.0, num_bins // 2, device=device, dtype=dtype)
         half = symexp(half)
         return torch.cat((half, -half.flip(0)), dim=0)
     return symexp(

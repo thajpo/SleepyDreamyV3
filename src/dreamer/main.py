@@ -66,6 +66,53 @@ class ChildProcessError(RuntimeError):
     """Raised when a required training subprocess fails or cannot stop."""
 
 
+RESUME_RUN_CONTROL_FIELDS = frozenset(
+    {
+        "device",
+        "profile",
+        "compile_models",
+        "dry_run",
+        "experiment_name",
+        "log_profile",
+        "research_gradient_diagnostics",
+        "max_train_steps",
+        "early_stop_ep_length",
+        "eval_every",
+        "eval_episodes",
+        "checkpoint_interval",
+        "replay_evidence_samples",
+    }
+)
+RESUME_UNSNAPSHOTTED_STRUCTURE_FIELDS = RESUME_RUN_CONTROL_FIELDS | frozenset(
+    {
+        "use_pixels",
+        "environment_name",
+        "n_actions",
+        "n_observations",
+        "atari_compat_mode",
+        "atari_noop_max",
+        "atari_frame_skip",
+        "atari_terminal_on_life_loss",
+        "atari_sticky_action_prob",
+        "atari_full_action_space",
+        "atari_fire_reset",
+        "atari_screen_size",
+        "d_hidden",
+        "num_latents",
+        "encoder_cnn_stride",
+        "encoder_cnn_kernel_size",
+        "encoder_cnn_padding",
+        "encoder_cnn_input_channels",
+        "encoder_cnn_num_layers",
+        "encoder_cnn_final_feature_size",
+        "encoder_cnn_target_size",
+        "encoder_mlp_hidden_dim_ratio",
+        "encoder_mlp_n_layers",
+        "rnn_n_blocks",
+    }
+)
+
+
 def resolve_device(device_str: str) -> str:
     """Resolve device from config, handling 'auto' setting."""
     if device_str == "auto":
@@ -238,44 +285,11 @@ def resolve_resume_config(
     checkpoint_config = load_checkpoint_config(checkpoint_path, checkpoint)
     if checkpoint_config is not None:
         return replace(
-            flat_cfg,
-            architecture_contract=checkpoint_config.architecture_contract,
-            rssm_core=checkpoint_config.rssm_core,
-            continue_head_layers=checkpoint_config.continue_head_layers,
-            vector_encoder_mode=checkpoint_config.vector_encoder_mode,
-            posterior_head_layers=checkpoint_config.posterior_head_layers,
-            critic_slow_target=checkpoint_config.critic_slow_target,
-            critic_ema_target=checkpoint_config.critic_ema_target,
-            optimizer_contract=checkpoint_config.optimizer_contract,
-            laprop_bias_correction=checkpoint_config.laprop_bias_correction,
-            optimizer_warmup_steps=checkpoint_config.optimizer_warmup_steps,
-            wm_lr=checkpoint_config.wm_lr,
-            actor_lr=checkpoint_config.actor_lr,
-            critic_lr=checkpoint_config.critic_lr,
-            normalize_advantages=checkpoint_config.normalize_advantages,
-            state_loss_mode=checkpoint_config.state_loss_mode,
-            free_bits_straight_through=(
-                checkpoint_config.free_bits_straight_through
-            ),
-            b_start=checkpoint_config.b_start,
-            b_end=checkpoint_config.b_end,
-            num_bins=checkpoint_config.num_bins,
-            balance_continuation=checkpoint_config.balance_continuation,
-            continuation_balance_rate=checkpoint_config.continuation_balance_rate,
-            gamma=checkpoint_config.gamma,
-            horizon=checkpoint_config.horizon,
-            contdisc=checkpoint_config.contdisc,
-            weight_imagination_starts=(
-                checkpoint_config.weight_imagination_starts
-            ),
-            replay_sequence_mode=checkpoint_config.replay_sequence_mode,
-            online_replay=checkpoint_config.online_replay,
-            continuous_replay_delivery=(
-                checkpoint_config.continuous_replay_delivery
-            ),
-            actor_warmup_steps=checkpoint_config.actor_warmup_steps,
-            actor_unimix=checkpoint_config.actor_unimix,
-            replay_row_alignment=checkpoint_config.replay_row_alignment,
+            checkpoint_config,
+            **{
+                field: getattr(flat_cfg, field)
+                for field in RESUME_RUN_CONTROL_FIELDS
+            },
         )
 
     world_model_state = checkpoint.get("world_model", {})
@@ -313,8 +327,15 @@ def resolve_resume_config(
         raise ValueError(
             "checkpoint does not identify its posterior-head architecture"
         )
+    historical_config = replace(
+        Config(),
+        **{
+            field: getattr(flat_cfg, field)
+            for field in RESUME_UNSNAPSHOTTED_STRUCTURE_FIELDS
+        },
+    )
     return replace(
-        flat_cfg,
+        historical_config,
         architecture_contract="historical",
         rssm_core=rssm_core,
         continue_head_layers=continue_head_layers,

@@ -41,7 +41,7 @@ training:
 
 model:
   architecture_contract: reference_v3_state
-  trainable_parameters_without_slow_value: 639173
+  trainable_parameters_without_slow_value: 637381
   hidden_width: 64
   deterministic_width: 512
   recurrent_blocks: 8
@@ -55,7 +55,7 @@ model:
   actor_hidden_layers: 3
   value_hidden_layers: 3
   rmsnorm_epsilon: 0.0001
-  rmsnorm_learned_shift: true
+  rmsnorm_learned_shift: false
   initialization: trunc_normal_fan_in
 
 evaluation:

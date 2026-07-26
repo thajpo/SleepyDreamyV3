@@ -39,12 +39,12 @@ def test_symmetric_twohot_zero_logits_decode_exactly_to_zero():
     torch.testing.assert_close(prediction, torch.zeros(4), rtol=0, atol=0)
 
 
-def test_even_symmetric_twohot_bins_are_distinct_mirrored_pairs():
+def test_even_symmetric_twohot_bins_duplicate_zero_like_pinned_source():
     bins = symexp_twohot_bins(-20, 20, 254)
     prediction = twohot_expectation(torch.zeros(4, 254), bins)
 
-    assert torch.all(bins[1:] > bins[:-1])
-    assert not torch.any(bins == 0)
+    assert torch.all(bins[1:] >= bins[:-1])
+    assert torch.count_nonzero(bins == 0).item() == 2
     torch.testing.assert_close(bins, -bins.flip(0), rtol=0, atol=0)
     torch.testing.assert_close(prediction, torch.zeros(4), rtol=0, atol=0)
 

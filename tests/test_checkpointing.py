@@ -5,6 +5,7 @@ import torch
 import pytest
 
 from dreamer.config import Config
+from dreamer.models import ReferenceRMSNorm
 from dreamer.trainer.checkpoints import load_checkpoint, save_checkpoint
 from dreamer.trainer.core import EvaluationResult
 
@@ -17,6 +18,47 @@ def _components():
     critic_ema = torch.nn.Linear(2, 2)
     q_critic = torch.nn.Linear(2, 2)
     q_critic_ema = torch.nn.Linear(2, 2)
+    wm_optimizer = torch.optim.Adam(
+        list(encoder.parameters()) + list(world_model.parameters()), lr=1e-3
+    )
+    actor_optimizer = torch.optim.Adam(actor.parameters(), lr=1e-3)
+    critic_optimizer = torch.optim.Adam(
+        list(critic.parameters()) + list(q_critic.parameters()), lr=1e-3
+    )
+    return {
+        "encoder": encoder,
+        "world_model": world_model,
+        "actor": actor,
+        "critic": critic,
+        "critic_ema": critic_ema,
+        "q_critic": q_critic,
+        "q_critic_ema": q_critic_ema,
+        "wm_optimizer": wm_optimizer,
+        "actor_optimizer": actor_optimizer,
+        "critic_optimizer": critic_optimizer,
+    }
+
+
+class _ShiftedRMSNorm(torch.nn.Module):
+    def __init__(self, features: int):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.ones(features))
+        self.bias = torch.nn.Parameter(torch.zeros(features))
+
+
+def _reference_components(*, shifted: bool):
+    norm_type = _ShiftedRMSNorm if shifted else ReferenceRMSNorm
+
+    def model():
+        return torch.nn.Sequential(torch.nn.Linear(2, 2), norm_type(2))
+
+    encoder = model()
+    world_model = model()
+    actor = model()
+    critic = model()
+    critic_ema = model()
+    q_critic = model()
+    q_critic_ema = model()
     wm_optimizer = torch.optim.Adam(
         list(encoder.parameters()) + list(world_model.parameters()), lr=1e-3
     )
@@ -135,6 +177,45 @@ def test_checkpoint_carries_portable_config_snapshot(tmp_path):
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
 
     assert checkpoint["config_snapshot"] == snapshot
+
+
+def test_checkpoint_migrates_obsolete_reference_rmsnorm_shifts(tmp_path):
+    original = _reference_components(shifted=True)
+    with torch.no_grad():
+        original["encoder"][1].weight.fill_(1.25)
+        original["actor"][1].weight.fill_(1.5)
+        original["critic"][1].weight.fill_(1.75)
+    for optimizer in (
+        original["wm_optimizer"],
+        original["actor_optimizer"],
+        original["critic_optimizer"],
+    ):
+        for group in optimizer.param_groups:
+            for parameter in group["params"]:
+                parameter.grad = torch.ones_like(parameter)
+        optimizer.step()
+    path = _save(tmp_path, original)
+
+    restored = _reference_components(shifted=False)
+    _load(path, restored)
+
+    torch.testing.assert_close(
+        restored["encoder"][1].weight, original["encoder"][1].weight
+    )
+    torch.testing.assert_close(
+        restored["actor"][1].weight, original["actor"][1].weight
+    )
+    torch.testing.assert_close(
+        restored["critic"][1].weight, original["critic"][1].weight
+    )
+    for optimizer in (
+        restored["wm_optimizer"],
+        restored["actor_optimizer"],
+        restored["critic_optimizer"],
+    ):
+        assert len(optimizer.state) == sum(
+            len(group["params"]) for group in optimizer.param_groups
+        )
 
 
 def test_final_checkpoint_does_not_overwrite_best_checkpoint(tmp_path):

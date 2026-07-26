@@ -20,21 +20,20 @@ TRUNCATED_NORMAL_CORRECTION = 1.1368
 
 
 class ReferenceRMSNorm(nn.Module):
-    """RMSNorm with the reference's learned scale *and* learned shift."""
+    """RMSNorm with the reference's learned scale."""
 
     def __init__(self, features: int, eps: float = REFERENCE_NORM_EPS):
         super().__init__()
         self.features = int(features)
         self.eps = float(eps)
         self.weight = nn.Parameter(torch.ones(self.features))
-        self.bias = nn.Parameter(torch.zeros(self.features))
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         dtype = inputs.dtype
         values = inputs.float()
         mean_square = values.square().mean(dim=-1, keepdim=True)
         outputs = values * torch.rsqrt(mean_square + self.eps)
-        outputs = outputs * self.weight.float() + self.bias.float()
+        outputs = outputs * self.weight.float()
         return outputs.to(dtype=dtype)
 
 

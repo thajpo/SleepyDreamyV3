@@ -31,7 +31,7 @@ def tensor(values, *, dtype=torch.float32) -> torch.Tensor:
 
 def test_fixture_identifies_pinned_source_and_jax_runtime() -> None:
     fixture = load_fixture()
-    assert fixture["schema_version"] == 1
+    assert fixture["schema_version"] == 2
     assert fixture["source_commit"] == SOURCE_COMMIT
     assert fixture["jax_version"] == "0.4.33"
 
@@ -66,6 +66,17 @@ def test_twohot_matches_independent_jax_fixture() -> None:
         rtol=1e-5,
         atol=1e-2,
     )
+
+
+def test_even_twohot_support_matches_pinned_source() -> None:
+    fixture = load_fixture()["twohot"]
+    bins = symexp_twohot_bins(-20, 20, 8)
+
+    torch.testing.assert_close(
+        bins, tensor(fixture["even_bins"]), rtol=3e-6, atol=1e-4
+    )
+    assert bins[3].item() == 0.0
+    assert bins[4].item() == 0.0
 
 
 def test_replay_lambda_return_matches_independent_jax_fixture() -> None:

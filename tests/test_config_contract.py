@@ -311,6 +311,65 @@ def test_resume_restores_checkpoint_authored_loss_and_bin_semantics(tmp_path):
     assert resumed.state_loss_mode == "reference_sum"
 
 
+def test_resume_restores_all_objective_semantics_by_default(tmp_path):
+    checkpoint_config = replace(
+        Config(),
+        max_train_steps=100,
+        eval_metric="episode_length",
+        lam=0.7,
+        num_dream_steps=9,
+        critic_ema_decay=0.95,
+        critic_ema_regularizer=0.4,
+        actor_entropy_coef=0.002,
+        beta_dyn=0.8,
+        beta_rep=0.2,
+        beta_pred=1.3,
+        critic_replay_scale=0.5,
+        prior_state_pred_scale=0.25,
+        replay_ratio=4.0,
+        recent_fraction=0.2,
+    )
+    current = replace(
+        checkpoint_config,
+        max_train_steps=200,
+        eval_metric="episode_reward",
+        lam=0.9,
+        num_dream_steps=15,
+        critic_ema_decay=0.98,
+        critic_ema_regularizer=1.0,
+        actor_entropy_coef=3e-4,
+        beta_dyn=1.0,
+        beta_rep=0.1,
+        beta_pred=1.0,
+        critic_replay_scale=0.3,
+        prior_state_pred_scale=0.0,
+        replay_ratio=1.0,
+        recent_fraction=0.0,
+    )
+
+    resumed = resolve_resume_config(
+        current,
+        tmp_path / "checkpoint.pt",
+        checkpoint={
+            "config_snapshot": asdict(checkpoint_config),
+            "world_model": {},
+        },
+    )
+
+    assert resumed.max_train_steps == 200
+    assert resumed.eval_metric == "episode_length"
+    assert resumed.lam == 0.7
+    assert resumed.num_dream_steps == 9
+    assert resumed.critic_ema_decay == 0.95
+    assert resumed.critic_ema_regularizer == 0.4
+    assert resumed.actor_entropy_coef == 0.002
+    assert (resumed.beta_dyn, resumed.beta_rep, resumed.beta_pred) == (0.8, 0.2, 1.3)
+    assert resumed.critic_replay_scale == 0.5
+    assert resumed.prior_state_pred_scale == 0.25
+    assert resumed.replay_ratio == 4.0
+    assert resumed.recent_fraction == 0.2
+
+
 def test_resume_infers_reference_rssm_core_without_config_snapshot(tmp_path):
     resumed = resolve_resume_config(
         Config(),
@@ -336,6 +395,43 @@ def test_resume_infers_reference_rssm_core_without_config_snapshot(tmp_path):
         0.997,
         333,
         True,
+    )
+
+
+def test_unsnapshotted_resume_uses_historical_objective_defaults(tmp_path):
+    resumed = resolve_resume_config(
+        replace(
+            Config(),
+            lam=0.7,
+            num_dream_steps=9,
+            critic_ema_decay=0.95,
+            critic_ema_regularizer=0.4,
+            actor_entropy_coef=0.002,
+            beta_dyn=0.8,
+            beta_rep=0.2,
+            beta_pred=1.3,
+        ),
+        tmp_path / "checkpoint.pt",
+        checkpoint={
+            "world_model": {
+                "dynin_deter.0.weight": object(),
+                "continue_predictor.0.weight": object(),
+                "posterior_head.0.weight": object(),
+            },
+            "encoder": {"MLP.mlp.1.weight": object()},
+        },
+    )
+
+    historical = Config()
+    assert resumed.lam == historical.lam
+    assert resumed.num_dream_steps == historical.num_dream_steps
+    assert resumed.critic_ema_decay == historical.critic_ema_decay
+    assert resumed.critic_ema_regularizer == historical.critic_ema_regularizer
+    assert resumed.actor_entropy_coef == historical.actor_entropy_coef
+    assert (resumed.beta_dyn, resumed.beta_rep, resumed.beta_pred) == (
+        historical.beta_dyn,
+        historical.beta_rep,
+        historical.beta_pred,
     )
 
 

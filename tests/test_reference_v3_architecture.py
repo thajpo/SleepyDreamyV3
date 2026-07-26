@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 import torch
+import yaml
 
 from dreamer.config import Config, ConfigValidationError, validate_config
 from dreamer.main import dictconfig_to_config
@@ -20,6 +21,12 @@ from hydra import compose, initialize_config_module
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "dreamerv3_e3f0224_oracle.json"
+CONTRACT = (
+    Path(__file__).parents[1]
+    / "reports"
+    / "contracts"
+    / "cartpole_reference_v3_state_v1.yaml"
+)
 
 
 def reference_config(**changes) -> Config:
@@ -75,13 +82,12 @@ def test_reference_rms_norm_matches_independent_jax_fixture() -> None:
     norm = ReferenceRMSNorm(len(fixture["scale"]), eps=fixture["eps"])
     with torch.no_grad():
         norm.weight.copy_(torch.tensor(fixture["scale"]))
-        norm.bias.copy_(torch.tensor(fixture["shift"]))
 
     actual = norm(torch.tensor(fixture["input"]))
     torch.testing.assert_close(
         actual, torch.tensor(fixture["output"]), rtol=1e-6, atol=1e-6
     )
-    assert "bias" in norm.state_dict()
+    assert set(norm.state_dict()) == {"weight"}
 
 
 def test_reference_state_architecture_matches_pinned_size1m_topology() -> None:
@@ -128,6 +134,17 @@ def test_reference_state_architecture_matches_pinned_size1m_topology() -> None:
     assert isinstance(critic, ReferenceMLP)
     assert len(actor.mlp) == 10
     assert len(critic.mlp) == 10
+    contract = yaml.safe_load(CONTRACT.read_text())
+    trainable_parameters = sum(
+        parameter.numel()
+        for module in (encoder, world_model, actor, critic)
+        for parameter in module.parameters()
+        if parameter.requires_grad
+    )
+    assert trainable_parameters == contract["model"][
+        "trainable_parameters_without_slow_value"
+    ]
+    assert contract["model"]["rmsnorm_learned_shift"] is False
 
 
 def test_reference_vector_encoder_receives_once_symlogged_pipeline_input() -> None:

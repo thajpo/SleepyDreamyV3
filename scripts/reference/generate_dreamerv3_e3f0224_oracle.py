@@ -5,7 +5,7 @@ This script intentionally has no imports from the local ``dreamer`` package.
 Run it in a temporary JAX environment so the committed fixture remains an
 independent cross-framework oracle:
 
-    uv run --python 3.12 --with 'jax[cpu]==0.4.33' \
+    uv run --no-project --python 3.12 --with 'jax[cpu]==0.4.33' \
       python scripts/reference/generate_dreamerv3_e3f0224_oracle.py
 
 The equations are transcribed from danijar/dreamerv3 at commit
@@ -101,11 +101,9 @@ def twohot_prediction(logits: jax.Array, bins: jax.Array) -> jax.Array:
     ).sum(-1)
 
 
-def rms_norm(
-    x: jax.Array, scale: jax.Array, shift: jax.Array, eps: float = 1e-4
-) -> jax.Array:
+def rms_norm(x: jax.Array, scale: jax.Array, eps: float = 1e-4) -> jax.Array:
     mean2 = jnp.square(x.astype(jnp.float32)).mean(-1, keepdims=True)
-    return x * (jax.lax.rsqrt(mean2 + eps) * scale) + shift
+    return x * (jax.lax.rsqrt(mean2 + eps) * scale)
 
 
 def as_list(x: jax.Array) -> list:
@@ -123,9 +121,8 @@ def build_fixture() -> dict:
         dtype=jnp.float32,
     )
     norm_scale = jnp.array([0.75, 1.0, 1.25, 1.5, 2.0], dtype=jnp.float32)
-    norm_shift = jnp.array([-0.2, -0.1, 0.0, 0.1, 0.2], dtype=jnp.float32)
-
     bins = symmetric_bins(9)
+    even_bins = symmetric_bins(8)
     targets = jnp.array(
         [-1e9, -100.0, -1.5, 0.0, 0.25, 12.0, 1e9], dtype=jnp.float32
     )
@@ -186,7 +183,7 @@ def build_fixture() -> dict:
     )
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "source_commit": SOURCE_COMMIT,
         "jax_version": jax.__version__,
         "transforms": {
@@ -198,11 +195,11 @@ def build_fixture() -> dict:
             "eps": 1e-4,
             "input": as_list(norm_input),
             "scale": as_list(norm_scale),
-            "shift": as_list(norm_shift),
-            "output": as_list(rms_norm(norm_input, norm_scale, norm_shift)),
+            "output": as_list(rms_norm(norm_input, norm_scale)),
         },
         "twohot": {
             "bins": as_list(bins),
+            "even_bins": as_list(even_bins),
             "targets": as_list(targets),
             "target_weights": as_list(twohot_target(targets, bins)),
             "logits": as_list(logits),

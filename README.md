@@ -102,10 +102,12 @@ uv run --extra cpu dreamer-train \
   train.max_train_steps=20000
 ```
 
-Current checkpoints embed their runtime configuration. Historical checkpoints
-fall back to the adjacent `config.json`. If neither snapshot exists, resume
-infers the RSSM, vector-encoder, posterior, and continuation-head architectures
-from model weights and uses
+Current checkpoints embed their runtime configuration. Resume restores every
+checkpoint-authored configuration field by default except execution, reporting,
+evaluation cadence, stopping-budget, and replay-evidence controls. Historical
+checkpoints fall back to the adjacent `config.json`. If neither snapshot exists,
+resume infers the RSSM, vector-encoder, posterior, and continuation-head
+architectures from model weights and uses
 the historical legacy optimizer contract with uncorrected LaProp moments, no
 learning-rate or actor-only warmup, batch advantage normalization,
 straight-through free bits, half-mean vector-state reconstruction, 255 symmetric
