@@ -6,6 +6,13 @@ Source commit: `12e748b6eecd1e4db64b210e03ced4cb537ca895`
 
 Run evidence: `runs/cartpole_current_10k_12e748b_r2/`
 
+Current status: this file is a chronological research ledger. The initial
+decision below is historical; the latest retained result selects exact cached
+replay carry as the remaining reference-conformance boundary before another
+behavioral canary. The frozen seed-0 reference-state canary peaked at `480.55`
+but finished at `141.9`, its trained checkpoints failed carry parity, and the
+corrected scale-only RMSNorm implementation remains behaviorally unqualified.
+
 ## Decision
 
 The current warmup/reinforce configuration does not reliably learn CartPole.

@@ -207,13 +207,13 @@ def calculate_replay_lambda_targets(
     gamma: float,
     lam: float,
 ) -> torch.Tensor:
-    """Return value targets aligned with post-transition replay states.
+    """Return successor-reward targets aligned with replay posterior states.
 
-    Replay row ``t`` stores the observation produced by the action and reward
-    in row ``t``. Its posterior therefore represents the state *after* that
-    reward, so its value target must start with the next row's reward. The last
-    posterior has no following replay transition and intentionally has no
-    target here; its imagined value annotation bootstraps the preceding state.
+    Except for a reference-aligned reset row, replay row ``t`` stores the
+    observation produced by the action and reward in that row. In either row
+    contract, the posterior target begins with row ``t + 1``'s reward. The last
+    posterior has no following replay transition and intentionally has no target
+    here; its value annotation bootstraps the preceding state.
     """
     num_targets = max(0, rewards.shape[0] - 1)
     if num_targets == 0:

@@ -8,7 +8,14 @@ Reference paper: DreamerV3 v2, <https://arxiv.org/abs/2301.04104>
 
 Reference source: `danijar/dreamerv3@e3f02248693a79dc8b0ebd62c93683888ddaccfe`
 
-## Audited conclusion
+Current decision: Phase 3 selects exact cached replay carry as the remaining
+reference-conformance boundary before another behavioral intervention. The
+frozen seed-0 state canary acquired but did not retain a controller, trained
+checkpoints failed the carry-parity gate, and the corrected scale-only RMSNorm
+implementation has not yet been behaviorally qualified. Later phase results
+supersede earlier causal readings while preserving them as chronology below.
+
+## Phase 1 audited conclusion
 
 The repository has repaired real runtime and replay defects and can acquire a
 solved CartPole controller. It has not demonstrated stable learning. In the
@@ -43,7 +50,7 @@ chronology.
 - The central lambda-return, continuation-weight, slow-value, return-scaling,
   and LaProp equations have no presently identified indexing or sign defect.
 
-## What remains unresolved
+## What remained unresolved at the Phase 1 boundary
 
 - Whether value predictions lose a stable target or the policy-conditioned
   target itself changes first.
@@ -54,7 +61,7 @@ chronology.
 - Whether the same CartPole behavior occurs in the pinned reference
   implementation.
 
-## Confirmed conformance gaps
+## Confirmed conformance gaps at the Phase 1 boundary
 
 - Production actor, value, and vector decoder heads lack the reference's three
   normalized hidden layers.

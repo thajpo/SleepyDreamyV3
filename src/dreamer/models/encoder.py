@@ -194,7 +194,7 @@ class ThreeLayerMLP(nn.Module):
 
 
 class ReferenceVectorMLP(nn.Module):
-    """Pinned vector encoder: complete normalized activation at every layer."""
+    """Legacy-compatible reference-topology normalized vector encoder."""
 
     def __init__(self, d_in, d_hidden, n_layers=3):
         super().__init__()

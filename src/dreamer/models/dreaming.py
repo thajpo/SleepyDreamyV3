@@ -42,6 +42,7 @@ def dream_sequence(
         world_model: World model with step_dynamics and join_h_and_z methods
         n_actions: Number of discrete actions
         d_hidden: Hidden dimension for z sampling
+        actor_unimix: Uniform probability mixed into the actor distribution
 
     Returns:
         Tuple of:
@@ -562,13 +563,15 @@ def calculate_lambda_returns(
 
     Args:
         dreamed_rewards: (num_steps, batch) predicted rewards
-        dreamed_values: (num_steps, batch) predicted values
+        dreamed_values: (num_steps + 1, batch) predicted values, including the
+            initial-state value followed by one value per successor state
         dreamed_continues: (num_steps, batch) continue logits or probabilities
         gamma: Discount factor
         lam: Lambda parameter for GAE (0=TD(0), 1=Monte Carlo)
         num_dream_steps: Number of dream steps
-        value_annotations: Optional (num_steps, batch) value annotations. If provided,
-            these replace dreamed_values in the (1-λ) term and in the bootstrap.
+        value_annotations: Optional (num_steps + 1, batch) value annotations. If
+            provided, these replace dreamed_values in the (1-λ) term and in
+            the bootstrap.
         continues_are_logits: If True, applies sigmoid to dreamed_continues.
 
     Returns:

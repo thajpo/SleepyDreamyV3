@@ -40,7 +40,8 @@ def compute_wm_loss(
         posterior_logits: Raw posterior logits from world model (B, num_latents, num_classes)
         prior_logits: Prior logits from dynamics model
         B: Bin tensor for twohot encoding
-        config: Config object with beta, continuation-discount, and free-bits settings
+        config: Config object with beta, state-aggregation, continuation-discount,
+            and free-bits settings
         device: Torch device
         use_pixels: Whether to compute pixel loss
         sample_mask: Optional validity mask for padded replay rows

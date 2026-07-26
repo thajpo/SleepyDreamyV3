@@ -838,7 +838,7 @@ class WorldModelTrainer:
             pg["lr"] = self.config.critic_lr * scale
 
     def evaluate_policy(self, num_episodes: int, step: int) -> EvaluationResult:
-        """Run deterministic evaluation episodes and log summary metrics.
+        """Evaluate deterministically on the run's fixed reset-seed cohort.
 
         Returns:
             Aggregate deterministic evaluation metrics.

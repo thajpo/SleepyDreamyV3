@@ -99,7 +99,7 @@ def save_checkpoint(
     config_snapshot=None,
     continuation_terminal_ema=None,
 ) -> str:
-    """Save training state and its optional config snapshot atomically."""
+    """Save training state, semantic snapshot, and resume metadata atomically."""
     if final and label is not None:
         raise ValueError("final and label are mutually exclusive")
     suffix = "final" if final else label or f"step_{train_step}"
@@ -161,9 +161,12 @@ def load_checkpoint(
     current_ret_hi,
     current_continuation_terminal_ema=0.5,
 ):
-    """
-    Load full checkpoint (encoder, world model, actor, critic, optimizers).
-    Returns a dictionary of extra state (step, return scales).
+    """Load models, optimizers, and resumable trainer state.
+
+    Shift-bearing reference RMSNorm checkpoints are migrated to the pinned
+    scale-only modules together with their optimizer slots. The returned state
+    contains the step, return normalizer, best-evaluation metadata, run ID, and
+    continuation-prevalence EMA.
     """
     checkpoint: dict[str, Any] = torch.load(
         checkpoint_path, map_location=device, weights_only=False

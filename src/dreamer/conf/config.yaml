@@ -166,7 +166,7 @@ train:
   replay_row_alignment: post_action
   # Reference-style same-collector windows may cross consecutive episode resets.
   replay_sequence_mode: stream
-  # Present each new non-overlapping stream sequence once before uniform replay.
+  # Prefer new non-overlapping stream sequences from a bounded FIFO.
   online_replay: true
   # Publish transition chunks during long episodes instead of waiting for reset.
   continuous_replay_delivery: true

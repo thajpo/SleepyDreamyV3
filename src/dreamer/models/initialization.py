@@ -10,7 +10,7 @@ def initialize_actor(device, cfg):
         cfg: Configuration object (flat Config dataclass)
 
     Returns:
-        Actor network (ThreeLayerMLP)
+        Actor network selected by the configured architecture contract
     """
     # This import is here to avoid circular dependencies
     import torch.nn as nn
@@ -51,7 +51,7 @@ def initialize_critic(device, cfg):
         cfg: Configuration object (flat Config dataclass)
 
     Returns:
-        Critic network (ThreeLayerMLP)
+        Critic network selected by the configured architecture contract
     """
     import torch.nn as nn
     from .encoder import ThreeLayerMLP

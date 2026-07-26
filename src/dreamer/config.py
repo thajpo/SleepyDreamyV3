@@ -193,8 +193,8 @@ class Config:
     # Episode preserves historical replay snapshots. Authored Hydra runs use
     # reference-style per-collector streams that can cross reset boundaries.
     replay_sequence_mode: str = "episode"  # episode, stream
-    # Pinned replay presents each new non-overlapping stream sequence once
-    # before falling back to its uniform selector. Historical runs did not.
+    # Pinned replay prefers new non-overlapping stream sequences from a bounded
+    # FIFO before falling back to its selector. Historical runs did not.
     online_replay: bool = False
     # Publish fixed-size transition chunks during an episode so replay can make
     # current-policy rows sampleable without waiting for episode termination.
@@ -215,7 +215,7 @@ def default_config() -> Config:
 
 
 def config_from_snapshot(data: dict) -> Config:
-    """Construct a config, treating a missing LaProp mode as uncorrected."""
+    """Construct a config while supplying historical compatibility defaults."""
     normalized = dict(data)
     normalized.setdefault("laprop_bias_correction", False)
     normalized.setdefault("actor_unimix", 0.01)
