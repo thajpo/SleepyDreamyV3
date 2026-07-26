@@ -7004,3 +7004,29 @@ another case where local model/value quality and deployed retention diverge.
 Disposition: reject as a sufficient stability correction. The next step is a
 read-only source/data-flow audit for rare terminal evidence and optimistic
 policy-conditioned value updates; no additional seeds or Pong run is allowed.
+
+#### Source/data-flow audit result
+
+The pinned upstream implementation trains the natural continuation head on
+posterior features with `~obs['is_terminal']` and uses the same head on imagined
+features. It does not include a separate prior-continuation loss; the local
+prior term was an intervention, not a reference equation.
+
+Retained replay evidence from the prior-continuation run contains `2.1--4.3%`
+terminal rows by checkpoint. The held-out final deployed-policy probe contains
+only `19/7342` physical terminal transitions (`0.26%`). The training data is
+therefore not empty of failures, but its terminal distribution differs from
+the failure corridor induced by the changing actor.
+
+The final checkpoint's frozen 100-episode latent probe shows that terminal
+information remains representable: a freshly fitted balanced latent head gets
+ROC-AUC `0.965`, balanced accuracy `0.883`, and terminal/live failure
+probabilities `0.759`/`0.027`; a true-state head gets ROC-AUC `0.994`. The
+jointly trained continuation head gets ROC-AUC `0.753` and probabilities
+`0.0074`/`0.0059`, with zero terminal recall at the natural cutoff.
+
+The proximal boundary is therefore rare, policy-conditioned terminal
+calibration under joint representation/value drift, not missing terminal
+information or a simple prior-transport defect. The next experiment must
+isolate a separate terminal-risk auxiliary signal from the natural-probability
+discount head. No new seeds or Pong run is authorized yet.
