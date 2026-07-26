@@ -343,6 +343,9 @@ def dreamer_step(
     critic_real_return_scale = float(getattr(config, "critic_real_return_scale", 0.0))
     q_critic_scale = float(getattr(config, "q_critic_scale", 0.0))
     prior_state_pred_scale = float(getattr(config, "prior_state_pred_scale", 0.0))
+    prior_continue_pred_scale = float(
+        getattr(config, "prior_continue_pred_scale", 0.0)
+    )
 
     total_wm_loss: Optional[torch.Tensor] = None
     total_actor_loss: Optional[torch.Tensor] = None
@@ -463,6 +466,7 @@ def dreamer_step(
             sample_mask=sample_mask,
             continue_loss_weights=continuation_loss_weights[:, t_step],
         )
+        wm_loss_dict["prior_continue"] = torch.zeros_like(wm_loss)
         valid_rows = sample_mask.bool()
         terminal_rows = valid_rows & is_terminal_t.bool()
         live_rows = valid_rows & ~is_terminal_t.bool()
@@ -474,16 +478,20 @@ def dreamer_step(
             metrics.continue_terminal_probs.append(continue_probs[terminal_rows])
         if bool(live_rows.any().item()):
             metrics.continue_live_probs.append(continue_probs[live_rows])
+        prior_h_z = None
+        if prior_state_pred_scale > 0.0 or prior_continue_pred_scale > 0.0:
+            h_dim = config.d_hidden * config.rnn_n_blocks
+            h_state = h_z_joined[:, :h_dim]
+            prior_probs = F.softmax(unimix_logits(prior_logits, unimix_ratio=0.01), dim=-1)
+            prior_h_z = world_model.join_h_and_z(h_state, prior_probs)
+
         if (
             prior_state_pred_scale > 0.0
             and not use_pixels
             and obs_t.get("state") is not None
             and obs_t["state"].shape[-1] > 0
+            and prior_h_z is not None
         ):
-            h_dim = config.d_hidden * config.rnn_n_blocks
-            h_state = h_z_joined[:, :h_dim]
-            prior_probs = F.softmax(unimix_logits(prior_logits, unimix_ratio=0.01), dim=-1)
-            prior_h_z = world_model.join_h_and_z(h_state, prior_probs)
             prior_state_pred = world_model.decoder(prior_h_z).get("state")
             if prior_state_pred is not None:
                 per_sample_prior = 0.5 * (
@@ -496,6 +504,25 @@ def dreamer_step(
                 )
                 wm_loss = wm_loss + prior_state_pred_scale * prior_state_loss
                 wm_loss_dict["prior_state"] = prior_state_loss.detach()
+
+        if prior_continue_pred_scale > 0.0 and prior_h_z is not None:
+            prior_continue_logits = world_model.continue_predictor(prior_h_z)
+            prior_continue_target = (1.0 - is_terminal_t.float()).unsqueeze(-1)
+            if bool(getattr(config, "contdisc", True)):
+                prior_continue_target = prior_continue_target * (
+                    1.0 - 1.0 / float(max(1, getattr(config, "horizon", 333)))
+                )
+            prior_continue_loss = F.binary_cross_entropy_with_logits(
+                prior_continue_logits,
+                prior_continue_target,
+                reduction="none",
+            ).squeeze(-1)
+            prior_mask = sample_mask.float()
+            prior_continue_loss = (prior_continue_loss * prior_mask).sum() / (
+                prior_mask.sum() + 1e-8
+            )
+            wm_loss = wm_loss + prior_continue_pred_scale * prior_continue_loss
+            wm_loss_dict["prior_continue"] = prior_continue_loss.detach()
 
         collect_viz_data(
             metrics, t_step, T, obs_t, obs_reconstruction,
