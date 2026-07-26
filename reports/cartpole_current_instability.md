@@ -7084,3 +7084,31 @@ strong evidence that terminal information can be made separable without
 repairing closed-loop control. The next attack should target the
 policy-conditioned value/actor update and its retention, while preserving the
 current risk probe as a regression readout. Seeds 1/2 and Pong remain stopped.
+
+#### Stochastic closed-loop audit
+
+The auxiliary run's deterministic trainer evaluation hides a large
+policy-distribution gap. A direct 100-episode audit on fixed seeds evaluated
+the best checkpoint (step 2,700) and final checkpoint under independent actor
+and posterior-latent choices:
+
+```text
+                         best step 2700       final step 3500
+actor argmax, latent mode     415.6                366.2
+actor argmax, latent sample   141.9                215.8
+actor sample, latent mode     350.6                317.3
+actor sample, latent sample   114.9                210.7
+```
+
+The trainer's evaluation path uses actor argmax and posterior mode, while
+collectors sample both the posterior categorical and actor action. Thus the
+data distribution used for the next update is substantially worse than the
+reported deterministic score. This is not automatically an implementation
+bug—Dreamer intentionally explores stochastically—but it is the first direct
+evidence that our apparent CartPole solves are not robust under the policy
+that actually generates replay. The next bounded intervention should hold
+the actor and world-model losses fixed and test deterministic collector action
+selection (`collector_policy_mode=argmax`) against the current stochastic
+baseline. A pass requires both deterministic and sampled-policy evaluation to
+improve; a deterministic-only gain localizes replay-distribution sensitivity
+but is not a Dreamer replication result.
