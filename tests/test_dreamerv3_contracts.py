@@ -23,6 +23,10 @@ def test_frozen_contract_totals_are_internally_consistent():
         results["cartpole_reference_v3_state_v1"]["expected_gradient_updates"]
         == 3_500
     )
+    assert (
+        results["cartpole_reference_v3_state_v2"]["expected_gradient_updates"]
+        == 3_500
+    )
 
 
 def test_paper_and_current_source_contracts_remain_distinct():
@@ -73,6 +77,21 @@ def test_reference_cartpole_contract_preserves_qualified_architecture():
     assert contract["implementation"]["commit"] == "326d0b2"
     assert contract["model"]["trainable_parameters_without_slow_value"] == 639_173
     assert contract["model"]["rmsnorm_learned_shift"] is True
+
+
+def test_corrected_cartpole_contract_changes_only_reference_norm_topology():
+    v1 = load_contract(CONTRACT_DIR / "cartpole_reference_v3_state_v1.yaml")
+    v2 = load_contract(CONTRACT_DIR / "cartpole_reference_v3_state_v2.yaml")
+
+    assert v2["implementation"]["commit"] == "dc076da"
+    assert v2["training"] == v1["training"]
+    assert v2["environment"] == v1["environment"]
+    assert v2["evaluation"] == v1["evaluation"]
+    assert v2["model"]["trainable_parameters_without_slow_value"] == 637_381
+    assert v2["model"]["rmsnorm_learned_shift"] is False
+    assert v2["causal_comparison"]["only_authored_change"] == (
+        "rmsnorm_learned_shift_true_to_false"
+    )
 
 
 def test_contract_validation_fails_closed_on_unit_drift():

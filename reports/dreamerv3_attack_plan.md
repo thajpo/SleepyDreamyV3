@@ -8,12 +8,13 @@ Reference paper: DreamerV3 v2, <https://arxiv.org/abs/2301.04104>
 
 Reference source: `danijar/dreamerv3@e3f02248693a79dc8b0ebd62c93683888ddaccfe`
 
-Current decision: Phase 3 selects exact cached replay carry as the remaining
-reference-conformance boundary before another behavioral intervention. The
-frozen seed-0 state canary acquired but did not retain a controller, trained
-checkpoints failed the carry-parity gate, and the corrected scale-only RMSNorm
-implementation has not yet been behaviorally qualified. Later phase results
-supersede earlier causal readings while preserving them as chronology below.
+Current decision: first requalify the corrected scale-only RMSNorm architecture
+under the frozen seed-0 contract. The previous canary acquired but did not
+retain a controller, but it used the superseded shift-bearing v1 model. Bundling
+that correction with exact cached replay carry would confound the next result.
+If the corrected v2 canary fails, Phase 3 selects exact cached replay carry as
+the next reference-conformance change. Later results supersede earlier causal
+readings while preserving them as chronology below.
 
 ## Phase 1 audited conclusion
 
@@ -763,7 +764,44 @@ latent that can differ materially from deployment.
 
 ## Phase 3: exact replay carry conformance
 
-Implement reference-style cached carry before another behavioral intervention:
+### Scale-only requalification gate
+
+The no-mistakes audit corrected an important evidence-labeling error: pinned
+DreamerV3 RMSNorm learns scale only. The 3,500-update v1 canary used an extra
+learned shift, so it is a near-reference instability result rather than an
+exact-reference qualification. Its contract, checkpoints, parameter count,
+and conclusions remain immutable and load through the explicit
+`reference_v3_state_v1` compatibility architecture. Corrected checkpoints use
+`reference_v3_state`; resume never silently converts between the two unless
+semantic migration is explicitly requested.
+
+Before cached carry changes training, run the separately frozen
+`reports/contracts/cartpole_reference_v3_state_v2.yaml` canary:
+
+- **Hypothesis:** removing the non-reference RMSNorm shifts is insufficient to
+  eliminate the acquire-then-collapse failure under otherwise identical data,
+  optimization, and evaluation semantics.
+- **Causal variable:** `rmsnorm_learned_shift=true` to `false`; trainable
+  parameters change from 639,173 to 637,381. Every authored run setting and
+  behavior gate remains identical to v1.
+- **Source:** clean commit `dc076da`, pinned upstream
+  `e3f02248693a79dc8b0ebd62c93683888ddaccfe`, ROCm, training seed 0.
+- **Budget and metrics:** 3,500 updates, replay ratio 16 trained rows per
+  decision, batch 8, sequence 32 with 20 context rows, 20 deterministic
+  evaluation episodes every 100 updates, and periodic/best/final checkpoints
+  with 256 replay evidence sequences.
+- **Pass gate:** reach 475, never fall below 400 afterward, finish at least
+  475, and keep best-to-final gap at most 25.
+- **Stop rule:** one seed-0 run. Failure authorizes trained carry parity and
+  exact cached replay carry, not tuning or more seeds. Passing authorizes only
+  unchanged seeds 1 and 2.
+
+This rerun is necessary even though scale-only RMSNorm is unlikely to explain
+the entire 338.65-point collapse: scientific attribution requires measuring
+the corrected architecture before combining it with the replay-carry repair.
+
+If v2 fails, implement reference-style cached carry before another behavioral
+intervention:
 
 1. Give every replay row a stable identity and cache the encoder/RSSM carry
    needed immediately before that row. Sample the cached entry as context and

@@ -16,6 +16,7 @@ CONTRACT_NAMES = (
     "official_e3f0224_atari100k",
     "cartpole_drift_v1",
     "cartpole_reference_v3_state_v1",
+    "cartpole_reference_v3_state_v2",
 )
 
 

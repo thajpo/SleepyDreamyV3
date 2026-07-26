@@ -7,11 +7,11 @@ Source commit: `12e748b6eecd1e4db64b210e03ced4cb537ca895`
 Run evidence: `runs/cartpole_current_10k_12e748b_r2/`
 
 Current status: this file is a chronological research ledger. The initial
-decision below is historical; the latest retained result selects exact cached
-replay carry as the remaining reference-conformance boundary before another
-behavioral canary. The frozen seed-0 reference-state canary peaked at `480.55`
-but finished at `141.9`, its trained checkpoints failed carry parity, and the
-corrected scale-only RMSNorm implementation remains behaviorally unqualified.
+decision below is historical. The frozen shift-bearing v1 state canary peaked
+at `480.55` but finished at `141.9`, and its trained checkpoints failed carry
+parity. The corrected scale-only RMSNorm implementation is now frozen as v2
+for a one-variable seed-0 requalification. Failure selects exact cached replay
+carry; success must repeat unchanged seeds before any Pong claim.
 
 ## Decision
 
