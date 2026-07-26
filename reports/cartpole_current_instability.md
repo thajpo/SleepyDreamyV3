@@ -6903,3 +6903,33 @@ invalidation, compatibility modes, and full-prefix parity tests. Then rerun
 the exact frozen seed-0 canary with no other causal change. If that still
 collapses, test direct natural-prior continuation supervision; do not use
 balanced BCE or return to Pong first.
+
+#### Cached-carry continuation calibration follow-up
+
+The cached-carry canary did collapse, so the selected continuation follow-up
+was run from clean source `d31cf8d`. The 20-episode CUDA probe is retained at
+`experiments/2026-07-26_cartpole_cached_carry_continuation_probe_cuda20/`.
+Across v3 step 2,000, step 3,000, and final checkpoints, prior continuation
+on live transitions was `0.9717`, `0.9798`, and `0.9852`; on physical terminal
+transitions it was `0.9464`, `0.9647`, and `0.9583`. Prior/posterior transport
+MAE stayed below `0.0021`. The model is therefore not losing terminal
+information while transporting posterior state into the prior; both channels
+remain optimistically alive after real failure.
+
+The 100-episode frozen-head probe is retained at
+`experiments/2026-07-26_cartpole_cached_carry_continuation_supervision/`.
+The trained continuation head ranked failures (ROC-AUC `0.901`) but its mean
+failure probability was only `0.035` on terminal rows versus `0.013` on live
+rows. Refitting the same head on frozen posterior latents with class-balanced
+BCE reached ROC-AUC `0.979` and balanced accuracy `0.925`; fitting on true
+states reached `0.999` and `0.996`. Terminal information is present in the
+latent, but the joint head is under-calibrated under the rare-terminal prior.
+Prior-correcting the balanced shadow head still produced only `0.065` terminal
+failure probability, so the raw weighted score cannot be used as an
+imagination discount. This is a real model-target weakness, not a cached-carry
+cause and not yet a sufficient explanation for the policy collapse.
+
+The next controlled choice is between (a) a natural-prior-preserving terminal
+calibration intervention with an explicit held-out calibration/behavior gate,
+and (b) a prior-transition-fidelity intervention. No seeds 1/2 or Pong run is
+authorized until one of those is selected and passes its one-seed gate.
