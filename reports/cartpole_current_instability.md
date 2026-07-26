@@ -6933,3 +6933,33 @@ The next controlled choice is between (a) a natural-prior-preserving terminal
 calibration intervention with an explicit held-out calibration/behavior gate,
 and (b) a prior-transition-fidelity intervention. No seeds 1/2 or Pong run is
 authorized until one of those is selected and passes its one-seed gate.
+
+#### One-step prior-state supervision result
+
+The preregistered `train.prior_state_pred_scale=1.0` intervention completed
+from clean source `970c89c`. Its first attempt was interrupted by a turn abort
+at update `1,200`; a weight resume from the saved update-1,100 best checkpoint
+then completed the remaining budget with fresh replay. Manifest
+`3b99f4b174c64036851efdb988d2058c` records normal completion at update `3,500`.
+Because replay state was not restored, this is not an exact uninterrupted
+replication, but it is a valid bounded weight-resume canary and is recorded as
+such.
+
+The resumed run reached `500.0` at update `2,800`, fell to `242.65` at
+`2,900`, recovered to `500.0` at `3,000`, and finished at `136.45`. Its
+best-to-final gap was `363.55`; the behavioral gate fails.
+
+The paired Q probe found lower one-step decoded-state MSE than the cached-carry
+baseline (`0.0246`/`0.0465`/`0.0258` at steps 2,000/3,000/final versus
+`0.1004`/`0.0654`/`0.0623`). The counterfactual hybrid state preference remained
+poor (`0.175`/`0.200`/`0.300`) and hybrid continuation preference was also weak
+(`0.300`/`0.300`/`0.425`). Actor agreement with the sampled rollout preference
+was `0.85` throughout, while Q agreement varied from `0.825` to `0.550` and
+then `0.625`. The loss therefore improves local transition prediction without
+repairing the action-value boundary that controls the closed loop.
+
+Disposition: reject as a behavioral fix, retain as evidence that prior-state
+fidelity and counterfactual value ordering are separate boundaries. The next
+controlled run must test natural-prior-preserving terminal calibration with a
+held-out Brier/terminal-live calibration gate. Seeds 1/2 and Pong remain
+stopped.

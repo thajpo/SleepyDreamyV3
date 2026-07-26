@@ -1009,3 +1009,49 @@ imagination consumes prior rather than posterior features. It must preserve the
 natural continuation probability and be gated on held-out prior Brier error,
 terminal/live calibration, and behavior. Do not revisit balanced BCE, generic
 loss scaling, Pong, or hyperparameter sweeps before that decision point.
+
+### Phase 4 one-step prior-state supervision result
+
+The preregistered intervention completed from source `970c89c`. The first
+weight run was interrupted by a turn abort at update `1,200`, after saving its
+best checkpoint at update `1,100`; it was not a trainer or collector failure.
+The run was resumed from that checkpoint with fresh replay and completed to
+update `3,500`. This is therefore a weight-resume result, not an exact
+uninterrupted trajectory replication. The resumed manifest is
+`3b99f4b174c64036851efdb988d2058c` and the MLflow run is
+`f9d69d3435ba47be8afb0d24de7ceec7`.
+
+The resumed evaluation curve repeatedly acquired CartPole and repeatedly
+lost it:
+
+```text
+1200: 172.8, 1300: 296.3, 1400: 233.65, 1500: 264.9,
+1600: 342.9, 1700: 370.45, 1800: 323.5, 1900: 251.65,
+2000: 261.65, 2100: 194.25, 2200: 345.7, 2300: 350.55,
+2400: 241.75, 2500: 470.8, 2600: 237.15, 2700: 471.55,
+2800: 500.0, 2900: 242.65, 3000: 500.0, 3100: 415.65,
+3200: 490.4, 3300: 249.05, 3400: 198.1, 3500: 136.45
+```
+
+The best score was `500.0` at update `2,800`, but the final score was
+`136.45`, giving a best-to-final gap of `363.55`. The behavior gate therefore
+fails decisively; no seeds or Pong run is authorized.
+
+The boundary probe is retained under
+`experiments/2026-07-26_cartpole_prior_state_q_probe/`. Relative to the
+cached-carry baseline, the auxiliary loss lowers sampled one-step decoded-state
+MSE at steps `2,000`, `3,000`, and final (`0.0246`, `0.0465`, `0.0258` versus
+`0.1004`, `0.0654`, `0.0623`). This confirms a model-fidelity effect. It does
+not repair action-conditioned control: hybrid state ordering is only
+`0.175`, `0.200`, and `0.300`, and hybrid continuation ordering is `0.300`,
+`0.300`, and `0.425`. The actor remains highly aligned with the sampled
+rollout preference (`0.85` at all three checkpoints), while Q ordering falls
+from `0.825` to `0.550` and recovers only to `0.625`.
+
+This rejects one-step prior-state supervision as a sufficient stability fix.
+It also sharpens the diagnosis: better local state prediction does not produce
+better counterfactual action values. The remaining problem is downstream in
+the policy-conditioned value/continuation target, or in how that target is
+optimized and retained. The next intervention must preserve the natural
+continuation prior and directly measure held-out terminal calibration; do not
+add seeds, tune the actor, or return to Pong.
