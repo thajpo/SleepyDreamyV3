@@ -667,3 +667,39 @@ one Torch thread, horizon 30, seed 17, 64 samples, and cap 760. This asks which
 components preserve the trusted best controller's recovery ordering on states
 actually visited by the collapsed policy. Stop after this cohort and select
 the first failed boundary; do not train or tune.
+
+### Final-evidence recovery result and trajectory-trace contract
+
+The fixed best-controller labeling pass on final evidence completed from clean
+commit `a60444d` in 4:25.94 with 438 MiB peak RSS. It found 287 actionable rows
+among 3,072. The best actor and full imagined values retained balanced accuracy
+`0.880` and `0.889`, so the collapsed policy's replay states are not inherently
+outside the trusted controller's local recovery competence.
+
+The corresponding 16-cell matrix completed in 4:56.82 with 1,092 MiB peak RSS:
+
+| Cell | Actor BA | Posterior BA | One-step prior BA | Full dream BA |
+|---|---:|---:|---:|---:|
+| all best | 0.880 | 0.637 | 0.894 | 0.892 |
+| final representation, best heads/critic/actor | 0.845 | 0.225 | 0.421 | 0.847 |
+| final representation/critic, best heads/actor | 0.845 | 0.804 | 0.879 | 0.864 |
+| all final | 0.877 | 0.804 | 0.880 | 0.882 |
+
+Again, matching the final representation and critic restores their coordinate
+system, and the final actor retains the best controller's local recovery
+ordering. Neither old-corridor coverage nor isolated final-state recovery
+labels reproduce the 338.65-point closed-loop collapse. Thirty-step branch
+labels hold the continuation policy fixed; actual deployment does not. Rare
+action changes alter the next state and therefore the later target, latent, and
+action repeatedly.
+
+The next bounded diagnostic is the existing final-policy trajectory trace, not
+a training change. First generate final-controller continuation labels over the
+same `replay_evidence_final.npz` (final checkpoint, horizon 30, seed 17, 64
+samples, cap 760). Then select 32 histories tied under best continuation but
+actionable under final continuation, seed 23, and trace both first-action
+branches for 30 real steps with 64 final-prior samples. At every successor,
+cross best/final actors against best/final representations. Stop after the
+trace. Representation transfer selects recurrent policy-state drift; actor
+transfer selects policy-head drift; neither selects a closed-loop evaluation
+cross as the next diagnostic.

@@ -6782,3 +6782,19 @@ frozen: use the best checkpoint as the fixed real continuation policy on final
 replay evidence and repeat the identical 16-cell cross (CPU, one thread, real
 horizon 30, seed 17, 64 samples, cap 760). This tests recovery ordering on the
 collapsed policy's actual state distribution; no training or tuning is allowed.
+
+The final-evidence recovery matrix also rejects a local single-component
+failure. The fixed best controller found 287 actionable rows and retained actor
+/ full-dream balanced accuracy `0.880` / `0.889`. All-final components on those
+same states and labels score `0.877` / `0.882`. Final representation with the
+old critic fails (`0.225` posterior BA), while its matching final critic restores
+`0.804`; this is again coordinate coadaptation. Runtime was 4:25.94 for labels
+and 4:56.82 for the matrix, with 438 MiB and 1,092 MiB peak RSS.
+
+Decision: local 30-step recovery labels still do not reproduce the closed-loop
+collapse because they hold the continuation policy fixed. The frozen next step
+is the existing trajectory trace on final evidence. Generate final-controller
+labels with the same horizon/seed/sample contract, select 32 histories tied
+under best continuation but actionable under final continuation (seed 23), and
+trace 30 real steps while crossing best/final actors and representations. Stop
+after determining which swap transfers the diverging deployed action sequence.
