@@ -946,6 +946,38 @@ score with a separately calibrated discount head) or target prior transition
 fidelity first. No Pong or multi-seed run is authorized by this read-only
 result.
 
+### Phase 4 preregistration: one-step prior-state supervision
+
+The matched rollout probe rejects global transition degradation: the final
+checkpoint has lower one-step state error than step 2,000 on its own policy
+trajectory, while the counterfactual hybrid probe remains poor. The next
+controlled intervention therefore targets the prior's action-conditioned
+one-step branch rather than changing the actor or continuation semantics.
+
+- **Hypothesis:** the existing posterior decoder loss leaves the expected
+  one-step prior state weakly constrained, allowing policy improvement to use
+  an action-ranking target that is locally self-consistent but wrong for the
+  unchosen action. The already-authored `prior_state_pred_scale` loss will
+  improve counterfactual state fidelity and reduce the collapse.
+- **Causal variable:** set only `train.prior_state_pred_scale=1.0` (baseline is
+  `0.0`). This adds the expected-prior decoded-state symlog MSE to the world
+  model loss. Preserve the v3 cached-carry contract, optimizer, replay,
+  continuation head, actor loss, seed, evaluation cohort, and all budgets.
+- **Run:** clean source `3170c68`, CUDA, seed `0`, 3,500 updates, batch `8`,
+  sequence `32`, burn-in `20`, replay ratio `16`, cached carry, evaluation
+  every `100` updates over 20 episodes. Artifact directory:
+  `experiments/2026-07-26_cartpole_reference_v3_state_prior_state_loss_seed0_3500/`.
+- **Behavior gate:** reach mean return `450`, never fall below `300` after
+  first reaching it, finish at least `400`, and keep best-to-final gap at most
+  `100`. Failure stops this seed and authorizes no seeds or Pong.
+- **Boundary readout:** at steps `2,000`, `3,000`, and final, repeat the same
+  q/true-action probe (256 states, 58 action-discriminative labels, seed 17).
+  Report one-step hybrid state/continuation ordering, actor/Q agreement,
+  one-step state MSE, and continuation calibration. A behavioral failure with
+  improved hybrid state ordering rejects this loss as sufficient but retains
+  it as a model-fidelity effect; no behavior or boundary improvement rejects
+  the intervention outright.
+
 The carry repair is implemented and covered by focused replay, forward-pass,
 configuration, and full-suite tests. The frozen v3 behavioral rerun is now
 complete and rejected as the next behavioral fix. Its implementation evidence
