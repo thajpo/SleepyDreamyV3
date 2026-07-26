@@ -1088,5 +1088,44 @@ imagination, rather than only on the observation-conditioned posterior latent.
 - **Decision:** behavior plus calibration passes select this as the next
   current CartPole correction. Calibration improvement with behavioral failure
   rejects it as insufficient but retains the target-localization evidence.
-  Behavioral success without calibration improvement is treated as an
+Behavioral success without calibration improvement is treated as an
   incidental canary and does not authorize Pong.
+
+### Phase 5 natural-prior continuation result
+
+The one-seed canary completed normally from source `134677d`. Manifest
+`9937969baeda443092cc349d16aa76b5` and MLflow run
+`c6ba47ed906844a79965fb7f6cffee92` record 3,500 updates, 21,435 environment
+steps, and normal collector shutdown.
+
+The intervention improved acquisition and recovery but failed the behavioral
+gate. The curve reached `500.0` at update `2,000`, held `488--500` through
+update `2,400`, then oscillated through `274.8`, `455.8`, `495.95`, `363.4`,
+`301.4`, `492.8`, `248.85`, `488.4`, `482.65`, `141.05`, and `355.95` at
+updates `2,500--3,500`. The best-to-final gap was `144.05`, and the run fell
+below `300` after solving.
+
+The held-out continuation probe is retained under
+`experiments/2026-07-26_cartpole_prior_continue_calibration_probe/`. At final,
+prior Brier error was `0.003008`, which passes the preregistered Brier bound,
+and live continuation was `0.9927`, which passes its live bound. However,
+terminal continuation was `0.9915`, far above the `0.95` terminal bound and
+even worse than the cached-carry reference's `0.9583`; failure ROC-AUC fell to
+`0.642`. The intervention therefore did not calibrate rare terminal states.
+
+The Q probe under
+`experiments/2026-07-26_cartpole_prior_continue_q_probe/` shows why the run
+could look promising before collapsing. At steps `2,000`, `3,000`, and final,
+Q/true-delta correlation was `0.759`, `0.771`, and `0.825`, while one-step
+decoded-state MSE was `0.0645`, `0.0404`, and `0.0152`. Hybrid continuation
+ordering improved to `0.525` at final, but remained far below actor agreement
+(`0.85`) and was not stable across checkpoints (`0.425`, `0.275`, `0.525`).
+
+Disposition: reject the direct prior-continuation loss as a sufficient fix.
+It improves local transition/value readouts and can produce a solved-looking
+checkpoint, but it does not preserve terminal calibration or closed-loop
+retention. The result rules out “the prior head simply lacks a BCE gradient”
+as the complete explanation. Do not run seeds 1/2 or Pong. The next step is a
+read-only source/data-flow audit of how rare terminal evidence reaches the
+prior continuation target and whether the policy-conditioned value update
+amplifies optimistic states before another training intervention.

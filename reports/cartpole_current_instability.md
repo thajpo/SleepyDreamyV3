@@ -6979,3 +6979,28 @@ above 300, final at least 400, and best-to-final gap at most 100. The held-out
 continuation probe must also reach final prior Brier error at most `0.00351`,
 terminal continuation at most `0.95`, and live continuation at least `0.98`.
 No seeds 1/2 or Pong are authorized from this one-seed intervention alone.
+
+#### Natural-prior one-step continuation result
+
+The `prior_continue_pred_scale=1.0` canary completed normally from source
+`134677d`, with manifest `9937969baeda443092cc349d16aa76b5` and MLflow run
+`c6ba47ed906844a79965fb7f6cffee92`. It reached `500.0` at update `2,000` and
+held near 500 through update `2,400`, but then fell to `274.8` at `2,500` and
+continued to oscillate, finishing at `355.95`. The best-to-final gap was
+`144.05`, so the behavioral gate fails.
+
+The held-out continuation probe shows a mixed result. Final prior Brier error
+is `0.003008` and live continuation is `0.9927`, but terminal continuation is
+`0.9915` with failure ROC-AUC `0.642`. The terminal value is worse than the
+cached-carry reference (`0.9583`), so direct natural-prior supervision did not
+calibrate rare terminal states.
+
+The paired Q probe shows improved local readouts: Q/true-delta correlation
+reaches `0.825` and one-step state MSE falls to `0.0152` at final. Hybrid
+continuation ordering is nevertheless unstable (`0.425`/`0.275`/`0.525` at
+steps 2,000/3,000/final) and remains below actor agreement (`0.85`). This is
+another case where local model/value quality and deployed retention diverge.
+
+Disposition: reject as a sufficient stability correction. The next step is a
+read-only source/data-flow audit for rare terminal evidence and optimistic
+policy-conditioned value updates; no additional seeds or Pong run is allowed.
