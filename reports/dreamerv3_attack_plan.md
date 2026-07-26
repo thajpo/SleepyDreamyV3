@@ -1620,3 +1620,26 @@ This amendment reduces repeated exhaustive computation while preserving the
 dense temporal screen and long-horizon comparisons at every preregistered
 decision boundary. It does not authorize changing the fixed-history probe or
 interpreting omitted horizon-15 intermediate points as measured.
+
+The mature-checkpoint horizon-15 cost was substantially higher than the step-50
+preflight: after one hour only target 1,900 had completed. That output is
+retained, the active target-2,000 computation was interrupted without an
+artifact, and targets 2,000, 2,350, 2,400, 3,000, and 3,500 remain explicitly
+unmeasured at horizon 15. The dense horizons 1 and 3 completed for all 70
+periodic checkpoints in 3,250.34 seconds with exit status 0.
+
+The first exact fixed-history target, step 1,900, then took 3,012.19 seconds.
+All five source-policy episodes reached 500 steps, producing 2,500 states and
+5,000 forced one-step branches, but none of those branches terminated. Thus
+this acquired-policy cohort can compare state, value, and actor tracking but
+cannot measure terminal continuation calibration at any crossed target
+checkpoint.
+
+Before observing target `A` or `C`, the remaining fixed-history execution is
+further bounded: run the exact five-episode, 64-sample probes at `A=2000` and
+`C=2400` first. Run `C-50=2350` only if the A-to-C comparison crosses a frozen
+state, value, or actor threshold and finer onset localization is needed. Run
+`P=3000` and final step 3,500 only if C shows a threshold-crossing degradation
+whose later recovery must be distinguished. Otherwise preserve those targets
+as unmeasured. This changes compute allocation only; it does not change a
+threshold, cohort, seed, sample count, or observed target result.
