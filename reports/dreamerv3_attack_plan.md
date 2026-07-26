@@ -898,6 +898,54 @@ correlation weaken. This is the evidence-selected next probe: separate prior
 transition error, continuation calibration, and value-target drift at the
 first-solve and post-collapse checkpoints before changing losses.
 
+### Continuation calibration and latent representability result
+
+The matched continuation probe was repeated from clean source `d31cf8d` on the
+v3 step-2,000, step-3,000, and final checkpoints using CUDA execution,
+evaluation seeds 17--36, 20 episodes, and 64 posterior/prior samples. The
+durable artifacts are under
+`experiments/2026-07-26_cartpole_cached_carry_continuation_probe_cuda20/`.
+The result is stable across the larger cohort:
+
+| Checkpoint | Transitions / terminals | Prior continuation, live | Prior continuation, terminal | Prior Brier | Prior failure ROC-AUC |
+|---|---:|---:|---:|---:|---:|
+| step 2,000 | 7,385 / 18 | 0.9717 | 0.9464 | 0.0030 | 0.904 |
+| step 3,000 | 5,758 / 20 | 0.9798 | 0.9647 | 0.0037 | 0.844 |
+| final 3,500 | 5,795 / 20 | 0.9852 | 0.9583 | 0.0035 | 0.921 |
+
+The prior and observation-conditioned posterior differed by only `0.0006` to
+`0.0021` mean absolute effective-discount transport error on these cohorts.
+The problem is therefore not prior-to-posterior transport. Both channels
+assign almost the same high continuation to physical terminal transitions;
+the model supplies no useful terminal discount to imagination. The high ROC-AUC
+is only ranking: at the default 0.5 discount cutoff, terminal recall remains
+zero because the output never approaches the required terminal value of zero.
+
+The frozen-head representability probe used 100 episodes from the final
+checkpoint, 80/20 episode split, and the exact continuation-head topology. Its
+artifacts are under
+`experiments/2026-07-26_cartpole_cached_carry_continuation_supervision/`. The
+jointly trained head had failure ROC-AUC `0.901`, but mean failure probability
+`0.035` on terminals versus `0.013` on live rows, so its natural-prior output
+is under-confident. A freshly fitted class-balanced head on the same posterior
+latents reached ROC-AUC `0.979` and balanced accuracy `0.925`; a head on the
+true CartPole state reached `0.999` and `0.996`. Thus terminal information is
+present in the latent, but the learned continuation head does not turn it into
+a calibrated Bernoulli probability during joint training. A prior-corrected
+balanced head still averaged only `0.065` terminal failure probability, so a
+class-weighted loss must not be used as a raw imagination discount.
+
+This narrows the boundary: **terminal calibration is a real model weakness,
+but not the sole source of the collapse**. It explains why imagined rollouts
+remain alive after entering a failure state, while the low hybrid transition
+scores show that the one-step prior is also wrong. The rejected adaptive
+class-balanced canary remains valid as a behavioral negative: its raw weighted
+output shortened live imagination. The next intervention must either preserve
+the natural prior explicitly (for example, a balanced auxiliary terminal
+score with a separately calibrated discount head) or target prior transition
+fidelity first. No Pong or multi-seed run is authorized by this read-only
+result.
+
 The carry repair is implemented and covered by focused replay, forward-pass,
 configuration, and full-suite tests. The frozen v3 behavioral rerun is now
 complete and rejected as the next behavioral fix. Its implementation evidence

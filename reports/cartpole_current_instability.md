@@ -52,6 +52,27 @@ step 2,000; `0.086`/`0.086` at final). Q/true-delta correlation weakened from
 the next investigation toward prior transition/continuation calibration and
 value-target drift, not replay transport.
 
+The continuation follow-up used 20 deterministic evaluation episodes (seeds
+17--36), 64 prior/posterior samples, and the v3 step-2,000, step-3,000, and
+final checkpoints. The prior effective discount on live transitions was
+`0.9717`, `0.9798`, and `0.9852`; on physical terminal transitions it was
+`0.9464`, `0.9647`, and `0.9583`. Prior/posterior transport MAE remained below
+`0.0021` at every checkpoint. In other words, the model's prior is not losing
+the posterior's terminal signal during transport: both channels are confidently
+wrong about failure and continue the imagined rollout.
+
+A 100-episode frozen-head probe then fit the exact continuation-head topology
+to the final checkpoint's posterior latents. The trained head ranked terminal
+rows (failure ROC-AUC `0.901`) but assigned only `0.035` failure probability to
+terminals versus `0.013` to live rows. A class-balanced head on those same
+latents reached ROC-AUC `0.979` and balanced accuracy `0.925`; a balanced head
+on true physical states reached `0.999` and `0.996`. The latent therefore
+contains terminal information. The joint continuation head is under-calibrated
+under the rare-terminal natural prior, and the model then uses that optimistic
+discount in imagination. The prior-corrected balanced shadow head still
+predicted only `0.065` failure probability on terminal rows, so weighted scores
+cannot be substituted directly for the natural discount.
+
 ## Decision
 
 The current warmup/reinforce configuration does not reliably learn CartPole.
