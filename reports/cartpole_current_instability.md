@@ -29,6 +29,20 @@ boundary, rejects stale writebacks after eviction, and logs cache warm-up and
 memory. The existing `bounded_burn` mode remains the compatibility default for
 older checkpoint/config snapshots.
 
+The v3 cached-carry canary completed normally at 3,500 updates. It reached a
+best mean return of `500.0` at update `3,200`, but finished at `304.2`; the
+first post-solve evaluation had already fallen from `464.2` to `356.95`, and
+later collapses recurred. Manifest `24dfedc9f910454da12038cbd02407bb`, MLflow
+run `ccedbee86d4c47de806117a58299e2aa`, runtime 26:57.90, peak RSS 3,914,744
+KiB. Cache stale updates stayed at zero and the final cache payload was about
+50.88 MiB. This is a completed negative result, not an interrupted run.
+
+The corresponding post-run carry probes failed their parity gate at both best
+and final checkpoints. Best: median cosine `0.98923`, p95 relative L2 `0.31056`,
+actor agreement `0.98561`; final: `0.98865`, `0.36072`, `0.99281`. These are
+off-policy random-prefix diagnostics, so they are supporting evidence rather
+than a causal verdict.
+
 ## Decision
 
 The current warmup/reinforce configuration does not reliably learn CartPole.

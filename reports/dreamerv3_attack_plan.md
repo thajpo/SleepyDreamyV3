@@ -834,9 +834,51 @@ carry mismatch is the sole cause; they do prove the initialized parity gate is
 not retained by training. The missing final checkpoint is a hardware-evidence
 limitation, not a reason to reinterpret the best/periodic results.
 
-The carry repair is now implemented and covered by focused replay,
-forward-pass, configuration, and full-suite tests. It remains an experimental
-mode until the frozen behavioral contract is rerun:
+### Corrected v3 cached-carry result
+
+The frozen cached-carry contract ran to completion on seed 0 with source
+`f69c8eb` and MLflow run `ccedbee86d4c47de806117a58299e2aa`. Its manifest ID is
+`24dfedc9f910454da12038cbd02407bb`, runtime was 26:57.90, peak RSS was
+3,914,744 KiB, and the run collected 21,365 environment steps. It wrote the
+periodic, best, final, and replay-evidence artifacts and stopped normally at
+update 3,500.
+
+The evaluation curve retained the same repeated acquisition/loss pattern:
+
+| Update | 600 | 900 | 1,100 | 1,900 | 2,000 | 2,200 | 2,300 | 2,400 | 2,800 | 2,900 | 3,100 | 3,200 | 3,300 | 3,400 | 3,500 |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Mean return | 56.30 | 18.95 | 118.45 | 464.20 | 356.95 | 229.35 | 462.35 | 301.05 | 475.55 | 333.80 | 489.70 | 500.00 | 500.00 | 500.00 | 304.20 |
+
+The first post-solve evaluation fell below the 400 retention floor (464.20 to
+356.95), and later collapses recurred. Best was 500 at update 3,200, while the
+final score was 304.20, a 195.80 best-to-final gap. The frozen pass therefore
+fails decisively. Compared with v2, the timing and magnitude of acquisition
+shift, but the failure boundary is unchanged: useful control is learned and
+then lost during continued joint training.
+
+Operationally, the cache behaved as designed: stale writebacks remained zero,
+availability was generally 75--100%, and the cache reached 20,842 rows / 50.88
+MiB of NumPy payload by update 3,475. The higher peak RSS versus v2 (about
+565 MiB) is a real cost, but not the cause of this run's failure; the process
+completed without resource or child-process errors.
+
+The post-run random-prefix carry probe also failed its trained-parity gate:
+the best checkpoint had median cosine `0.98923`, p95 relative L2 `0.31056`, and
+actor agreement `0.98561`; the final checkpoint had `0.98865`, `0.36072`, and
+`0.99281`. These probes are off-policy diagnostics and do not isolate the
+cause of the behavioral collapse, but they confirm that checkpoint carry
+quality remains imperfect even after the cache repair.
+
+This rejects cached carry as the next behavioral fix. Do not run seeds 1/2 or
+Pong. The next investigation should compare the actor/critic targets at the
+first-solve versus post-collapse checkpoints, with emphasis on imagined prior
+continuation and value calibration, while keeping the v3 run as a negative
+replay-boundary result.
+
+The carry repair is implemented and covered by focused replay, forward-pass,
+configuration, and full-suite tests. The frozen v3 behavioral rerun is now
+complete and rejected as the next behavioral fix. Its implementation evidence
+is:
 
 1. Give every replay row a stable identity and cache the detached RSSM carry
    produced at that row. Sample the cached entry at the burn-in endpoint and
@@ -853,10 +895,10 @@ mode until the frozen behavioral contract is rerun:
    with the current 640-float carry this is about 625 MiB of NumPy payload before
    Python/container overhead. The telemetry is therefore part of the acceptance
    evidence, not an optional optimization detail.
-5. Rerun the frozen seed-0 qualification contract with the carry mechanism as
-   the only causal change. Keep the same 3,500 updates, replay ratio, trained
-   rows per update, environment-step authorization, evaluation seeds, and
-   retention gate. Do not run seeds 1/2 unless seed 0 passes.
+5. Completed: the frozen seed-0 qualification reran with cached carry as the
+   only causal change, using the same 3,500 updates, replay ratio, trained rows
+   per update, environment-step authorization, evaluation seeds, and retention
+   gate. It failed; do not run seeds 1/2.
 
 If exact carry still collapses, the next isolated intervention is direct
 one-step **prior** continuation supervision on real transitions, because
