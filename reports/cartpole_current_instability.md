@@ -6669,15 +6669,21 @@ initial value from the local `H+1` imagination layout and appeared to show an
 off-by-one; end-to-end tracing showed the production indexing already matches
 the pinned equation.
 
-The same audit established that the existing “reference” modules were still
-numerically incomplete. Official RMSNorm has a learned shift in addition to
-scale. A first source-local comparison also appeared to find missing vector
-symlog, but end-to-end tracing corrected that claim: the shared local input
-pipeline already applies symlog before the encoder. A versioned
-`reference_v3_state` contract preserves that single transform and adds exact
-size-1M dimensions, normalized head depths, fan-in truncated-normal
-initialization, and pinned output scales. It rejects pixel use and hybrid
-component settings, while historical checkpoints retain their old contract.
+The same audit initially concluded that the existing “reference” modules were
+still numerically incomplete because official RMSNorm learned a shift in
+addition to scale. That conclusion was wrong: a later pin-level audit of
+`embodied/jax/nets.py` established that the pinned RMS path learns scale only.
+The seed-0 canary below ran the superseded shift-bearing implementation, so its
+frozen v1 contract retains that architecture and its 639,173 parameters. The
+corrected scale-only implementation has 637,381 parameters and remains
+unqualified until a separately frozen canary runs. A first source-local
+comparison also appeared to find missing vector symlog, but end-to-end tracing
+corrected that claim: the shared local input pipeline already applies symlog
+before the encoder. The versioned `reference_v3_state` architecture preserves
+that single transform and adds exact size-1M dimensions, normalized head
+depths, fan-in truncated-normal initialization, and pinned output scales. It
+rejects pixel use and hybrid component settings, while historical checkpoints
+retain their old contract.
 
 This is an evidence-selected conformance repair, not a claim that architecture
 was the unique cause of collapse. The representation/policy trace makes it the

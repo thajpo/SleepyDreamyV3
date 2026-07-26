@@ -4,7 +4,6 @@ from pathlib import Path
 
 import pytest
 import torch
-import yaml
 
 from dreamer.config import Config, ConfigValidationError, validate_config
 from dreamer.main import dictconfig_to_config
@@ -21,12 +20,6 @@ from hydra import compose, initialize_config_module
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "dreamerv3_e3f0224_oracle.json"
-CONTRACT = (
-    Path(__file__).parents[1]
-    / "reports"
-    / "contracts"
-    / "cartpole_reference_v3_state_v1.yaml"
-)
 
 
 def reference_config(**changes) -> Config:
@@ -134,17 +127,13 @@ def test_reference_state_architecture_matches_pinned_size1m_topology() -> None:
     assert isinstance(critic, ReferenceMLP)
     assert len(actor.mlp) == 10
     assert len(critic.mlp) == 10
-    contract = yaml.safe_load(CONTRACT.read_text())
     trainable_parameters = sum(
         parameter.numel()
         for module in (encoder, world_model, actor, critic)
         for parameter in module.parameters()
         if parameter.requires_grad
     )
-    assert trainable_parameters == contract["model"][
-        "trainable_parameters_without_slow_value"
-    ]
-    assert contract["model"]["rmsnorm_learned_shift"] is False
+    assert trainable_parameters == 637_381
 
 
 def test_reference_vector_encoder_receives_once_symlogged_pipeline_input() -> None:

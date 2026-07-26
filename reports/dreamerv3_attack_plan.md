@@ -362,9 +362,10 @@ fixture initially exposed an apparent imagination-index difference; tracing the
 actual `H+1` value layout proved the production equation correct and the first
 fixture translation wrong. The corrected independent comparisons all pass.
 
-The source audit found an additional architecture mismatch relevant to the
-observed representation/policy movement. Official RMSNorm learns both a scale
-and a shift; `torch.nn.RMSNorm` learns no shift. An end-to-end follow-up also
+The source audit initially reported an additional architecture mismatch
+relevant to the observed representation/policy movement: it claimed official
+RMSNorm learned both a scale and a shift. A later pin-level audit corrected
+that claim: the pinned RMS path learns scale only. An end-to-end follow-up also
 corrected the initial audit note about vector preprocessing: the shared local
 trainer/collector pipeline already symlogs state before the encoder. The new
 encoder preserves that single transform instead of applying it a second time.
@@ -377,22 +378,26 @@ state-only size-1M architecture as one unit:
 - deterministic state 512, hidden width 64, eight recurrent blocks, and
   stochastic state 32 by 4;
 - symlog vector input and three normalized encoder layers;
-- learned-scale-and-shift RMSNorm with epsilon `1e-4` throughout;
+- the then-selected learned-scale-and-shift RMSNorm with epsilon `1e-4`
+  throughout;
 - two prior layers, one posterior layer, and the grouped recurrent core;
 - three hidden layers for actor, value, and vector decoder, and one hidden
   layer for reward and continuation;
 - fan-in truncated-normal initialization with the pinned `1.1368` correction,
   zero biases, actor outscale `0.01`, and zero reward/value output weights.
 
-The contract contains 639,173 trainable parameters across encoder, world model,
-actor, and value model. It is deliberately rejected for pixels until the pixel
-encoder/decoder is ported; mixed legacy/reference component selections are also
-rejected. Historical snapshots retain `architecture_contract=historical`, so
-existing evidence remains loadable. The mechanical gate passes 61 focused
-tests, the complete 283-test fast suite, compile and scoped type checks, and a
-one-update multiprocess CPU smoke using the complete new architecture. The one
-resume integration fixture that intentionally authors legacy modules now
-requests the historical contract explicitly.
+The historical v1 qualification contract contains 639,173 trainable parameters
+across encoder, world model, actor, and value model. The corrected scale-only
+implementation contains 637,381 and is not qualified by the recorded canary;
+it requires a separately frozen run. The architecture is deliberately rejected
+for pixels until the pixel encoder/decoder is ported; mixed legacy/reference
+component selections are also rejected. Historical snapshots retain
+`architecture_contract=historical`, so existing evidence remains loadable. The
+mechanical gate passed 61 focused tests, the complete 283-test fast suite,
+compile and scoped type checks, and a one-update multiprocess CPU smoke using
+the then-current architecture. The one resume integration fixture that
+intentionally authors legacy modules requests the historical contract
+explicitly.
 
 No behavioral claim follows from mechanical conformance. Before a CartPole
 canary, Phase 2 must correct and prove replay context/reset accounting so the

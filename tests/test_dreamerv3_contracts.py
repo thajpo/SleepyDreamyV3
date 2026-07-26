@@ -65,6 +65,16 @@ def test_reference_cartpole_contract_aligns_all_trained_row_counts():
     assert training["actor_value_starts_per_update"] == 8 * 12
 
 
+def test_reference_cartpole_contract_preserves_qualified_architecture():
+    contract = load_contract(
+        CONTRACT_DIR / "cartpole_reference_v3_state_v1.yaml"
+    )
+
+    assert contract["implementation"]["commit"] == "326d0b2"
+    assert contract["model"]["trainable_parameters_without_slow_value"] == 639_173
+    assert contract["model"]["rmsnorm_learned_shift"] is True
+
+
 def test_contract_validation_fails_closed_on_unit_drift():
     contract = load_contract(CONTRACT_DIR / "paper_v2_atari100k.yaml")
     broken = deepcopy(contract)
