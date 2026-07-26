@@ -5,7 +5,7 @@ be read and tested independently.
 """
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, cast
 
 import torch
 import torch.nn.functional as F
@@ -343,13 +343,14 @@ def dreamer_step(
     q_critic_scale = float(getattr(config, "q_critic_scale", 0.0))
     prior_state_pred_scale = float(getattr(config, "prior_state_pred_scale", 0.0))
 
-    total_wm_loss = None
-    total_actor_loss = None
-    total_critic_loss = None
+    total_wm_loss: Optional[torch.Tensor] = None
+    total_actor_loss: Optional[torch.Tensor] = None
+    total_critic_loss: Optional[torch.Tensor] = None
     return_batches: list[tuple[torch.Tensor, torch.Tensor]] = []
     reinforce_actor_batches: list[ReinforceActorBatch] = []
     replay_posterior_states_with_grad: list[torch.Tensor] = []
-    replay_representation_loss = None
+    replay_representation_loss: Optional[torch.Tensor] = None
+    dreamed_recurrent_states: Optional[torch.Tensor] = None
 
     (
         continuation_loss_weights,
@@ -777,7 +778,13 @@ def dreamer_step(
                 )
 
             # Decode dreamed states for visualization
-            if do_log_images and t_step == T - 1 and use_pixels:
+            if (
+                do_log_images
+                and t_step == T - 1
+                and use_pixels
+                and dreamed_recurrent_states is not None
+                and metrics.viz_data is not None
+            ):
                 with torch.no_grad():
                     try:
                         n_steps, batch_sz = dreamed_recurrent_states.shape[:2]
@@ -799,8 +806,12 @@ def dreamer_step(
             total_critic_loss = critic_loss
         else:
             total_wm_loss = total_wm_loss + wm_loss
-            total_actor_loss = total_actor_loss + actor_loss
-            total_critic_loss = total_critic_loss + critic_loss
+            total_actor_loss = cast(torch.Tensor, total_actor_loss) + actor_loss
+            total_critic_loss = cast(torch.Tensor, total_critic_loss) + critic_loss
+
+    total_wm_loss = cast(torch.Tensor, total_wm_loss)
+    total_actor_loss = cast(torch.Tensor, total_actor_loss)
+    total_critic_loss = cast(torch.Tensor, total_critic_loss)
 
     normalizer_update = calculate_return_normalizer_update(
         return_batches,
@@ -959,17 +970,17 @@ def dreamer_step(
         per_step_ce = -torch.sum(
             targets_twohot * F.log_softmax(logits_flat, dim=-1), dim=-1
         )
-        metrics.replay_mc_loss = (per_step_ce * mask_flat).sum() / (
+        replay_mc_loss = (per_step_ce * mask_flat).sum() / (
             mask_flat.sum() + 1e-8
         )
+        metrics.replay_mc_loss = replay_mc_loss
         total_critic_loss = add_sequence_mean_auxiliary_loss(
             total_critic_loss,
-            metrics.replay_mc_loss,
+            replay_mc_loss,
             critic_real_return_scale,
             effective_train_steps,
         )
 
-    assert total_wm_loss is not None and total_actor_loss is not None and total_critic_loss is not None
     (
         total_wm_loss,
         total_actor_loss,
