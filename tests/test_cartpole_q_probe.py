@@ -1,5 +1,6 @@
 import json
 from dataclasses import asdict, replace
+from pathlib import Path
 
 import gymnasium as gym
 import numpy as np
@@ -18,12 +19,55 @@ from dreamer.models.dreaming import (
     estimate_policy_lambda_action_values,
 )
 from scripts.probe_cartpole_q import (
+    _apply_actor_unimix,
+    _extract_train_step,
+    _probe_output_dir,
     action_preference,
     hybrid_state_score,
     load_checkpoint_models,
     one_step_outcome,
     rollout_score,
 )
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ({"step": 100, "train_step": 200}, 100),
+        ({"train_step": 300}, 300),
+        ({}, None),
+    ],
+)
+def test_extract_train_step(payload, expected):
+    assert _extract_train_step(payload) == expected
+
+
+def test_probe_output_dir_distinguishes_same_run_checkpoints():
+    root = Path("/out")
+    first = Path("/runs/my_run/checkpoints/checkpoint_step_1000.pt")
+    second = Path("/runs/my_run/checkpoints/checkpoint_step_2000.pt")
+
+    assert _probe_output_dir(root, first) == Path(
+        "/out/my_run/checkpoint_step_1000"
+    )
+    assert _probe_output_dir(root, second) == Path(
+        "/out/my_run/checkpoint_step_2000"
+    )
+
+
+def test_apply_actor_unimix_uses_historical_default():
+    mixed = _apply_actor_unimix(torch.tensor([[100.0, 0.0]]))
+    probabilities = torch.softmax(mixed, dim=-1)
+
+    assert torch.isclose(probabilities[0, 1], torch.tensor(0.005), atol=1e-4)
+
+
+def test_apply_actor_unimix_honors_configured_ratio():
+    logits = torch.tensor([[100.0, 0.0]])
+    low = torch.softmax(_apply_actor_unimix(logits, 0.01), dim=-1)
+    high = torch.softmax(_apply_actor_unimix(logits, 0.10), dim=-1)
+
+    assert high[0, 1] > low[0, 1]
 
 
 @pytest.mark.parametrize(

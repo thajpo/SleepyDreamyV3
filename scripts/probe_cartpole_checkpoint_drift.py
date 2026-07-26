@@ -27,6 +27,7 @@ from dreamer.models.dreaming import (
 )
 
 if __package__:
+    from scripts.probe_cartpole_continuation import summarize_channel
     from scripts.probe_cartpole_q import (
         action_preference,
         load_checkpoint_models,
@@ -36,6 +37,7 @@ if __package__:
         rollout_score,
     )
 else:
+    from probe_cartpole_continuation import summarize_channel  # type: ignore[import-not-found]
     from probe_cartpole_q import (  # type: ignore[import-not-found]
         action_preference,
         load_checkpoint_models,
@@ -156,6 +158,28 @@ def _diagnostic_metrics(rows: list[dict]) -> dict:
     return metrics
 
 
+def _build_continuation_summary(rows: list[dict]) -> dict:
+    """Summarize prior and posterior continuation over flattened action branches."""
+    branch_rows = []
+    for row in rows:
+        for action in (0, 1):
+            done = bool(row[f"real_done_{action}"])
+            branch_rows.append(
+                {
+                    "target_discount": 0.0 if done else 1.0,
+                    "terminal": done,
+                    "prior_continue": float(row[f"prior_continue_{action}"]),
+                    "posterior_continue": float(row[f"posterior_continue_{action}"]),
+                }
+            )
+    return {
+        "branches": len(branch_rows),
+        "terminal_branches": sum(1 for r in branch_rows if r["terminal"]),
+        "prior": summarize_channel(branch_rows, "prior_continue", gamma=1.0),
+        "posterior": summarize_channel(branch_rows, "posterior_continue", gamma=1.0),
+    }
+
+
 def summarize_fixed_history_rows(
     rows: list[dict],
     *,
@@ -212,6 +236,7 @@ def summarize_fixed_history_rows(
             }
         )
         summary["by_abs_x_bin"][label] = metrics
+    summary["continuation"] = _build_continuation_summary(rows)
     return summary
 
 
@@ -237,7 +262,7 @@ def _posterior_reconstruct_next_state(
     action: int,
     next_state: np.ndarray,
     n_actions: int,
-) -> np.ndarray:
+) -> tuple[np.ndarray, float]:
     action_onehot = F.one_hot(
         torch.tensor([int(action)], device=h.device), num_classes=n_actions
     ).float()
@@ -251,7 +276,17 @@ def _posterior_reconstruct_next_state(
     ).float()
     h_z_next = world_model.join_h_and_z(h_next, posterior_state)
     reconstructed = symexp(world_model.decoder(h_z_next)["state"])
-    return reconstructed.squeeze(0).cpu().numpy().astype(np.float32)
+    continue_prob = (
+        torch.sigmoid(world_model.continue_predictor(h_z_next))
+        .squeeze()
+        .detach()
+        .cpu()
+        .item()
+    )
+    return (
+        reconstructed.squeeze(0).cpu().numpy().astype(np.float32),
+        float(continue_prob),
+    )
 
 
 def run_fixed_history_probe(
@@ -432,31 +467,44 @@ def run_fixed_history_probe(
                             target_world_model.decoder(target_h_z)["state"]
                         ).squeeze(0).cpu().numpy().astype(np.float32)
                         real_next = []
+                        real_done = []
                         predicted_next = []
+                        prior_continue = []
                         posterior_next = []
-                        for candidate in range(target_cfg.n_actions):
-                            next_state, _done = one_step_outcome(
-                                score_env, state, candidate
-                            )
-                            predicted_state, _continue_probability = predict_one_step(
-                                target_world_model,
-                                target_h,
-                                target_z_embed,
-                                candidate,
-                                target_cfg.n_actions,
-                            )
-                            reconstructed_state = _posterior_reconstruct_next_state(
-                                target_world_model,
-                                target_encoder,
-                                target_h,
-                                target_z_embed,
-                                candidate,
-                                next_state,
-                                target_cfg.n_actions,
-                            )
-                            real_next.append(next_state)
-                            predicted_next.append(predicted_state)
-                            posterior_next.append(reconstructed_state)
+                        posterior_continue = []
+                        h_backup = target_world_model.h_prev.clone()
+                        try:
+                            for candidate in range(target_cfg.n_actions):
+                                next_state, done = one_step_outcome(
+                                    score_env, state, candidate
+                                )
+                                predicted_state, continue_prob = predict_one_step(
+                                    target_world_model,
+                                    target_h,
+                                    target_z_embed,
+                                    candidate,
+                                    target_cfg.n_actions,
+                                )
+                                (
+                                    reconstructed_state,
+                                    post_continue,
+                                ) = _posterior_reconstruct_next_state(
+                                    target_world_model,
+                                    target_encoder,
+                                    target_h,
+                                    target_z_embed,
+                                    candidate,
+                                    next_state,
+                                    target_cfg.n_actions,
+                                )
+                                real_next.append(next_state)
+                                real_done.append(done)
+                                predicted_next.append(predicted_state)
+                                prior_continue.append(continue_prob)
+                                posterior_next.append(reconstructed_state)
+                                posterior_continue.append(post_continue)
+                        finally:
+                            target_world_model.h_prev = h_backup
                     finally:
                         target_world_model.h_prev = target_h_prev
 
@@ -508,6 +556,16 @@ def run_fixed_history_probe(
                                 ),
                             }
                         )
+                    row.update(
+                        {
+                            "real_done_0": int(real_done[0]),
+                            "real_done_1": int(real_done[1]),
+                            "prior_continue_0": float(prior_continue[0]),
+                            "prior_continue_1": float(prior_continue[1]),
+                            "posterior_continue_0": float(posterior_continue[0]),
+                            "posterior_continue_1": float(posterior_continue[1]),
+                        }
+                    )
                     for state_index, state_name in enumerate(STATE_NAMES):
                         row[f"current_posterior_{state_name}_mse"] = float(
                             (current_reconstruction[state_index] - state[state_index])

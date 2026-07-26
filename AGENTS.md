@@ -6,6 +6,22 @@ SleepyDreamyV3 is a PyTorch DreamerV3 research implementation. Treat it as an
 ML reliability project: preserve reproducibility, make failures visible, and do
 not present an experiment as successful without deterministic evaluation.
 
+## Delegation Roles
+
+- The primary Sol agent is the orchestrator. It owns planning, task boundaries,
+  review, research interpretation, experiment decisions, and user updates.
+- `deepseek-worker` may implement bounded changes and run prescribed checks. It
+  must not interpret results, alter research conclusions, launch experiments,
+  or change Git history.
+- `deepseek-monitor` may perform bounded read-only polling and return raw
+  process, metric, and artifact observations. It must not control processes or
+  interpret results.
+- Give each delegated task explicit allowed files, acceptance criteria,
+  validation commands, a step or time budget, stop conditions, and a factual
+  output schema. The primary agent reviews all worker output before proceeding.
+- Run only one coding worker at a time. Use an isolated worktree when coding
+  could overlap other active work; a read-only monitor may run concurrently.
+
 ## Repository Map
 
 - `src/dreamer/models/`: encoder, RSSM world model, losses, imagination, and

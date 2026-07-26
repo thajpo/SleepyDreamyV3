@@ -1269,3 +1269,312 @@ The next one-seed ablation is preregistered as follows:
   improvement rejects this as a replication fix but motivates explicit
   exploration scheduling. No seeds 1/2 or Pong run is authorized by this
   ablation alone.
+
+### Deterministic-collector result
+
+The preregistered seed-0 run completed all 3,500 updates from clean source
+`7905b41303559b5473f70d8cc2958f6e8244c46b`. Its run ID is
+`4df5c7ef46f64c6baf0e5d03f6bafd10`; the best deterministic mean return was
+`294.7` at update 2,600 and the final mean was `189.85`. It therefore failed
+both the primary acquisition/retention gate and the robustness requirement.
+
+A fixed-seed 20-episode smoke audit at the best and final checkpoints reported:
+
+```text
+actor mode,   latent mode       288.55    184.45
+actor mode,   latent sample      89.95    130.00
+actor sample, latent mode       193.75    181.00
+actor sample, latent sample      76.95    119.70
+```
+
+The intervention did not restore stable deterministic behavior and did not
+make the native stochastic path competitive. Deterministic collection is
+rejected as the next replication fix. The 20-episode audit is directional,
+not a substitute for the preregistered 100-episode robustness cohort, because
+the primary gate already failed.
+
+### External official e3f0224 CartPole control preregistration
+
+#### Question and hypothesis
+
+Does the pinned official DreamerV3 implementation exhibit the same
+acquire-then-collapse behavior on vector CartPole, or is the instability
+specific to the local PyTorch implementation bundle?
+
+The hypothesis is that native official DreamerV3 at
+`e3f02248693a79dc8b0ebd62c93683888ddaccfe`, using its `size1m` preset, will
+retain a controller better than the local sampled-policy cached-carry run. A
+stable official result would select a narrower implementation-conformance
+audit. A similar official collapse would reject the claim that the observed
+failure is uniquely local, without proving the implementations equivalent.
+
+#### Frozen comparison
+
+- **Local evidence:**
+  `experiments/2026-07-26_cartpole_reference_v3_state_cached_carry_seed0_3500/`,
+  run ID `24dfedc9f910454da12038cbd02407bb`, best/final deterministic
+  means `500.0 / 304.2`, and 21,365 recorded environment steps.
+- **Official source:** the clean nested checkout at `source/dreamerv3`, pinned
+  to `e3f02248693a79dc8b0ebd62c93683888ddaccfe`.
+- **Task:** upstream `gym_CartPole-v1`, vector observations, two categorical
+  actions, one environment, and training seed 0.
+- **Model:** native upstream `size1m`: deterministic width 512, RSSM hidden
+  width 64, eight recurrent blocks, 32 stochastic variables with four classes,
+  and 64-unit encoder, policy, value, reward, and continuation heads.
+- **Algorithm:** retain upstream loss, replay, LaProp, policy sampling, and
+  runner equations. Do not patch upstream orchestration to imitate local
+  counters, because such a harness would introduce a third implementation.
+- **Training:** upstream batch 16, trained length 64, replay context 1,
+  replay ratio 32, imagination length 15, discount horizon 333, lambda 0.95,
+  learning rate `4e-5`, 1,000-update warmup, and sampled collection.
+- **Budget:** `run.steps=113056`. Under pinned `elements==3.19.1`, one fresh
+  environment, and upstream replay gating, this is expected to authorize about
+  3,500 optimizer calls after startup. The driver advances in ten-record
+  chunks, so report actual records, episodes, and optimizer calls; do not claim
+  exact budget equivalence if observed accounting differs.
+- **Environment dependency:** Python 3.11, `gym==0.23.1`, and
+  `pygame==2.6.1`, in an isolated environment. This preserves the API expected
+  by the pinned upstream Gym adapter without changing source.
+
+This is an implementation-level external control, not a one-variable causal
+ablation. Local and upstream batches, trained-row totals, replay startup,
+environment reset seeding, PRNGs, and evaluation semantics differ. Those
+differences must be reported rather than normalized away after observing the
+result.
+
+#### Execution and evidence
+
+First run one non-learning mechanical preflight:
+
+```text
+python dreamerv3/main.py --configs debug --task gym_CartPole-v1 --seed 0 \
+  --script train --jax.platform cpu --run.steps 200 --run.envs 1 \
+  --run.report_every 0 --run.save_every 0 --run.log_every 1 \
+  --run.usage.nvsmi False
+```
+
+The preflight passes only if environment creation, replay, JAX compilation,
+policy execution, optimizer calls, logging, and normal shutdown complete. It
+is not performance evidence.
+
+If the preflight passes, run exactly one native seed-0 control:
+
+```text
+python dreamerv3/main.py --configs size1m --task gym_CartPole-v1 --seed 0 \
+  --script train_eval --jax.platform cpu --run.steps 113056 --run.envs 1 \
+  --run.eval_envs 1 --run.eval_eps 20 --run.report_every 120 \
+  --run.log_every 30 --run.save_every 120 --run.usage.nvsmi False
+```
+
+Preserve the resolved config, dependency lock, terminal log, `metrics.jsonl`,
+`scores.jsonl`, checkpoint, replay statistics, wall time, peak memory, actual
+driver records, and available optimizer-call counters under
+`experiments/official_e3f0224_cartpole_size1m_seed0/`. Upstream evaluation is
+stochastic, scheduled by wall time, and not guaranteed at the final boundary;
+therefore its episodic-return curve is the native primary evidence and must not
+be presented as equivalent to the local deterministic 20-episode curve.
+
+The upstream `train_eval` logger buffers one unprefixed `episode/score` key for
+both training and evaluation, so repeated evaluation episodes before a logger
+flush overwrite one another and cannot be reconstructed as a cohort. If this
+occurs, run the unchanged upstream `eval_only` script from the last periodic
+checkpoint for exactly 20,000 policy records with one environment and
+`run.log_every=0`. Report every completed stochastic episode from its
+`scores.jsonl`, including the exact checkpoint step. This is a read-only
+measurement correction, not a final-checkpoint claim; no training or model
+settings may change.
+
+#### Decision and stop rule
+
+- A strong official control reaches a 20-episode mean of at least 475 and has
+  no later reported mean below 400. The result selects implementation
+  conformance as the next boundary, subject to the evaluation limitations.
+- A clear acquire-then-collapse trajectory or failure to acquire by the fixed
+  budget rejects the claim that instability is uniquely local. Preserve the
+  negative control and investigate the shared algorithm/task interaction.
+- Dependency, adapter, counter, or checkpoint failure is operationally
+  incomparable, not a learning failure. Fix only the predeclared execution
+  defect and rerun the preflight; do not tune learning settings.
+- Do not add seeds, extend the budget, or launch a sweep after seeing seed 0.
+  Decide the next boundary from the preserved evidence first.
+
+### External official e3f0224 CartPole control result
+
+The control completed on 2026-07-26 without modifying the pinned upstream
+checkout.
+
+- The debug preflight exited successfully after 200 driver records in 7.62
+  seconds. It exercised environment creation, replay, compilation, policy
+  execution, optimizer calls, checkpointing, logging, and normal shutdown.
+- The full run used the resolved upstream `size1m` model with 637,381 trainable
+  parameters. It exited with status 0 after 36:49 wall time, used at most
+  4,334,632 KiB resident memory, and maintained a reported replay ratio near
+  32.5 after startup.
+- The command target was 113,056 driver records. The runner advances in
+  ten-record chunks; the last completed episode ended at record 112,954. The
+  last optimizer telemetry at record 112,160 averaged update index 3,450.5
+  over its logging window, consistent with the preregistered expectation of
+  approximately 3,500 optimizer calls by completion, but upstream does not
+  emit a final update assertion.
+- The native mixed training/evaluation score stream contained 1,741 completed
+  episodes. Its first rolling-20 mean was 23.85. Its best rolling-20 mean was
+  351.65 at record 74,846, with range 216--500, and it contained a 500-return
+  episode. The final rolling-20 mean was 134.6 at record 112,954, with range
+  113--157.
+- As anticipated, `train_eval` did not preserve separate 20-episode evaluation
+  cohorts. A read-only `eval_only` run loaded the last periodic checkpoint,
+  saved immediately after logged record 110,820, and executed 20,000 policy
+  records with the native stochastic policy. Its 145 completed episodes had
+  mean 136.793, median 136, fifth percentile 123, range 119--162, and solved
+  fraction 0.0.
+
+Evidence is retained under:
+
+- `experiments/official_e3f0224_cartpole_debug_seed0_preflight/`
+- `experiments/official_e3f0224_cartpole_size1m_seed0/`
+- `experiments/official_e3f0224_cartpole_size1m_seed0_eval/`
+
+The official control acquired substantially better-than-random behavior,
+reached the 500-step cap in at least one episode, and then degraded sharply.
+It therefore fails the preregistered stability gate and rejects the claim that
+acquire-then-collapse behavior is unique to the local PyTorch implementation.
+It does not establish algorithmic equivalence: upstream used batch 16, trained
+length 64, replay context 1, replay ratio 32, legacy Gym with unseeded resets,
+native stochastic evaluation, and a periodic rather than exact-final
+checkpoint.
+
+The evidence-selected decision is to stop treating stable CartPole retention
+as a prerequisite for bounded Pong replication. CartPole remains a useful
+stress test for survival-target and closed-loop policy robustness, but the
+same qualitative failure in pinned official code makes further local
+conformance patches a low-information next move. Continue the stability track
+with one preregistered mechanism test at a time; independently restore a
+reproducible current Pong launch path and begin with environment and one-update
+smoke gates before any performance run.
+
+### Local temporal mechanism study preregistration
+
+#### Question and hypothesis
+
+During one exact replication of the sampled-policy cached-carry seed-0 run,
+which measured boundary moves first as CartPole control is acquired and then
+lost: one-step dynamics, continuation calibration, imagined value ordering, or
+actor agreement with that ordering?
+
+The leading hypothesis is that rare-terminal continuation optimism appears on
+the learned-policy history distribution before or with degradation in imagined
+action ordering. The actor then continues to follow an increasingly wrong
+policy-conditioned target. This is a localization study, not a training
+intervention and not evidence from additional independent seeds.
+
+#### Frozen training run
+
+- **Source:** a clean commit containing this preregistration and the reviewed
+  probe instrumentation. Record the immutable commit and run ID from
+  `run_manifest.json`; do not launch from a dirty worktree.
+- **Output:**
+  `experiments/2026-07-26_cartpole_reference_v3_state_temporal_diagnostic_seed0_3500/`.
+- **Task/model:** `env=cartpole_state_only`, local `reference_v3_state`
+  architecture, one collector, seed 0, ROCm device `cuda`.
+- **Budget:** exactly 3,500 optimizer updates. Batch 8, sequence length 32,
+  burn-in 20, replay ratio 16, and action repeat 1 authorize 21,000 paced
+  environment decisions. Record startup and shutdown overshoot rather than
+  presenting actual environment steps as exactly 21,000.
+- **Replay/collection:** buffer 512 episodes, minimum 16 episodes, stream
+  sequences, reference row alignment, online continuous delivery, cached carry,
+  no recent sampling, and sampled collector actions.
+- **Learning:** reference optimizer, learning rate `4e-5`, 1,000-update warmup,
+  REINFORCE actor, replay critic scale 0.3, gamma 0.997, lambda 0.95, and 15
+  imagination steps. Real-return critic, direct Q critic, prior-state,
+  prior-continuation, terminal-risk, continuation balancing, and terminal reward
+  auxiliaries remain disabled.
+- **Evaluation/checkpoints:** 20 deterministic fixed-seed episodes every 100
+  updates using `episode_reward`; periodic checkpoints every 50 updates; no
+  early stopping and no replay-evidence sampling. Preserve all 70 periodic
+  checkpoints plus best and final checkpoint semantics separately.
+
+The exact non-default training projection is:
+
+```text
+general.device=cuda general.seed=0
+general.experiment_name=cartpole_reference_v3_state_temporal_diagnostic
+train.max_train_steps=3500 train.batch_size=8 train.sequence_length=32
+train.replay_burn_in=20 train.replay_ratio=16 train.replay_buffer_size=512
+train.min_buffer_episodes=16 train.num_collectors=1
+train.replay_sequence_mode=stream train.replay_row_alignment=reference
+train.online_replay=true train.continuous_replay_delivery=true
+train.replay_carry_mode=cached train.collector_policy_mode=sample
+train.recent_fraction=0.0 train.action_repeat=1
+train.eval_every=100 train.eval_episodes=20
+train.eval_metric=episode_reward train.checkpoint_interval=50
+train.replay_evidence_samples=0 train.early_stop_ep_length=0
+train.actor_loss_mode=reinforce train.critic_replay_scale=0.3
+train.critic_real_return_scale=0.0 train.q_critic_scale=0.0
+train.prior_state_pred_scale=0.0 train.prior_continue_pred_scale=0.0
+train.terminal_risk_aux_scale=0.0 train.balance_continuation=false
+train.terminal_reward_penalty=0.0
+```
+
+Hydra's resolved `--cfg job` output, the full `.hydra` snapshot, terminal log,
+run manifest, MLflow metrics, every checkpoint, wall time, process exit status,
+and peak device/memory observations are required evidence.
+
+#### Frozen temporal probes
+
+After training completes, first run `scripts/probe_cartpole_q.py` on every
+50-update periodic checkpoint on CPU. Use the same 256-state random-action
+observed-history cohort at seed 17, real rollout horizon 30, imagined horizon 3,
+and decomposition horizons 1, 3, and 15. The checkpoint-specific output path
+must retain both run name and checkpoint stem. Record, by training step:
+
+- deterministic evaluation return;
+- actor, imagined-Q, direct-Q when available, state-only hybrid, and
+  state-plus-continuation hybrid agreement with real forced-action ordering;
+- actor agreement with imagined Q, actor action histogram, entropy, and Q
+  margin;
+- one-step state MSE and action-effect sign/correlation;
+- prior continuation on real terminal branches; and
+- survival-only, no-bootstrap, and bootstrapped ordering at horizons 1, 3, and
+  15.
+
+Define the acquisition checkpoint `A` as the earliest 100-update evaluation
+with mean return at least 450. Define `P` as the earliest checkpoint attaining
+the maximum evaluation mean. Define collapse checkpoint `C` as the earliest
+evaluation after `A` with mean below 400. If no `A` exists, document failure to
+replicate acquisition and stop without a collapse-mechanism claim. If no `C`
+exists, retain the run as a non-collapse replicate and stop without inventing a
+collapse boundary.
+
+If both `A` and `C` exist, run
+`scripts/probe_cartpole_checkpoint_drift.py` with source checkpoint `A`, CPU,
+seed 17, five source-policy episodes, real rollout horizon 30, imagined horizon
+3, and 64 policy-Q samples. Targets are the deduplicated set `{A-100, A, P,
+C-50, C, 3500}` where a positive periodic checkpoint exists. This fixes one
+acquired-policy history distribution while crossing target parameters. Preserve
+rows and summaries for prior and posterior state error, prior and posterior
+continuation calibration, actor ordering, enumerated-Q ordering, and sampled
+policy-Q ordering.
+
+#### Interpretation and stop rule
+
+- Continuation is the first measured boundary only if its terminal mean rises
+  by at least 0.02 or its Brier score at least doubles with an absolute increase
+  of 0.01 before any 0.15 absolute ordering-accuracy loss or twofold state-error
+  increase from `A`.
+- Dynamics is first only if one-step prior state error doubles before those
+  continuation or ordering thresholds, with posterior reconstruction separating
+  transport error from observation-conditioned reconstruction.
+- Value-target drift is first only if imagined-Q or sampled policy-Q ordering
+  loses at least 0.15 accuracy while one-step state and continuation thresholds
+  remain untriggered.
+- Actor tracking is first only if real and imagined-Q ordering remain within
+  0.05 of their values at `A` while actor agreement with the confident
+  policy-Q target falls by at least 0.15.
+- Simultaneous threshold crossings, sparse terminal branches, or conflicting
+  fixed-random and acquired-policy cohorts retain a coupled or unresolved
+  boundary. They must not be rewritten as single-component causality.
+
+Stop after this one training seed and its read-only probes. Do not modify a
+loss, add a seed, extend training, or launch a sweep until every run ID and raw
+artifact is recorded and the temporal evidence has selected or rejected the
+leading hypothesis.

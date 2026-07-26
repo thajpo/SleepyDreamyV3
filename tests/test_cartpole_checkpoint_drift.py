@@ -19,6 +19,12 @@ def _row(
     true_delta: float,
     policy_q_delta: float | None = None,
     policy_q_delta_se: float = 0.1,
+    real_done_0: int = 0,
+    real_done_1: int = 0,
+    prior_continue_0: float = 0.5,
+    prior_continue_1: float = 0.5,
+    posterior_continue_0: float = 0.5,
+    posterior_continue_1: float = 0.5,
 ) -> dict:
     row = {
         "episode": episode,
@@ -30,6 +36,12 @@ def _row(
         "target_actor_action": actor_action,
         "q_delta": q_delta,
         "true_delta": true_delta,
+        "real_done_0": real_done_0,
+        "real_done_1": real_done_1,
+        "prior_continue_0": prior_continue_0,
+        "prior_continue_1": prior_continue_1,
+        "posterior_continue_0": posterior_continue_0,
+        "posterior_continue_1": posterior_continue_1,
     }
     for state_name in ("x", "x_dot", "theta", "theta_dot"):
         row[f"current_posterior_{state_name}_mse"] = 1.0
@@ -163,3 +175,58 @@ def test_fixed_history_summary_reports_confident_policy_target_boundary():
     assert summary["actor_vs_policy_q_confident_accuracy"] == 0.5
     assert summary["policy_q_vs_real_confident_balanced_accuracy"] == 1.0
     assert summary["policy_q_pref_hist"] == {"0": 1, "1": 2}
+
+
+def test_fixed_history_summary_reports_continuation_calibration():
+    rows = [
+        _row(
+            episode=0,
+            x=0.1,
+            true_pref=0,
+            q_pref=0,
+            actor_action=0,
+            q_delta=-2.0,
+            true_delta=-2.0,
+            real_done_0=1,
+            real_done_1=0,
+            prior_continue_0=0.2,
+            prior_continue_1=0.8,
+            posterior_continue_0=0.1,
+            posterior_continue_1=0.9,
+        ),
+        _row(
+            episode=0,
+            x=-0.7,
+            true_pref=1,
+            q_pref=1,
+            actor_action=1,
+            q_delta=2.0,
+            true_delta=2.0,
+            real_done_0=0,
+            real_done_1=1,
+            prior_continue_0=0.8,
+            prior_continue_1=0.2,
+            posterior_continue_0=0.9,
+            posterior_continue_1=0.1,
+        ),
+    ]
+
+    cont = summarize_fixed_history_rows(
+        rows,
+        source_checkpoint=Path("source.pt"),
+        target_checkpoint=Path("target.pt"),
+        train_step=2500,
+    )["continuation"]
+
+    assert cont["branches"] == 4
+    assert cont["terminal_branches"] == 2
+
+    prior = cont["prior"]
+    assert prior["terminal_mean"] == pytest.approx(0.2, abs=1e-6)
+    assert prior["nonterminal_mean"] == pytest.approx(0.8, abs=1e-6)
+    assert prior["brier"] == pytest.approx(0.04, abs=1e-6)
+
+    posterior = cont["posterior"]
+    assert posterior["terminal_mean"] == pytest.approx(0.1, abs=1e-6)
+    assert posterior["nonterminal_mean"] == pytest.approx(0.9, abs=1e-6)
+    assert posterior["brier"] == pytest.approx(0.01, abs=1e-6)

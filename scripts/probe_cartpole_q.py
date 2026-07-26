@@ -31,6 +31,31 @@ from dreamer.models import (
 from dreamer.models.dreaming import enumerate_first_action_values
 
 
+def _extract_train_step(payload: dict) -> int | None:
+    """Return the training step from a checkpoint payload.
+
+    Prefers ``payload['step']``, then ``payload['train_step']``.
+    Returns ``None`` when neither key exists.
+    """
+    raw = payload.get("step", payload.get("train_step"))
+    return int(raw) if raw is not None else None
+
+
+def _probe_output_dir(out_root: Path, checkpoint_path: Path) -> Path:
+    """Construct the per-checkpoint output directory.
+
+    Returns ``out_root / <run_name> / <checkpoint_stem>``.
+    """
+    return out_root / checkpoint_path.parent.parent.name / checkpoint_path.stem
+
+
+def _apply_actor_unimix(
+    actor_logits: torch.Tensor, ratio: float = 0.01
+) -> torch.Tensor:
+    """Apply configured actor unimix to actor logits."""
+    return unimix_logits(actor_logits, unimix_ratio=ratio)
+
+
 def heuristic_action(state: np.ndarray) -> int:
     """A compact stabilizing controller for CartPole's left/right action space."""
     x, x_dot, theta, theta_dot = [float(v) for v in state]
@@ -235,7 +260,12 @@ def pearson(xs: list[float], ys: list[float]) -> float | None:
     return float(np.corrcoef(x, y)[0, 1])
 
 
-def summarize(rows: list[dict], checkpoint_path: Path, critic_key: str) -> dict:
+def summarize(
+    rows: list[dict],
+    checkpoint_path: Path,
+    critic_key: str,
+    train_step: int | None = None,
+) -> dict:
     actionable = [r for r in rows if abs(r["true_delta"]) > 1e-9]
     q_margined = [r for r in actionable if abs(r["q_delta"]) > 1e-6]
     q_correct = [r for r in actionable if r["q_pref"] == r["true_pref"]]
@@ -276,6 +306,7 @@ def summarize(rows: list[dict], checkpoint_path: Path, critic_key: str) -> dict:
 
     summary = {
         "checkpoint": str(checkpoint_path),
+        "train_step": train_step,
         "critic_used": critic_key,
         "direct_q_critic_used": rows[0].get("direct_q_critic_used"),
         "states": len(rows),
@@ -431,6 +462,8 @@ def run_probe(
     cfg, actor, critic, q_critic, encoder, world_model, checkpoint, critic_key, q_critic_key = (
         load_checkpoint_models(checkpoint_path, device)
     )
+    train_step = _extract_train_step(checkpoint)
+    actor_unimix = float(getattr(cfg, "actor_unimix", 0.01))
     del checkpoint
 
     rng = np.random.default_rng(seed)
@@ -479,7 +512,7 @@ def run_probe(
             ).float()
             h_z = world_model.join_h_and_z(h, z_sample)
             z_embed = world_model.z_embedding(z_sample.view(1, -1))
-            actor_logits = unimix_logits(actor(h_z), unimix_ratio=0.01)
+            actor_logits = _apply_actor_unimix(actor(h_z), actor_unimix)
             actor_probs = F.softmax(actor_logits, dim=-1)
             actor_entropy = -torch.sum(
                 actor_probs * torch.log(actor_probs + 1e-8), dim=-1
@@ -503,6 +536,7 @@ def run_probe(
                     imagination_discount,
                     model_horizon,
                     terminal_reward_penalty=terminal_reward_penalty,
+                    actor_unimix=actor_unimix,
                 )
                 decomposition_values = {}
                 for horizon in decomposition_horizons:
@@ -526,6 +560,7 @@ def run_probe(
                             terminal_reward_penalty=terminal_reward_penalty,
                             objective=objective,
                             bootstrap_value=bootstrap_value,
+                            actor_unimix=actor_unimix,
                         )
             finally:
                 world_model.h_prev = h_prev_backup
@@ -673,7 +708,7 @@ def run_probe(
         writer.writeheader()
         writer.writerows(rows)
 
-    summary = summarize(rows, checkpoint_path, critic_key)
+    summary = summarize(rows, checkpoint_path, critic_key, train_step=train_step)
     summary.update(
         {
             "seed": seed,
@@ -703,11 +738,11 @@ def main() -> None:
     device = resolve_device(args.device)
     summaries = []
     for checkpoint in args.checkpoints:
-        name = checkpoint.parent.parent.name
-        print(f"Probing {name} on {device}...")
+        out_dir = _probe_output_dir(args.out, checkpoint)
+        print(f"Probing {out_dir.parent.name}/{out_dir.name} on {device}...")
         summary = run_probe(
             checkpoint.resolve(),
-            args.out / name,
+            out_dir,
             device=device,
             states=args.states,
             seed=args.seed,
