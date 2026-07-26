@@ -43,6 +43,15 @@ actor agreement `0.98561`; final: `0.98865`, `0.36072`, `0.99281`. These are
 off-policy random-prefix diagnostics, so they are supporting evidence rather
 than a causal verdict.
 
+The first target-boundary probe used the same 256 random states and 58
+action-discriminative simulator labels at v3 checkpoints. Actor and policy-Q
+ranking stayed moderate (`0.776` at step 2,000; `0.759` at final), while
+one-step prior state/continuation preferences were poor (`0.069`/`0.121` at
+step 2,000; `0.086`/`0.086` at final). Q/true-delta correlation weakened from
+`0.658` to `0.529` as actor entropy fell from `0.336` to `0.237`. This shifts
+the next investigation toward prior transition/continuation calibration and
+value-target drift, not replay transport.
+
 ## Decision
 
 The current warmup/reinforce configuration does not reliably learn CartPole.

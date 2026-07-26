@@ -875,6 +875,29 @@ first-solve versus post-collapse checkpoints, with emphasis on imagined prior
 continuation and value calibration, while keeping the v3 run as a negative
 replay-boundary result.
 
+### First-solve versus post-collapse target probe
+
+The read-only `probe_cartpole_q.py` comparison used the same 256 random
+CartPole states, 58 action-discriminative simulator labels, and seed 17 for
+v3 checkpoints. The actor and learned policy-Q retain moderate action ranking,
+but the model-derived one-step transition/continuation branches are nearly
+uninformative:
+
+| Checkpoint | Actor vs rollout | Policy-Q vs rollout | Q/true delta Pearson | Hybrid state | Hybrid continuation | Actor entropy |
+|---|---:|---:|---:|---:|---:|---:|
+| step 2,000 | 0.776 | 0.776 | 0.658 | 0.069 | 0.121 | 0.336 |
+| step 2,500 | 0.776 | 0.776 | 0.577 | 0.052 | 0.086 | 0.299 |
+| step 3,000 | 0.776 | 0.759 | 0.585 | 0.121 | 0.155 | 0.271 |
+| final 3,500 | 0.759 | 0.759 | 0.529 | 0.086 | 0.086 | 0.237 |
+
+Here “hybrid state/continuation” means action preference from one learned prior
+step evaluated with trusted simulator continuation; values near 0.1 are far
+below the actor/Q ranking and point at the transition/continuation boundary.
+The actor becomes steadily lower-entropy while Q agreement and Q/true
+correlation weaken. This is the evidence-selected next probe: separate prior
+transition error, continuation calibration, and value-target drift at the
+first-solve and post-collapse checkpoints before changing losses.
+
 The carry repair is implemented and covered by focused replay, forward-pass,
 configuration, and full-suite tests. The frozen v3 behavioral rerun is now
 complete and rejected as the next behavioral fix. Its implementation evidence
