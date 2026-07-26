@@ -1196,3 +1196,34 @@ classifier as an imagination discount.
   Improved risk separation with unchanged natural continuation and behavioral
   failure rejects the intervention as insufficient but localizes representation
   support. No seeds or Pong run follows a one-seed partial result.
+
+### Phase 6 terminal-risk auxiliary result
+
+The one-seed canary completed normally from source `0478ada`. Manifest
+`024997e9a9df4f7bbea1a12f6ac9aa60` and MLflow run
+`38faefc059224a23bb2d034c3d32fb62` record 3,500 updates, 21,358 environment
+steps, and peak RSS `3,955,304 KiB`.
+
+The behavior gate failed. The run first exceeded 400 at update 2,700 with
+`422.7`, but then oscillated below and above the threshold and finished at
+`365.35`; the best score was `422.7`, so it never reached the required 450.
+The best-to-final gap was `57.35`, which is better than prior canaries, but
+retention is not solved.
+
+The final held-out prior continuation probe reports Brier `0.002627`, terminal
+continuation `0.97149`, and live continuation `0.98896`. The Brier/live gates
+pass; the terminal gate (`<=0.97`) misses narrowly. Q/true action agreement is
+`0.85`, but hybrid state and continuation ordering are only `0.225` and
+`0.375`, respectively, with final one-step state MSE `0.0441`.
+
+The new auxiliary head does learn a useful readout: held-out failure ROC-AUC
+is `0.698`/`0.808`/`0.952` at steps 2,000/3,000/final; final terminal/live risk
+probabilities are `0.629`/`0.208`, with balanced accuracy `0.918`. Thus the
+intervention improves terminal representation support but does not make the
+natural discount or actor/value loop stable.
+
+**Disposition:** reject as a sufficient fix. Keep the auxiliary risk probe as
+a representation regression signal. The evidence-selected next direction is
+the policy-conditioned value/actor update and retention boundary, not more
+terminal-head weighting. Do not run seeds 1/2 or Pong until a new one-seed
+behavior gate is preregistered and passed.

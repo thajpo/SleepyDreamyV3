@@ -7045,3 +7045,42 @@ at least 400, and best-to-final gap at most 100. The natural continuation gate
 requires final prior Brier error at most `0.00351`, terminal continuation at
 most `0.97`, and live continuation at least `0.98`. A partial result may
 localize representation support but cannot authorize seeds or Pong.
+
+#### Phase 6 terminal-risk auxiliary result
+
+The terminal-risk auxiliary canary completed normally from clean source
+`0478ada`, with manifest `024997e9a9df4f7bbea1a12f6ac9aa60` and MLflow run
+`38faefc059224a23bb2d034c3d32fb62`. It ran all 3,500 updates and 21,358
+environment steps with peak RSS `3,955,304 KiB` and normal shutdown.
+
+The intervention changed the trajectory substantially but did not pass the
+behavior gate. The first score above 400 was `422.7` at update `2,700`, but
+the curve oscillated through `246.75`, `390.1`, `422.7`, `246.75`, `358.65`,
+`220.85`, `358.3`, `137.7`, `311.65`, `294.9`, and finished at `365.35`.
+The best-to-final gap was only `57.35`, but acquisition at 450 and final
+reward at 400 both failed. This is delayed, oscillatory instability rather
+than the earlier one-way collapse.
+
+The held-out continuation probe is retained under
+`experiments/2026-07-26_cartpole_terminal_risk_calibration_probe/`. Final
+prior continuation Brier error was `0.002627` and live continuation was
+`0.98896`, both within the preregistered bounds. Terminal continuation was
+`0.97149`, narrowly above the `0.97` bound, so the natural-discount gate also
+fails by a small margin. The Q probe under
+`experiments/2026-07-26_cartpole_terminal_risk_q_probe/` reports final Q/true
+action agreement `0.85`, state MSE `0.0441`, hybrid-state ordering `0.225`,
+and hybrid-continuation ordering `0.375`; the action-value boundary remains
+the weak link.
+
+The auxiliary risk head itself improves markedly on the deployed-policy
+distribution: failure ROC-AUC rises from `0.698` at step 2,000 to `0.808` at
+step 3,000 and `0.952` at final, with final terminal/live risk probabilities
+`0.629`/`0.208` and balanced accuracy `0.918`. This confirms that the shared
+RSSM can support a useful terminal-risk representation. It does not transfer
+that representation into a stable natural discount or actor/value policy.
+
+Disposition: reject as a sufficient behavioral or calibration fix, retain as
+strong evidence that terminal information can be made separable without
+repairing closed-loop control. The next attack should target the
+policy-conditioned value/actor update and its retention, while preserving the
+current risk probe as a regression readout. Seeds 1/2 and Pong remain stopped.
