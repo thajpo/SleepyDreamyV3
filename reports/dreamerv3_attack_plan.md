@@ -1578,3 +1578,45 @@ Stop after this one training seed and its read-only probes. Do not modify a
 loss, add a seed, extend training, or launch a sweep until every run ID and raw
 artifact is recorded and the temporal evidence has selected or rejected the
 leading hypothesis.
+
+#### Execution note and bounded measurement amendment
+
+The frozen training run completed from clean source
+`d398afc074ba2a3ca7709ee868dc4d1a0f5c1b14` with run ID
+`1df663b04dd64bf9a8897d1afde4496d` and MLflow run ID
+`5ee2b3270d554da9af4f933e7aea9133`. It reached all 3,500 updates in
+1,786.59 seconds, recorded 21,408 environment steps, exited with status 0, and
+preserved 70 periodic checkpoints plus separate best and final checkpoints.
+The frozen selection rules give `A=2000`, `P=3000`, and `C=2400`; the selected
+fixed-history targets are therefore steps 1,900, 2,000, 2,350, 2,400, 3,000,
+and 3,500.
+
+The first dense-probe invocation failed before producing data because the probe
+passed an unsupported `actor_unimix` keyword to the exhaustive action
+enumerator. The enumerator does not sample actor actions and has no such
+parameter. The repair removes only those two invalid keywords and adds a live
+one-state integration test covering the primary and decomposition call sites;
+it does not change a model, checkpoint, metric, or enumeration equation.
+
+After that repair, a complete step-50 mechanical timing probe on CPU, 256
+states, and decomposition horizons 1, 3, and 15 took 669.33 seconds and peak
+RSS 1,598,956 KiB. Horizon 15 expands a binary tree to 32,768 branches per
+state. Repeating it at all 70 checkpoints would require approximately 13 hours
+and 587 million terminal-depth branches. This cost was measured before running
+an acquired, collapse, peak, or final checkpoint probe; only step 50 was
+observed.
+
+The read-only execution is therefore amended as follows without changing the
+state cohort, seeds, model, training run, milestone rules, or reported metrics:
+
+- run the 256-state dense 50-update timeline with decomposition horizons 1 and
+  3 at every checkpoint;
+- retain the already completed step-50 horizon-15 result as an additional
+  pre-acquisition baseline; and
+- run decomposition horizon 15 only for the six frozen milestone targets
+  `{1900, 2000, 2350, 2400, 3000, 3500}`.
+
+This amendment reduces repeated exhaustive computation while preserving the
+dense temporal screen and long-horizon comparisons at every preregistered
+decision boundary. It does not authorize changing the fixed-history probe or
+interpreting omitted horizon-15 intermediate points as measured.

@@ -27,6 +27,7 @@ from scripts.probe_cartpole_q import (
     load_checkpoint_models,
     one_step_outcome,
     rollout_score,
+    run_probe,
 )
 
 
@@ -321,3 +322,52 @@ def test_policy_lambda_action_values_reject_invalid_budget(horizon, samples):
             horizon=horizon,
             samples=samples,
         )
+
+
+def test_run_probe_completes_with_tiny_checkpoint(tmp_path):
+    """Integration test: run_probe must complete and write artifacts with a
+    tiny valid state-only CartPole checkpoint. Exercises both
+    enumerate_first_action_values call sites (primary and decomposition)."""
+    cfg = replace(
+        Config(),
+        d_hidden=16,
+        num_latents=4,
+        rnn_n_blocks=1,
+    )
+    actor = initialize_actor("cpu", cfg)
+    critic = initialize_critic("cpu", cfg)
+    q_critic = initialize_q_critic("cpu", cfg)
+    encoder, world_model = initialize_world_model("cpu", cfg, batch_size=1)
+
+    run_dir = tmp_path / "run"
+    checkpoint_path = run_dir / "checkpoints" / "checkpoint_step_50.pt"
+    checkpoint_path.parent.mkdir(parents=True)
+    (run_dir / "config.json").write_text(json.dumps(asdict(cfg)))
+    torch.save(
+        {
+            "step": 50,
+            "actor": actor.state_dict(),
+            "critic": critic.state_dict(),
+            "q_critic": q_critic.state_dict(),
+            "encoder": encoder.state_dict(),
+            "world_model": world_model.state_dict(),
+        },
+        checkpoint_path,
+    )
+
+    out_dir = tmp_path / "probes" / "q_timeline"
+    summary = run_probe(
+        checkpoint_path=checkpoint_path,
+        out_dir=out_dir,
+        device="cpu",
+        states=1,
+        seed=17,
+        rollout_horizon=1,
+        model_horizon=1,
+        terminal_reward_penalty=0.0,
+        decomposition_horizons=[1],
+    )
+
+    assert (out_dir / "rows.csv").exists()
+    assert (out_dir / "summary.json").exists()
+    assert summary["train_step"] == 50

@@ -536,7 +536,6 @@ def run_probe(
                     imagination_discount,
                     model_horizon,
                     terminal_reward_penalty=terminal_reward_penalty,
-                    actor_unimix=actor_unimix,
                 )
                 decomposition_values = {}
                 for horizon in decomposition_horizons:
@@ -560,7 +559,6 @@ def run_probe(
                             terminal_reward_penalty=terminal_reward_penalty,
                             objective=objective,
                             bootstrap_value=bootstrap_value,
-                            actor_unimix=actor_unimix,
                         )
             finally:
                 world_model.h_prev = h_prev_backup
