@@ -161,6 +161,7 @@ train:
 
   # Data collection
   num_collectors: 1
+  collector_policy_mode: sample  # sample, argmax
   replay_buffer_size: 1000
   min_buffer_episodes: 64
   steps_per_weight_sync: 5

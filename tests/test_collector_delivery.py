@@ -4,8 +4,10 @@ from queue import Queue
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
+import torch
 
-from dreamer.runtime.collector import collect_experiences
+from dreamer.runtime.collector import collect_experiences, select_policy_action
 
 
 class _ActionSpace:
@@ -34,6 +36,13 @@ class _FiveStepEnv:
 
     def close(self):
         return None
+
+
+def test_collector_policy_action_mode_is_explicit():
+    logits = torch.tensor([[2.0, 0.0]])
+    assert select_policy_action(logits, "argmax").item() == 0
+    with pytest.raises(ValueError, match="collector_policy_mode"):
+        select_policy_action(logits, "mystery")
 
 
 def test_collector_publishes_preterminal_chunk_then_final_remainder(monkeypatch):

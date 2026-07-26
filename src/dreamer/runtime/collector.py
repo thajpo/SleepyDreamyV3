@@ -14,6 +14,18 @@ from .env import create_env
 logger = logging.getLogger(__name__)
 
 
+def select_policy_action(action_logits: torch.Tensor, policy_mode: str) -> torch.Tensor:
+    """Select a learned collector action under the configured behavior mode."""
+    if policy_mode == "argmax":
+        return action_logits.argmax(dim=-1)
+    if policy_mode == "sample":
+        return torch.distributions.Categorical(logits=action_logits).sample()
+    raise ValueError(
+        f"unsupported collector_policy_mode={policy_mode!r}; "
+        "choose 'sample' or 'argmax'"
+    )
+
+
 def _queue_replay_packet(data_queue, packet, stop_event) -> bool:
     """Publish one bounded replay packet, respecting supervised shutdown."""
     while not stop_event.is_set():
@@ -67,6 +79,14 @@ def collect_experiences(
         format="%(asctime)s %(processName)s %(levelname)s %(name)s %(message)s",
     )
     use_pixels = config.use_pixels
+    collector_policy_mode = str(
+        getattr(config, "collector_policy_mode", "sample")
+    )
+    if collector_policy_mode not in {"sample", "argmax"}:
+        raise ValueError(
+            f"unsupported collector_policy_mode={collector_policy_mode!r}; "
+            "choose 'sample' or 'argmax'"
+        )
     env = create_env(config.environment_name, use_pixels=use_pixels, config=config)
     device = "cpu"
     n_actions = config.n_actions
@@ -274,8 +294,9 @@ def collect_experiences(
                         action_logits,
                         unimix_ratio=float(getattr(config, "actor_unimix", 0.01)),
                     )
-                    action_dist = torch.distributions.Categorical(logits=action_logits)
-                    action = action_dist.sample()
+                    action = select_policy_action(
+                        action_logits, collector_policy_mode
+                    )
 
                 action_np = action.item()
                 action_onehot = F.one_hot(action, num_classes=n_actions).float()

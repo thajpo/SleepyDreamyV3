@@ -186,6 +186,7 @@ class Config:
 
     # ===== Training: data collection =====
     num_collectors: int = 1
+    collector_policy_mode: str = "sample"  # sample, argmax
     replay_buffer_size: int = 500
     min_buffer_episodes: int = 64
     steps_per_weight_sync: int = 5
@@ -395,6 +396,8 @@ def validate_config(cfg: Config) -> None:
         errors.append("min_buffer_episodes cannot exceed replay_buffer_size")
     if cfg.replay_sequence_mode not in {"episode", "stream"}:
         errors.append("replay_sequence_mode must be 'episode' or 'stream'")
+    if cfg.collector_policy_mode not in {"sample", "argmax"}:
+        errors.append("collector_policy_mode must be 'sample' or 'argmax'")
     if cfg.replay_row_alignment not in {"post_action", "reference"}:
         errors.append("replay_row_alignment must be 'post_action' or 'reference'")
     if (
