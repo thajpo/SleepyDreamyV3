@@ -13,6 +13,16 @@ parity. The corrected scale-only RMSNorm implementation is now frozen as v2
 for a one-variable seed-0 requalification. Failure selects exact cached replay
 carry; success must repeat unchanged seeds before any Pong claim.
 
+The v2 run later completed all 3,500 optimizer updates but was interrupted by
+a ROCm GPU hang during finalization, before its final evaluation/checkpoint.
+Its retained curve still fails the frozen retention gate: it first reached
+`497.35` at update `2,100`, fell to `241.0` at `2,300`, and later recovered to
+`500.0` at `2,800` and `3,300`. The run therefore demonstrates repeated
+acquisition and loss of a controller, not a clean pass. Its manifest is
+`ea4298e0eec6402b96b60be96f340dd8`, MLflow run is
+`b4e461097bb841afbea1b3dd5e425f3e`, runtime was 27:36.67, peak RSS was
+3,349,780 KiB, and replay descriptor drops were zero.
+
 ## Decision
 
 The current warmup/reinforce configuration does not reliably learn CartPole.

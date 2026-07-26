@@ -784,8 +784,9 @@ Before cached carry changes training, run the separately frozen
 - **Causal variable:** `rmsnorm_learned_shift=true` to `false`; trainable
   parameters change from 639,173 to 637,381. Every authored run setting and
   behavior gate remains identical to v1.
-- **Source:** clean commit `dc076da`, pinned upstream
-  `e3f02248693a79dc8b0ebd62c93683888ddaccfe`, ROCm, training seed 0.
+- **Source:** implementation commit `dc076da`, run source commit `121f1dd`,
+  pinned upstream `e3f02248693a79dc8b0ebd62c93683888ddaccfe`, ROCm, training
+  seed 0.
 - **Budget and metrics:** 3,500 updates, replay ratio 16 trained rows per
   decision, batch 8, sequence 32 with 20 context rows, 20 deterministic
   evaluation episodes every 100 updates, and periodic/best/final checkpoints
@@ -799,6 +800,39 @@ Before cached carry changes training, run the separately frozen
 This rerun is necessary even though scale-only RMSNorm is unlikely to explain
 the entire 338.65-point collapse: scientific attribution requires measuring
 the corrected architecture before combining it with the replay-carry repair.
+
+### Corrected v2 result and carry diagnosis
+
+The v2 seed-0 run used the frozen settings and reached all 3,500 optimizer
+updates on clean source `121f1dd`. Its manifest run ID is
+`ea4298e0eec6402b96b60be96f340dd8`, MLflow run ID
+`b4e461097bb841afbea1b3dd5e425f3e`, and it took 27:36.67 with 3,349,780 KiB
+peak RSS. Replay descriptor drops remained zero and the collector/trainer
+processes stayed healthy. ROCm then reported a GPU hang during finalization,
+before the final evaluation and checkpoint could be written; the manifest is
+therefore an interrupted run, not a normally completed canary.
+
+The behavioral evidence is nevertheless decisive for the frozen gate. The
+evaluation curve was:
+
+| Update | 600 | 700 | 900 | 1,000 | 1,200 | 1,900 | 2,100 | 2,300 | 2,800 | 3,300 | 3,400 |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Mean return | 10.45 | 74.45 | 85.20 | 120.40 | 225.25 | 416.05 | 497.35 | 241.00 | 500.00 | 500.00 | 416.75 |
+
+It first crossed 475 at update 2,100, then fell to 241 at 2,300. The formal
+retention gate therefore fails, even though the policy later reacquired 500.
+The scale-only correction improves acquisition relative to v1 but does not
+remove the acquire/lose/reacquire cycle. Seeds 1 and 2 remain unauthorized.
+
+The surviving best checkpoint (step 2,800) and periodic step-3,000 checkpoint
+both fail trained carry parity. At 20 rows, best has median feature cosine
+`0.98853`, p95 relative L2 `0.34409`, and actor agreement `0.96403`; step 3,000
+has `0.98984`, `0.28936`, and `0.98561`. Extending to 24 rows improves feature
+cosine but still fails the p95 L2 gate (`0.28481` and `0.22896`). The carry
+diagnostics are off-policy random CartPole prefixes, so they do not prove that
+carry mismatch is the sole cause; they do prove the initialized parity gate is
+not retained by training. The missing final checkpoint is a hardware-evidence
+limitation, not a reason to reinterpret the best/periodic results.
 
 If v2 fails, implement reference-style cached carry before another behavioral
 intervention:
