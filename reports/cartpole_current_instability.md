@@ -6798,3 +6798,11 @@ labels with the same horizon/seed/sample contract, select 32 histories tied
 under best continuation but actionable under final continuation (seed 23), and
 trace 30 real steps while crossing best/final actors and representations. Stop
 after determining which swap transfers the diverging deployed action sequence.
+
+Final-controller label generation completed in 4:14.61 with 435 MiB peak RSS.
+The final actor, posterior critic, and full dream are internally aligned with
+the final continuation target (`0.969`, `0.818`, and `0.973` balanced accuracy),
+despite poor return. The frozen 32-history trace was rejected because only four
+rows are tied under best continuation but actionable under final continuation.
+The failure is retained. Trace all four eligible rows with every other setting
+unchanged, report the small-cohort limitation, and do not resample.

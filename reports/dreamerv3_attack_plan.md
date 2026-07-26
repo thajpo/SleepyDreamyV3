@@ -703,3 +703,15 @@ cross best/final actors against best/final representations. Stop after the
 trace. Representation transfer selects recurrent policy-state drift; actor
 transfer selects policy-head drift; neither selects a closed-loop evaluation
 cross as the next diagnostic.
+
+The final-controller label pass completed normally in 4:14.61 with 435 MiB peak
+RSS. On its own continuation target, the failed final policy is highly
+self-consistent: actor balanced accuracy `0.969`, posterior critic `0.818`, and
+full imagined values `0.973`. The preregistered 32-history trace then failed
+before evaluation because only four histories satisfy the frozen final-only
+selection rule. No artifact was partially interpreted.
+
+The bounded correction is to trace all four eligible histories with the same
+checkpoints, evidence, labels, seed, horizon, samples, and actor cross. This is
+an exhaustive cohort, not a smaller random sample. Its limitation must remain
+explicit; no population conclusion may rest on four histories.
