@@ -190,6 +190,30 @@ class RSSMWorldModel(nn.Module):
         else:
             raise ValueError("continue_head_layers must be 0 or 1")
 
+        # Optional research-only head. It is intentionally absent from the
+        # default architecture so historical/reference parameter counts and
+        # checkpoints remain unchanged. When enabled, this head is trained as
+        # a terminal-risk auxiliary and is never used as the imagination
+        # discount; the natural continuation head above remains authoritative.
+        if float(getattr(models_config, "terminal_risk_aux_scale", 0.0)) > 0.0:
+            if is_reference_state_contract(self.architecture_contract):
+                self.terminal_risk_predictor = ReferenceMLP(
+                    d_in=h_z_dim,
+                    d_hidden=self.d_hidden,
+                    d_out=1,
+                    hidden_layers=1,
+                    architecture_contract=self.architecture_contract,
+                )
+            else:
+                self.terminal_risk_predictor = nn.Sequential(
+                    nn.Linear(h_z_dim, self.d_hidden),
+                    nn.RMSNorm(self.d_hidden),
+                    nn.SiLU(),
+                    nn.Linear(self.d_hidden, 1),
+                )
+        else:
+            self.terminal_risk_predictor = None
+
         # Decoder. Outputs distribution of mean predictions for pixel/vector observations
         if use_pixels:
             self.decoder = ObservationDecoder(

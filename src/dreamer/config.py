@@ -152,6 +152,7 @@ class Config:
     free_bits_straight_through: bool = False
     prior_state_pred_scale: float = 0.0
     prior_continue_pred_scale: float = 0.0
+    terminal_risk_aux_scale: float = 0.0
 
     # ===== Training: reward bins =====
     b_start: int = -20

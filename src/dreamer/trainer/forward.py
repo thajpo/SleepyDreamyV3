@@ -346,6 +346,9 @@ def dreamer_step(
     prior_continue_pred_scale = float(
         getattr(config, "prior_continue_pred_scale", 0.0)
     )
+    terminal_risk_aux_scale = float(
+        getattr(config, "terminal_risk_aux_scale", 0.0)
+    )
 
     total_wm_loss: Optional[torch.Tensor] = None
     total_actor_loss: Optional[torch.Tensor] = None
@@ -467,6 +470,7 @@ def dreamer_step(
             continue_loss_weights=continuation_loss_weights[:, t_step],
         )
         wm_loss_dict["prior_continue"] = torch.zeros_like(wm_loss)
+        wm_loss_dict["prior_terminal_risk"] = torch.zeros_like(wm_loss)
         valid_rows = sample_mask.bool()
         terminal_rows = valid_rows & is_terminal_t.bool()
         live_rows = valid_rows & ~is_terminal_t.bool()
@@ -479,7 +483,11 @@ def dreamer_step(
         if bool(live_rows.any().item()):
             metrics.continue_live_probs.append(continue_probs[live_rows])
         prior_h_z = None
-        if prior_state_pred_scale > 0.0 or prior_continue_pred_scale > 0.0:
+        if (
+            prior_state_pred_scale > 0.0
+            or prior_continue_pred_scale > 0.0
+            or terminal_risk_aux_scale > 0.0
+        ):
             h_dim = config.d_hidden * config.rnn_n_blocks
             h_state = h_z_joined[:, :h_dim]
             prior_probs = F.softmax(unimix_logits(prior_logits, unimix_ratio=0.01), dim=-1)
@@ -523,6 +531,41 @@ def dreamer_step(
             )
             wm_loss = wm_loss + prior_continue_pred_scale * prior_continue_loss
             wm_loss_dict["prior_continue"] = prior_continue_loss.detach()
+
+        if terminal_risk_aux_scale > 0.0 and prior_h_z is not None:
+            terminal_risk_predictor = getattr(
+                world_model, "terminal_risk_predictor", None
+            )
+            if terminal_risk_predictor is None:
+                raise RuntimeError(
+                    "terminal_risk_aux_scale requires terminal risk head"
+                )
+            risk_logits = terminal_risk_predictor(prior_h_z)
+            risk_target = is_terminal_t.float().unsqueeze(-1)
+            risk_bce = F.binary_cross_entropy_with_logits(
+                risk_logits, risk_target, reduction="none"
+            ).squeeze(-1)
+            effective_weights = (
+                sample_mask.float() * batch.continue_weights[:, t_step]
+            )
+            terminal_mass = (
+                effective_weights * is_terminal_t.float()
+            ).sum()
+            live_mass = (
+                effective_weights * (1.0 - is_terminal_t.float())
+            ).sum()
+            total_mass = terminal_mass + live_mass
+            if terminal_mass > 0 and live_mass > 0:
+                class_weights = torch.where(
+                    is_terminal_t.bool(),
+                    0.5 / terminal_mass,
+                    0.5 / live_mass,
+                )
+                risk_loss = (
+                    risk_bce * effective_weights * class_weights
+                ).sum()
+                wm_loss = wm_loss + terminal_risk_aux_scale * risk_loss
+                wm_loss_dict["prior_terminal_risk"] = risk_loss.detach()
 
         collect_viz_data(
             metrics, t_step, T, obs_t, obs_reconstruction,

@@ -77,6 +77,7 @@ def create_step_metrics(device: torch.device, do_log_images: bool) -> StepMetric
         "kl_representation_raw": torch.tensor(0.0, device=device),
         "prior_state": torch.tensor(0.0, device=device),
         "prior_continue": torch.tensor(0.0, device=device),
+        "prior_terminal_risk": torch.tensor(0.0, device=device),
     }
     return StepMetrics(
         wm_components=wm_components,
@@ -262,6 +263,7 @@ def log_step_metrics(
             rep = wm_cpu["representation"] * norm
             prior_state = wm_cpu["prior_state"] * norm
             prior_continue = wm_cpu["prior_continue"] * norm
+            prior_terminal_risk = wm_cpu["prior_terminal_risk"] * norm
 
             if has_pixel_obs:
                 m["wm/decoder/pixel_loss"] = pixel
@@ -269,6 +271,7 @@ def log_step_metrics(
                 m["wm/decoder/state_loss"] = state
                 m["wm/prior/state_loss"] = prior_state
                 m["wm/prior/continue_loss"] = prior_continue
+                m["wm/prior/terminal_risk_loss"] = prior_terminal_risk
                 if config.environment_name == "CartPole-v1":
                     m.update(summarize_cartpole_replay_state_metrics(metrics))
 

@@ -127,6 +127,7 @@ train:
   free_bits_straight_through: false
   prior_state_pred_scale: 0.0
   prior_continue_pred_scale: 0.0
+  terminal_risk_aux_scale: 0.0
 
   # Reward bins (symexp range)
   b_start: -20

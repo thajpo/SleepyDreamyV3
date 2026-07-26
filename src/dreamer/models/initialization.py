@@ -158,6 +158,7 @@ def initialize_world_model(device, cfg, batch_size=1):
         architecture_contract=cfg.architecture_contract,
         rssm_core=cfg.rssm_core,
         continue_head_layers=cfg.continue_head_layers,
+        terminal_risk_aux_scale=cfg.terminal_risk_aux_scale,
         posterior_head_layers=cfg.posterior_head_layers,
         encoder=encoder_config,
         rnn=SimpleNamespace(n_blocks=cfg.rnn_n_blocks),
