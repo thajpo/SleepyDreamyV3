@@ -253,7 +253,7 @@ def load_checkpoint_config(
         import torch
 
         checkpoint = torch.load(
-            checkpoint_path, map_location="cpu", weights_only=False
+            checkpoint_path, map_location="cpu", weights_only=True
         )
         if checkpoint is None:
             return None

@@ -170,7 +170,7 @@ def load_checkpoint(
     metadata, run ID, and continuation-prevalence EMA.
     """
     checkpoint: dict[str, Any] = torch.load(
-        checkpoint_path, map_location=device, weights_only=False
+        checkpoint_path, map_location=device, weights_only=True
     )
 
     encoder_state, encoder_removed, encoder_old_count = _migrate_reference_norm_state(

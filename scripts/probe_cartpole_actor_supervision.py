@@ -33,7 +33,7 @@ def load_world_model(checkpoint_path: Path, device: str, fresh_actor: bool):
         raise ValueError(f"{checkpoint_path} is not a state-only CartPole checkpoint")
     actor = initialize_actor(device, cfg)
     encoder, world_model = initialize_world_model(device, cfg, batch_size=1)
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
     if not fresh_actor:
         actor.load_state_dict(checkpoint["actor"])
     encoder.load_state_dict(checkpoint["encoder"])

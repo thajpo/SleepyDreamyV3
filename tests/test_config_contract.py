@@ -424,6 +424,25 @@ def test_scale_only_reference_checkpoint_keeps_current_contract(tmp_path):
     assert loaded is not None
     assert loaded.architecture_contract == "reference_v3_state"
 
+def test_checkpoint_config_loader_uses_restricted_torch_loader(
+    tmp_path, monkeypatch
+):
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    checkpoint_path.touch()
+    load_kwargs = {}
+
+    def restricted_load(path, *, map_location, weights_only):
+        load_kwargs["map_location"] = map_location
+        load_kwargs["weights_only"] = weights_only
+        return {"config_snapshot": asdict(Config())}
+
+    monkeypatch.setattr(torch, "load", restricted_load)
+
+    loaded = load_checkpoint_config(checkpoint_path)
+
+    assert loaded is not None
+    assert load_kwargs == {"map_location": "cpu", "weights_only": True}
+
 
 def test_resume_infers_reference_rssm_core_without_config_snapshot(tmp_path):
     resumed = resolve_resume_config(

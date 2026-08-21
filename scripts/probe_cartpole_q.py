@@ -217,7 +217,7 @@ def load_checkpoint_models(
     q_critic = initialize_q_critic(device, cfg)
     encoder, world_model = initialize_world_model(device, cfg, batch_size=1)
 
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
     actor.load_state_dict(checkpoint["actor"])
     if critic_source == "configured":
         critic_key = (

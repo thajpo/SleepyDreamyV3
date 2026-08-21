@@ -300,7 +300,6 @@ class WorldModelTrainer:
                 self.train_step
                 * config.batch_size
                 * trained_rows
-                * config.action_repeat
                 / denom
             )
 
@@ -323,11 +322,7 @@ class WorldModelTrainer:
             self.config.sequence_length - 1,
         )
         effective_seq_for_gate = max(1, self.config.sequence_length - effective_burn_in)
-        env_steps_per_update = (
-            self.batch_size
-            * effective_seq_for_gate
-            * self.config.action_repeat
-        )
+        env_steps_per_update = self.batch_size * effective_seq_for_gate
         target_train_steps = int(
             env_steps
             * self.config.replay_ratio
@@ -577,13 +572,12 @@ class WorldModelTrainer:
                         )
 
             # End backward
-
             log_step = self.train_step
             self.train_step += 1
+
             self.replay_buffer.allow_env_steps(
                 self.batch_size
                 * effective_train_steps
-                * self.config.action_repeat
                 / self.config.replay_ratio
             )
 

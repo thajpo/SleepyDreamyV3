@@ -278,7 +278,7 @@ def resolve_resume_config(
     checkpoint_path = Path(checkpoint_path)
     if checkpoint is None:
         checkpoint = torch.load(
-            checkpoint_path, map_location="cpu", weights_only=False
+            checkpoint_path, map_location="cpu", weights_only=True
         )
     if checkpoint is None:
         raise ValueError("checkpoint payload is empty")
@@ -376,7 +376,7 @@ def run_training(
     checkpoint = None
     if checkpoint_path:
         checkpoint = torch.load(
-            checkpoint_path, map_location="cpu", weights_only=False
+            checkpoint_path, map_location="cpu", weights_only=True
         )
         flat_cfg = resolve_resume_config(
             flat_cfg,

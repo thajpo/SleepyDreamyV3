@@ -68,9 +68,12 @@ def test_initialized_reward_and_value_heads_decode_to_exactly_zero():
     torch.testing.assert_close(value, torch.zeros(2), rtol=0, atol=0)
 
 
-@pytest.mark.parametrize(("train_step", "resume_offset"), [(0, 0), (3, 36)])
+@pytest.mark.parametrize(
+    ("train_step", "resume_offset", "action_repeat"),
+    [(0, 0, 1), (3, 36, 1), (0, 0, 2), (3, 36, 2)],
+)
 def test_pacing_gate_funds_collection_until_next_update_is_affordable(
-    monkeypatch, train_step, resume_offset
+    monkeypatch, train_step, resume_offset, action_repeat
 ):
     trainer = object.__new__(WorldModelTrainer)
     trainer.train_step = train_step
@@ -85,7 +88,7 @@ def test_pacing_gate_funds_collection_until_next_update_is_affordable(
         replay_burn_in=1,
         sequence_length=4,
         replay_ratio=1.0,
-        action_repeat=1,
+        action_repeat=action_repeat,
     )
     sleep_calls = []
     monkeypatch.setattr(

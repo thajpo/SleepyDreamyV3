@@ -66,7 +66,9 @@ def load_models(checkpoint_path: Path, cfg: Config, device: str):
     actor = initialize_actor(device, cfg)
     encoder, world_model = initialize_world_model(device, cfg, batch_size=1)
 
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(
+        checkpoint_path, map_location=device, weights_only=True
+    )
     actor.load_state_dict(checkpoint["actor"])
     encoder.load_state_dict(checkpoint["encoder"])
     world_model.load_state_dict(checkpoint["world_model"], strict=False)

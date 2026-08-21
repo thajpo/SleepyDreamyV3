@@ -117,7 +117,7 @@ def collect_experiences(
         checkpoint = torch.load(
             checkpoint_path,
             map_location=device,
-            weights_only=False,
+            weights_only=True,
         )
         actor.load_state_dict(checkpoint["actor"])
         encoder.load_state_dict(checkpoint["encoder"])
