@@ -1,0 +1,50 @@
+contract_version: 1
+name: official_e3f0224_atari100k
+purpose: current_source_conformance
+reference:
+  repository: https://github.com/danijar/dreamerv3
+  commit: e3f02248693a79dc8b0ebd62c93683888ddaccfe
+  note: This is a source-conformance contract, not the paper-v2 benchmark.
+
+environment:
+  family: atari100k
+  task: pong
+  agent_decisions: 110000
+  action_repeat: 4
+  raw_environment_frames: 440000
+  image_shape: [64, 64, 3]
+  sticky_action_probability: 0.0
+  noop_max: 30
+  full_action_space: false
+
+training:
+  replay_ratio: 256.0
+  replay_ratio_unit: trained_rows_per_agent_decision
+  batch_size: 16
+  trained_batch_length: 64
+  replay_context: 1
+  expected_gradient_updates: 27500
+  optimizer: laprop
+  beta1: 0.9
+  beta2: 0.999
+  agc: 0.3
+
+model:
+  named_size: 200m
+  deterministic_width: 8192
+  rssm_hidden_width: 1024
+  stochastic_variables: 32
+  stochastic_classes: 64
+  recurrent_blocks: 8
+  head_hidden_width: 1024
+  policy_hidden_layers: 3
+  value_hidden_layers: 3
+  reward_hidden_layers: 1
+  continuation_hidden_layers: 1
+  normalization: rms
+  normalization_epsilon: 0.0001
+  activation: silu
+  initializer: trunc_normal_in
+  policy_outscale: 0.01
+  pixel_encoder: kernel5_same_conv_maxpool
+  pixel_decoder: nearest_upsample_kernel5_same_conv

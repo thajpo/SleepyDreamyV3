@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 
 from .encoder import ThreeLayerMLP
+from .reference import ReferenceMLP, is_reference_state_contract
 
 class ObservationDecoder(nn.Module):
     """
@@ -127,11 +128,21 @@ class StateOnlyDecoder(nn.Module):
         d_in,
         d_hidden,
         n_observations,
+        architecture_contract="historical",
     ):
         super().__init__()
-        self.MLP = ThreeLayerMLP(
-            d_in=d_in, d_hidden=d_hidden, d_out=n_observations
-        )
+        if is_reference_state_contract(architecture_contract):
+            self.MLP = ReferenceMLP(
+                d_in=d_in,
+                d_hidden=d_hidden,
+                d_out=n_observations,
+                hidden_layers=3,
+                architecture_contract=architecture_contract,
+            )
+        else:
+            self.MLP = ThreeLayerMLP(
+                d_in=d_in, d_hidden=d_hidden, d_out=n_observations
+            )
 
     def forward(self, decoder_in):
         return {"state": self.MLP(decoder_in)}

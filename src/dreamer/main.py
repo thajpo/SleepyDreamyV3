@@ -7,16 +7,16 @@ Usage:
     uv run dreamer-train
 
     # Override parameters
-    uv run dreamer-train train.wm_lr=5e-4 models.d_hidden=128
+    uv run dreamer-train train.actor_entropy_coef=1e-3 models.d_hidden=128
 
     # Use environment-specific base config
-    uv run dreamer-train +env=cartpole
+    uv run dreamer-train env=cartpole_state_only
 """
 
 import os
 import random
 import tempfile
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Protocol, Sequence
 from datetime import datetime
 from pathlib import Path
@@ -33,6 +33,7 @@ import multiprocessing as mp
 from dreamer.config import (
     Config,
     dump_config_json,
+    load_checkpoint_config,
     validate_config,
 )
 from dreamer.run_manifest import create_run_manifest, finish_run_manifest
@@ -63,6 +64,53 @@ class ProcessEvent(Protocol):
 
 class ChildProcessError(RuntimeError):
     """Raised when a required training subprocess fails or cannot stop."""
+
+
+RESUME_RUN_CONTROL_FIELDS = frozenset(
+    {
+        "device",
+        "profile",
+        "compile_models",
+        "dry_run",
+        "experiment_name",
+        "log_profile",
+        "research_gradient_diagnostics",
+        "max_train_steps",
+        "early_stop_ep_length",
+        "eval_every",
+        "eval_episodes",
+        "checkpoint_interval",
+        "replay_evidence_samples",
+    }
+)
+RESUME_UNSNAPSHOTTED_STRUCTURE_FIELDS = RESUME_RUN_CONTROL_FIELDS | frozenset(
+    {
+        "use_pixels",
+        "environment_name",
+        "n_actions",
+        "n_observations",
+        "atari_compat_mode",
+        "atari_noop_max",
+        "atari_frame_skip",
+        "atari_terminal_on_life_loss",
+        "atari_sticky_action_prob",
+        "atari_full_action_space",
+        "atari_fire_reset",
+        "atari_screen_size",
+        "d_hidden",
+        "num_latents",
+        "encoder_cnn_stride",
+        "encoder_cnn_kernel_size",
+        "encoder_cnn_padding",
+        "encoder_cnn_input_channels",
+        "encoder_cnn_num_layers",
+        "encoder_cnn_final_feature_size",
+        "encoder_cnn_target_size",
+        "encoder_mlp_hidden_dim_ratio",
+        "encoder_mlp_n_layers",
+        "rnn_n_blocks",
+    }
+)
 
 
 def resolve_device(device_str: str) -> str:
@@ -175,6 +223,16 @@ def dictconfig_to_config(cfg: DictConfig) -> Config:
             d["d_hidden"] = models.d_hidden
         if "num_latents" in models:
             d["num_latents"] = models.num_latents
+        if "architecture_contract" in models:
+            d["architecture_contract"] = models.architecture_contract
+        if "rssm_core" in models:
+            d["rssm_core"] = models.rssm_core
+        if "continue_head_layers" in models:
+            d["continue_head_layers"] = models.continue_head_layers
+        if "vector_encoder_mode" in models:
+            d["vector_encoder_mode"] = models.vector_encoder_mode
+        if "posterior_head_layers" in models:
+            d["posterior_head_layers"] = models.posterior_head_layers
         if "encoder" in models:
             enc = models.encoder
             if "cnn" in enc:
@@ -206,12 +264,126 @@ def dictconfig_to_config(cfg: DictConfig) -> Config:
     return Config(**d)
 
 
+def resolve_resume_config(
+    flat_cfg: Config,
+    checkpoint_path: str | Path,
+    *,
+    checkpoint: dict | None = None,
+    allow_semantic_migration: bool = False,
+) -> Config:
+    """Restore checkpoint architecture, optimizer, loss, discount, and replay semantics."""
+    if allow_semantic_migration:
+        return flat_cfg
+
+    checkpoint_path = Path(checkpoint_path)
+    if checkpoint is None:
+        checkpoint = torch.load(
+            checkpoint_path, map_location="cpu", weights_only=True
+        )
+    if checkpoint is None:
+        raise ValueError("checkpoint payload is empty")
+    checkpoint_config = load_checkpoint_config(checkpoint_path, checkpoint)
+    if checkpoint_config is not None:
+        return replace(
+            checkpoint_config,
+            **{
+                field: getattr(flat_cfg, field)
+                for field in RESUME_RUN_CONTROL_FIELDS
+            },
+        )
+
+    world_model_state = checkpoint.get("world_model", {})
+    if "dynin_deter.0.weight" in world_model_state:
+        rssm_core = "reference"
+    elif "_W_ir" in world_model_state:
+        rssm_core = "legacy"
+    else:
+        raise ValueError("checkpoint does not identify its RSSM core architecture")
+    if "continue_predictor.weight" in world_model_state:
+        continue_head_layers = 0
+    elif "continue_predictor.0.weight" in world_model_state:
+        continue_head_layers = 1
+    else:
+        raise ValueError(
+            "checkpoint does not identify its continuation-head architecture"
+        )
+    encoder_state = checkpoint.get("encoder", {})
+    if "MLP.mlp.1.weight" in encoder_state:
+        vector_encoder_mode = "reference"
+    elif "MLP.mlp.0.weight" in encoder_state:
+        vector_encoder_mode = "legacy"
+    elif any(key.startswith("CNN.") for key in encoder_state):
+        # Pixel-only historical encoders contain no vector branch to inspect.
+        vector_encoder_mode = "legacy"
+    else:
+        raise ValueError(
+            "checkpoint does not identify its vector-encoder architecture"
+        )
+    if "posterior_head.0.weight" in world_model_state:
+        posterior_head_layers = 1
+    elif "posterior_head.weight" in world_model_state:
+        posterior_head_layers = 0
+    else:
+        raise ValueError(
+            "checkpoint does not identify its posterior-head architecture"
+        )
+    historical_config = replace(
+        Config(),
+        **{
+            field: getattr(flat_cfg, field)
+            for field in RESUME_UNSNAPSHOTTED_STRUCTURE_FIELDS
+        },
+    )
+    return replace(
+        historical_config,
+        architecture_contract="historical",
+        rssm_core=rssm_core,
+        continue_head_layers=continue_head_layers,
+        vector_encoder_mode=vector_encoder_mode,
+        posterior_head_layers=posterior_head_layers,
+        critic_slow_target=True,
+        critic_ema_target="distribution",
+        optimizer_contract="legacy",
+        laprop_bias_correction=False,
+        optimizer_warmup_steps=0,
+        normalize_advantages=True,
+        state_loss_mode="legacy_half_mean",
+        free_bits_straight_through=True,
+        b_start=-20,
+        b_end=20,
+        num_bins=255,
+        balance_continuation=False,
+        gamma=0.997,
+        horizon=333,
+        contdisc=True,
+        weight_imagination_starts=False,
+        replay_sequence_mode="episode",
+        replay_row_alignment="post_action",
+        online_replay=False,
+        continuous_replay_delivery=False,
+        actor_warmup_steps=0,
+        actor_unimix=0.01,
+    )
+
+
 def run_training(
     flat_cfg: Config,
     mlflow_run_name: str | None = None,
     checkpoint_path: str | None = None,
+    allow_resume_semantic_migration: bool = False,
 ):
-    """Run training with the given configuration."""
+    """Run training while preserving checkpoint semantics by default."""
+    checkpoint = None
+    if checkpoint_path:
+        checkpoint = torch.load(
+            checkpoint_path, map_location="cpu", weights_only=True
+        )
+        flat_cfg = resolve_resume_config(
+            flat_cfg,
+            checkpoint_path,
+            checkpoint=checkpoint,
+            allow_semantic_migration=allow_resume_semantic_migration,
+        )
     validate_config(flat_cfg)
     device = resolve_device(flat_cfg.device)
 
@@ -229,6 +401,7 @@ def run_training(
     print(f"  d_hidden: {flat_cfg.d_hidden}")
     print(f"  batch_size: {flat_cfg.batch_size}")
     print(f"  actor_lr: {flat_cfg.actor_lr}")
+    print(f"  actor_unimix: {flat_cfg.actor_unimix}")
     print(f"  actor_entropy_coef: {flat_cfg.actor_entropy_coef}")
     print(f"  seed: {flat_cfg.seed}")
     print(f"  Output: {log_dir}")
@@ -253,11 +426,8 @@ def run_training(
         if flat_cfg.use_pixels
         else "vector"
     )
-    if checkpoint_path and os.path.exists(checkpoint_path):
+    if checkpoint is not None:
         try:
-            checkpoint = torch.load(
-                checkpoint_path, map_location="cpu", weights_only=False
-            )
             checkpoint_mlflow_run_id = checkpoint.get("mlflow_run_id")
         except Exception as exc:
             print(f"  Warning: could not read MLflow run id from checkpoint: {exc}")
@@ -391,11 +561,19 @@ def main(cfg: DictConfig):
 
     flat_cfg = dictconfig_to_config(cfg)
     checkpoint_path = cfg.get("checkpoint_path", None)
+    allow_resume_semantic_migration = bool(
+        cfg.get("allow_resume_semantic_migration", False)
+    )
 
     from hydra.core.hydra_config import HydraConfig
 
     run_name = Path(HydraConfig.get().runtime.output_dir).name
-    run_training(flat_cfg, mlflow_run_name=run_name, checkpoint_path=checkpoint_path)
+    run_training(
+        flat_cfg,
+        mlflow_run_name=run_name,
+        checkpoint_path=checkpoint_path,
+        allow_resume_semantic_migration=allow_resume_semantic_migration,
+    )
 
 
 if __name__ == "__main__":

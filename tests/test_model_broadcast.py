@@ -25,7 +25,7 @@ def test_model_update_is_published_to_every_collector_queue():
         assert set(update) == {"version", "actor", "encoder", "world_model"}
 
 
-def test_busy_collector_keeps_one_pending_update_without_blocking_others():
+def test_busy_collector_keeps_latest_pending_update_without_blocking_others():
     trainer = _trainer_with_model_queues(2)
     trainer.send_models_to_collectors(step=5)
     trainer.model_queues[0].get_nowait()
@@ -33,4 +33,4 @@ def test_busy_collector_keeps_one_pending_update_without_blocking_others():
     trainer.send_models_to_collectors(step=10)
 
     assert trainer.model_queues[0].get_nowait()["version"] == 10
-    assert trainer.model_queues[1].get_nowait()["version"] == 5
+    assert trainer.model_queues[1].get_nowait()["version"] == 10

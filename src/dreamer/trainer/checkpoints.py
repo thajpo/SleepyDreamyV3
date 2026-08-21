@@ -9,10 +9,68 @@ from uuid import uuid4
 
 import torch
 
+from dreamer.models.reference import ReferenceRMSNorm
+
 
 def get_model(model):
     """Get underlying model (handles both compiled and non-compiled models)."""
     return getattr(model, "_orig_mod", model)
+
+
+def _migrate_reference_norm_state(model, state_dict):
+    model = get_model(model)
+    obsolete = {
+        f"{name}.bias" if name else "bias"
+        for name, module in model.named_modules()
+        if type(module) is ReferenceRMSNorm
+    }
+    obsolete.intersection_update(state_dict)
+    if not obsolete:
+        return state_dict, [], len(list(model.parameters()))
+
+    parameter_names = set(dict(model.named_parameters()))
+    old_parameter_names = [
+        name
+        for name in state_dict
+        if name in parameter_names or name in obsolete
+    ]
+    removed_positions = [
+        index for index, name in enumerate(old_parameter_names) if name in obsolete
+    ]
+    migrated = {
+        name: value for name, value in state_dict.items() if name not in obsolete
+    }
+    return migrated, removed_positions, len(old_parameter_names)
+
+
+def _migrate_optimizer_state(optimizer_state, removed_positions):
+    if not removed_positions:
+        return optimizer_state
+    migrated = {
+        **optimizer_state,
+        "state": dict(optimizer_state["state"]),
+        "param_groups": [
+            {**group, "params": list(group["params"])}
+            for group in optimizer_state["param_groups"]
+        ],
+    }
+    parameter_ids = [
+        parameter_id
+        for group in migrated["param_groups"]
+        for parameter_id in group["params"]
+    ]
+    if max(removed_positions) >= len(parameter_ids):
+        raise ValueError("checkpoint optimizer state cannot be migrated safely")
+    obsolete_ids = {parameter_ids[position] for position in removed_positions}
+    for group in migrated["param_groups"]:
+        group["params"] = [
+            parameter_id
+            for parameter_id in group["params"]
+            if parameter_id not in obsolete_ids
+        ]
+    for parameter_id in obsolete_ids:
+        migrated["state"].pop(parameter_id, None)
+    return migrated
 
 
 def save_checkpoint(
@@ -38,8 +96,10 @@ def save_checkpoint(
     best_eval_step=None,
     best_eval_metric=None,
     run_id=None,
+    config_snapshot=None,
+    continuation_terminal_ema=None,
 ) -> str:
-    """Save training state atomically and return the checkpoint path."""
+    """Save training state, semantic snapshot, and resume metadata atomically."""
     if final and label is not None:
         raise ValueError("final and label are mutually exclusive")
     suffix = "final" if final else label or f"step_{train_step}"
@@ -67,6 +127,8 @@ def save_checkpoint(
         "best_eval_step": best_eval_step,
         "best_eval_metric": best_eval_metric,
         "run_id": run_id,
+        "config_snapshot": config_snapshot,
+        "continuation_terminal_ema": continuation_terminal_ema,
     }
     destination = Path(checkpoint_dir) / f"checkpoint_{suffix}.pt"
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -97,49 +159,89 @@ def load_checkpoint(
     current_return_scale,
     current_ret_lo,
     current_ret_hi,
+    current_continuation_terminal_ema=0.5,
 ):
-    """
-    Load full checkpoint (encoder, world model, actor, critic, optimizers).
-    Returns a dictionary of extra state (step, return scales).
+    """Load models, optimizers, and resumable trainer state.
+
+    A shift-bearing v1 checkpoint remains exact when its compatibility contract
+    is selected. If the caller explicitly constructs the corrected scale-only
+    contract, obsolete shifts and their optimizer slots are migrated. The
+    returned state contains the step, return normalizer, best-evaluation
+    metadata, run ID, and continuation-prevalence EMA.
     """
     checkpoint: dict[str, Any] = torch.load(
-        checkpoint_path, map_location=device, weights_only=False
+        checkpoint_path, map_location=device, weights_only=True
     )
 
-    # Load encoder and world_model
-    get_model(encoder).load_state_dict(checkpoint["encoder"])
-    get_model(world_model).load_state_dict(checkpoint["world_model"], strict=False)
+    encoder_state, encoder_removed, encoder_old_count = _migrate_reference_norm_state(
+        encoder, checkpoint["encoder"]
+    )
+    world_model_state, world_model_removed, _ = _migrate_reference_norm_state(
+        world_model, checkpoint["world_model"]
+    )
+    actor_state, actor_removed, _ = _migrate_reference_norm_state(
+        actor, checkpoint.get("actor", {})
+    )
+    critic_state, critic_removed, critic_old_count = _migrate_reference_norm_state(
+        critic, checkpoint.get("critic", {})
+    )
+    critic_ema_state, _, _ = _migrate_reference_norm_state(
+        critic_ema, checkpoint.get("critic_ema", {})
+    )
+    q_critic_state, q_critic_removed, _ = _migrate_reference_norm_state(
+        q_critic, checkpoint.get("q_critic", {})
+    )
+    q_critic_ema_state, _, _ = _migrate_reference_norm_state(
+        q_critic_ema, checkpoint.get("q_critic_ema", {})
+    )
+    wm_removed = encoder_removed + [
+        encoder_old_count + position for position in world_model_removed
+    ]
+    critic_optimizer_removed = critic_removed + [
+        critic_old_count + position for position in q_critic_removed
+    ]
+
+    get_model(encoder).load_state_dict(encoder_state)
+    get_model(world_model).load_state_dict(world_model_state, strict=False)
 
     # Load actor/critic
     if "actor" in checkpoint:
-        get_model(actor).load_state_dict(checkpoint["actor"])
-        get_model(critic).load_state_dict(checkpoint["critic"])
+        get_model(actor).load_state_dict(actor_state)
+        get_model(critic).load_state_dict(critic_state)
         if "critic_ema" in checkpoint:
-            get_model(critic_ema).load_state_dict(checkpoint["critic_ema"])
+            get_model(critic_ema).load_state_dict(critic_ema_state)
         else:
             # Backward compatibility: old checkpoints did not save critic_ema.
             get_model(critic_ema).load_state_dict(get_model(critic).state_dict())
         if "q_critic" in checkpoint:
-            get_model(q_critic).load_state_dict(checkpoint["q_critic"])
+            get_model(q_critic).load_state_dict(q_critic_state)
             if "q_critic_ema" in checkpoint:
-                get_model(q_critic_ema).load_state_dict(checkpoint["q_critic_ema"])
+                get_model(q_critic_ema).load_state_dict(q_critic_ema_state)
             else:
                 get_model(q_critic_ema).load_state_dict(get_model(q_critic).state_dict())
 
     # Restore optimizers (skip if architecture changed)
     if "wm_optimizer" in checkpoint:
         try:
-            wm_optimizer.load_state_dict(checkpoint["wm_optimizer"])
+            wm_optimizer.load_state_dict(
+                _migrate_optimizer_state(checkpoint["wm_optimizer"], wm_removed)
+            )
         except ValueError as e:
             if "doesn't match the size" in str(e):
                 print(f"Warning: Skipping WM optimizer state (architecture changed)")
             else:
                 raise
     if "actor_optimizer" in checkpoint:
-        actor_optimizer.load_state_dict(checkpoint["actor_optimizer"])
+        actor_optimizer.load_state_dict(
+            _migrate_optimizer_state(checkpoint["actor_optimizer"], actor_removed)
+        )
     if "critic_optimizer" in checkpoint:
         try:
-            critic_optimizer.load_state_dict(checkpoint["critic_optimizer"])
+            critic_optimizer.load_state_dict(
+                _migrate_optimizer_state(
+                    checkpoint["critic_optimizer"], critic_optimizer_removed
+                )
+            )
         except ValueError as e:
             if "different number of parameter groups" in str(e) or "size" in str(e):
                 print("Warning: Skipping critic optimizer state (architecture changed)")
@@ -151,6 +253,9 @@ def load_checkpoint(
     S = float(checkpoint.get("return_scale", current_return_scale))
     ret_lo = checkpoint.get("ret_lo", current_ret_lo)
     ret_hi = checkpoint.get("ret_hi", current_ret_hi)
+    continuation_terminal_ema = checkpoint.get("continuation_terminal_ema")
+    if continuation_terminal_ema is None:
+        continuation_terminal_ema = current_continuation_terminal_ema
 
     print(f"Resumed checkpoint from {checkpoint_path} at step {step}")
 
@@ -163,4 +268,5 @@ def load_checkpoint(
         "best_eval_step": checkpoint.get("best_eval_step"),
         "best_eval_metric": checkpoint.get("best_eval_metric"),
         "run_id": checkpoint.get("run_id"),
+        "continuation_terminal_ema": float(continuation_terminal_ema),
     }

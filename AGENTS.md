@@ -6,6 +6,22 @@ SleepyDreamyV3 is a PyTorch DreamerV3 research implementation. Treat it as an
 ML reliability project: preserve reproducibility, make failures visible, and do
 not present an experiment as successful without deterministic evaluation.
 
+## Delegation Roles
+
+- The primary Sol agent is the orchestrator. It owns planning, task boundaries,
+  review, research interpretation, experiment decisions, and user updates.
+- `deepseek-worker` may implement bounded changes and run prescribed checks. It
+  must not interpret results, alter research conclusions, launch experiments,
+  or change Git history.
+- `deepseek-monitor` may perform bounded read-only polling and return raw
+  process, metric, and artifact observations. It must not control processes or
+  interpret results.
+- Give each delegated task explicit allowed files, acceptance criteria,
+  validation commands, a step or time budget, stop conditions, and a factual
+  output schema. The primary agent reviews all worker output before proceeding.
+- Run only one coding worker at a time. Use an isolated worktree when coding
+  could overlap other active work; a read-only monitor may run concurrently.
+
 ## Repository Map
 
 - `src/dreamer/models/`: encoder, RSSM world model, losses, imagination, and
@@ -65,8 +81,15 @@ uv run --extra cpu dreamer-train \
   integration coverage.
 - Do not start broad sweeps without a hypothesis, primary metric, fixed seed
   set, sample budget, and stop rule.
-- Record research conclusions in a concise report or manifest rather than
-  relying only on chronological notes.
+- Maintain a contemporaneous research ledger in the relevant report. Before a
+  run, record its hypothesis, causal variable, exact configuration, source
+  commit, seeds, budget, metrics, and stop rule. Afterward, record every run ID
+  and disposition, observed results, interpretation, rejected hypotheses,
+  limitations, and the evidence-selected next decision. Include failed and
+  interrupted runs; do not reconstruct the record only after experiments end.
+- Keep conclusions concise enough to review, but preserve the chain from
+  question to evidence to decision so the investigation remains understandable
+  after the immediate context is gone.
 
 ## Validation Order
 

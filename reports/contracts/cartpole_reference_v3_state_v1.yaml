@@ -1,0 +1,80 @@
+contract_version: 1
+name: cartpole_reference_v3_state_v1
+purpose: reference_state_reliability_qualification
+implementation:
+  repository: https://github.com/thajpo/SleepyDreamyV3
+  commit: 326d0b2
+  pinned_reference_commit: e3f02248693a79dc8b0ebd62c93683888ddaccfe
+
+environment:
+  task: CartPole-v1
+  action_repeat: 1
+  decision_budget_semantics: replay_pacing_authorization_excluding_startup_debt
+  agent_decisions: 21000
+  raw_environment_frames: 21000
+  report_actual_manifest_steps: true
+
+training:
+  training_seed: 0
+  max_gradient_updates: 3500
+  early_stop: false
+  replay_ratio: 16.0
+  replay_ratio_unit: trained_rows_per_agent_decision
+  batch_size: 8
+  sampled_sequence_length: 32
+  replay_context_rows: 20
+  trained_batch_length: 12
+  expected_gradient_updates: 3500
+  trained_rows_per_update: 96
+  expected_agent_decisions_per_update: 6
+  world_model_rows_per_update: 96
+  actor_value_starts_per_update: 96
+  replay_buffer_episodes: 512
+  startup_completed_episodes: 16
+  online_replay: true
+  continuous_delivery: true
+  uniform_selector_fraction: 1.0
+  optimizer: laprop
+  learning_rate: 0.00004
+  optimizer_warmup_updates: 1000
+  imagination_horizon: 15
+
+model:
+  architecture_contract: reference_v3_state
+  trainable_parameters_without_slow_value: 639173
+  hidden_width: 64
+  deterministic_width: 512
+  recurrent_blocks: 8
+  stochastic_variables: 32
+  stochastic_classes: 4
+  vector_hidden_layers: 3
+  posterior_hidden_layers: 1
+  prior_hidden_layers: 2
+  reward_hidden_layers: 1
+  continuation_hidden_layers: 1
+  actor_hidden_layers: 3
+  value_hidden_layers: 3
+  rmsnorm_epsilon: 0.0001
+  rmsnorm_learned_shift: true
+  initialization: trunc_normal_fan_in
+
+evaluation:
+  interval_updates: 100
+  episodes: 20
+  metric: episode_reward
+  checkpoint_interval_updates: 500
+  replay_evidence_sequences_per_checkpoint: 256
+  provisional_solved_mean: 475.0
+  post_solve_retention_floor: 400.0
+  provisional_max_best_to_final_gap: 25.0
+
+decision:
+  pass: >-
+    Reach mean return 475, never fall below 400 after first reaching 475, finish
+    at least 475, and keep best-to-final gap at most 25.
+  fail: >-
+    Any pass condition is missed at update 3500. Do not tune or add seeds; run
+    the frozen checkpoint and trained-carry diagnostics first.
+  after_pass: >-
+    Repeat the unchanged contract for training seeds 1 and 2 before expanding
+    to five seeds or beginning the pixel/Pong port.

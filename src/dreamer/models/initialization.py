@@ -10,23 +10,37 @@ def initialize_actor(device, cfg):
         cfg: Configuration object (flat Config dataclass)
 
     Returns:
-        Actor network (ThreeLayerMLP)
+        Actor network selected by the configured architecture contract
     """
     # This import is here to avoid circular dependencies
     import torch.nn as nn
     from .encoder import ThreeLayerMLP
-    from types import SimpleNamespace
+    from .reference import ReferenceMLP, is_reference_state_contract
 
     num_classes = cfg.d_hidden // 16
     d_in = (cfg.d_hidden * cfg.rnn_n_blocks) + (cfg.num_latents * num_classes)
-    actor = ThreeLayerMLP(
-        d_in=d_in,
-        d_hidden=cfg.d_hidden,
-        d_out=cfg.n_actions,
-    )
-    # Match DreamerV3 policy head outscale (0.01): keep logits small initially.
-    nn.init.normal_(actor.mlp[-1].weight, mean=0.0, std=0.01)
-    nn.init.zeros_(actor.mlp[-1].bias)
+    architecture_contract = getattr(cfg, "architecture_contract", "historical")
+    if is_reference_state_contract(architecture_contract):
+        actor = ReferenceMLP(
+            d_in=d_in,
+            d_hidden=cfg.d_hidden,
+            d_out=cfg.n_actions,
+            hidden_layers=3,
+            outscale=0.01,
+            architecture_contract=architecture_contract,
+        )
+    else:
+        historical_actor = ThreeLayerMLP(
+            d_in=d_in,
+            d_hidden=cfg.d_hidden,
+            d_out=cfg.n_actions,
+        )
+        # Historical approximation of the policy-head outscale.
+        output = historical_actor.mlp[-1]
+        assert isinstance(output, nn.Linear)
+        nn.init.normal_(output.weight, mean=0.0, std=0.01)
+        nn.init.zeros_(output.bias)
+        actor = historical_actor
     return actor.to(device)
 
 
@@ -39,23 +53,36 @@ def initialize_critic(device, cfg):
         cfg: Configuration object (flat Config dataclass)
 
     Returns:
-        Critic network (ThreeLayerMLP)
+        Critic network selected by the configured architecture contract
     """
     import torch.nn as nn
     from .encoder import ThreeLayerMLP
-    from types import SimpleNamespace
+    from .reference import ReferenceMLP, is_reference_state_contract
 
     num_bins = int(getattr(cfg, "num_bins", 255))
     num_classes = cfg.d_hidden // 16
     d_in = (cfg.d_hidden * cfg.rnn_n_blocks) + (cfg.num_latents * num_classes)
-    critic = ThreeLayerMLP(
-        d_in=d_in,
-        d_hidden=cfg.d_hidden,
-        d_out=num_bins,
-    )
-    # Zero-init critic output layer (DreamerV3 paper)
-    nn.init.zeros_(critic.mlp[-1].weight)
-    nn.init.zeros_(critic.mlp[-1].bias)
+    architecture_contract = getattr(cfg, "architecture_contract", "historical")
+    if is_reference_state_contract(architecture_contract):
+        critic = ReferenceMLP(
+            d_in=d_in,
+            d_hidden=cfg.d_hidden,
+            d_out=num_bins,
+            hidden_layers=3,
+            outscale=0.0,
+            architecture_contract=architecture_contract,
+        )
+    else:
+        historical_critic = ThreeLayerMLP(
+            d_in=d_in,
+            d_hidden=cfg.d_hidden,
+            d_out=num_bins,
+        )
+        output = historical_critic.mlp[-1]
+        assert isinstance(output, nn.Linear)
+        nn.init.zeros_(output.weight)
+        nn.init.zeros_(output.bias)
+        critic = historical_critic
     return critic.to(device)
 
 
@@ -63,17 +90,32 @@ def initialize_q_critic(device, cfg):
     """Initialize an action-value critic that predicts two-hot Q(s, a)."""
     import torch.nn as nn
     from .encoder import ThreeLayerMLP
+    from .reference import ReferenceMLP, is_reference_state_contract
 
     num_bins = int(getattr(cfg, "num_bins", 255))
     num_classes = cfg.d_hidden // 16
     d_in = (cfg.d_hidden * cfg.rnn_n_blocks) + (cfg.num_latents * num_classes)
-    q_critic = ThreeLayerMLP(
-        d_in=d_in,
-        d_hidden=cfg.d_hidden,
-        d_out=cfg.n_actions * num_bins,
-    )
-    nn.init.zeros_(q_critic.mlp[-1].weight)
-    nn.init.zeros_(q_critic.mlp[-1].bias)
+    architecture_contract = getattr(cfg, "architecture_contract", "historical")
+    if is_reference_state_contract(architecture_contract):
+        q_critic = ReferenceMLP(
+            d_in=d_in,
+            d_hidden=cfg.d_hidden,
+            d_out=cfg.n_actions * num_bins,
+            hidden_layers=3,
+            outscale=0.0,
+            architecture_contract=architecture_contract,
+        )
+    else:
+        historical_q_critic = ThreeLayerMLP(
+            d_in=d_in,
+            d_hidden=cfg.d_hidden,
+            d_out=cfg.n_actions * num_bins,
+        )
+        output = historical_q_critic.mlp[-1]
+        assert isinstance(output, nn.Linear)
+        nn.init.zeros_(output.weight)
+        nn.init.zeros_(output.bias)
+        q_critic = historical_q_critic
     return q_critic.to(device)
 
 
@@ -113,6 +155,11 @@ def initialize_world_model(device, cfg, batch_size=1):
     models_config = SimpleNamespace(
         d_hidden=cfg.d_hidden,
         num_latents=cfg.num_latents,
+        architecture_contract=cfg.architecture_contract,
+        rssm_core=cfg.rssm_core,
+        continue_head_layers=cfg.continue_head_layers,
+        terminal_risk_aux_scale=cfg.terminal_risk_aux_scale,
+        posterior_head_layers=cfg.posterior_head_layers,
         encoder=encoder_config,
         rnn=SimpleNamespace(n_blocks=cfg.rnn_n_blocks),
     )
@@ -129,6 +176,7 @@ def initialize_world_model(device, cfg, batch_size=1):
             d_hidden=cfg.d_hidden,
             n_observations=cfg.n_observations,
             num_latents=cfg.num_latents,
+            vector_encoder_mode=cfg.vector_encoder_mode,
         ).to(device)
     else:
         encoder = StateOnlyEncoder(
@@ -136,6 +184,8 @@ def initialize_world_model(device, cfg, batch_size=1):
             d_hidden=cfg.d_hidden,
             n_observations=cfg.n_observations,
             num_latents=cfg.num_latents,
+            vector_encoder_mode=cfg.vector_encoder_mode,
+            architecture_contract=cfg.architecture_contract,
         ).to(device)
 
     world_model = RSSMWorldModel(

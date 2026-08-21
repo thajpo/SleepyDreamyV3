@@ -7,7 +7,10 @@ Design:
 - JSON snapshots are written to each run directory for reproducibility.
 """
 
+import math
+import json
 from dataclasses import dataclass, asdict
+from pathlib import Path
 from typing import Optional
 
 
@@ -27,6 +30,7 @@ class Config:
     dry_run: bool = False
     experiment_name: Optional[str] = None
     log_profile: str = "lean"  # lean, full
+    research_gradient_diagnostics: bool = False
     seed: int = 0
 
     # ===== Environment =====
@@ -46,6 +50,22 @@ class Config:
     # ===== Model architecture =====
     d_hidden: int = 64
     num_latents: int = 32
+    # Historical composes the checkpoint-compatible local modules below.
+    # reference_v3_state selects the complete pinned state-only architecture.
+    # reference_v3_state_v1 is the superseded shift-bearing compatibility form.
+    architecture_contract: str = "historical"
+    # Legacy preserves historical checkpoint construction. Authored Hydra
+    # configs select the grouped, normalized reference recurrent core.
+    rssm_core: str = "legacy"  # legacy, reference
+    # Zero preserves historical linear-head checkpoint construction. Authored
+    # Hydra configs use the reference-style one-hidden-layer continuation MLP.
+    continue_head_layers: int = 0
+    # Legacy preserves the raw three-linear vector encoder used by historical
+    # checkpoints. Authored runs normalize and activate every encoder layer.
+    vector_encoder_mode: str = "legacy"  # legacy, reference
+    # Zero preserves the historical direct posterior projection. Authored runs
+    # use the pinned one-hidden-layer normalized observation posterior.
+    posterior_head_layers: int = 0
 
     # Encoder CNN (pixels only)
     encoder_cnn_stride: int = 2
@@ -74,10 +94,22 @@ class Config:
     critic_lr: float = 4e-5
 
     # ===== Training: optimizer settings =====
+    # Legacy preserves historical split-rate, detached replay-value updates.
+    # Authored Hydra runs use the coherent reference optimizer contract.
+    optimizer_contract: str = "legacy"  # legacy, reference
+    laprop_bias_correction: bool = True
+    optimizer_warmup_steps: int = 0
     weight_decay: float = 0.0
     critic_ema_decay: float = 0.98
     critic_ema_regularizer: float = 1.0
+    # Distribution preserves historical full-logit matching. Authored Hydra
+    # runs re-encode the slow critic's decoded scalar like reference DreamerV3.
+    critic_ema_target: str = "distribution"  # distribution, mean_twohot
+    # True preserves runs authored before the reference slow-target audit. Hydra
+    # explicitly disables this for new training runs.
+    critic_slow_target: bool = True
     critic_replay_scale: float = 0.3
+    # Optional full-episode replay return-to-go supervision.
     critic_real_return_scale: float = 0.0
     q_critic_scale: float = 0.0
     q_actor_temperature: float = 0.25
@@ -88,8 +120,9 @@ class Config:
     horizon: int = 333
     contdisc: bool = True
     num_dream_steps: int = 15
+    actor_unimix: float = 0.01
     actor_entropy_coef: float = 3e-4
-    normalize_advantages: bool = True
+    normalize_advantages: bool = False
     actor_loss_mode: str = "reinforce"  # reinforce, enumerate, qcritic, mpc_teacher
     actor_enum_horizon: int = 3
     actor_enum_temperature: float = 0.25
@@ -103,13 +136,23 @@ class Config:
     mpc_teacher_margin_min: float = 0.0
     mpc_teacher_normalize_values: bool = True
     terminal_reward_penalty: float = 0.0
+    balance_continuation: bool = False
+    continuation_balance_rate: float = 0.01
+    # False preserves historical unit-prefix imagination-loss weighting.
+    # Authored Hydra runs include the observed start continuation like DreamerV3.
+    weight_imagination_starts: bool = False
 
     # ===== Training: loss coefficients =====
     beta_dyn: float = 1.0
     beta_rep: float = 0.1
     beta_pred: float = 1.0
-    free_bits_straight_through: bool = True
+    # Historical runs used half the mean squared vector-observation error.
+    # Authored Hydra runs sum squared event errors like reference DreamerV3.
+    state_loss_mode: str = "legacy_half_mean"  # legacy_half_mean, reference_sum
+    free_bits_straight_through: bool = False
     prior_state_pred_scale: float = 0.0
+    prior_continue_pred_scale: float = 0.0
+    terminal_risk_aux_scale: float = 0.0
 
     # ===== Training: reward bins =====
     b_start: int = -20
@@ -143,10 +186,29 @@ class Config:
 
     # ===== Training: data collection =====
     num_collectors: int = 1
+    collector_policy_mode: str = "sample"  # sample, argmax
     replay_buffer_size: int = 500
     min_buffer_episodes: int = 64
     steps_per_weight_sync: int = 5
     replay_burn_in: int = 8
+    # post_action preserves historical rows. reference includes the reset
+    # observation with zero previous action/reward at every episode start.
+    replay_row_alignment: str = "post_action"  # post_action, reference
+    # Episode preserves historical replay snapshots. Authored Hydra runs use
+    # reference-style per-collector streams that can cross reset boundaries.
+    replay_sequence_mode: str = "episode"  # episode, stream
+    # Pinned replay prefers new non-overlapping stream sequences from a bounded
+    # FIFO before falling back to its selector. Historical runs did not.
+    online_replay: bool = False
+    # Publish fixed-size transition chunks during an episode so replay can make
+    # current-policy rows sampleable without waiting for episode termination.
+    continuous_replay_delivery: bool = False
+    # Opt-in research evidence: save this many read-only state replay sequences
+    # beside each model checkpoint. Zero keeps normal training artifact size.
+    replay_evidence_samples: int = 0
+    # ``bounded_burn`` preserves historical replay. Reference runs use stable
+    # row identities and cached detached RSSM carry at the train boundary.
+    replay_carry_mode: str = "bounded_burn"  # bounded_burn, cached
 
     # ===== Training: replay ratio gating =====
     replay_ratio: float = 1.0
@@ -157,6 +219,53 @@ class Config:
 def default_config() -> Config:
     """Legacy inspector fallback when a checkpoint has no config snapshot."""
     return Config()
+
+
+def _checkpoint_uses_shifted_reference_norm(checkpoint: dict | None) -> bool:
+    """Identify the superseded v1 norm from an unambiguous state-dict key."""
+
+    if not isinstance(checkpoint, dict):
+        return False
+    encoder = checkpoint.get("encoder")
+    return isinstance(encoder, dict) and "MLP.mlp.1.bias" in encoder
+
+
+def config_from_snapshot(data: dict, checkpoint: dict | None = None) -> Config:
+    """Construct a config while supplying historical compatibility defaults."""
+    normalized = dict(data)
+    normalized.setdefault("laprop_bias_correction", False)
+    normalized.setdefault("actor_unimix", 0.01)
+    if (
+        normalized.get("architecture_contract") == "reference_v3_state"
+        and _checkpoint_uses_shifted_reference_norm(checkpoint)
+    ):
+        normalized["architecture_contract"] = "reference_v3_state_v1"
+    return Config(**normalized)
+
+
+def load_checkpoint_config(
+    checkpoint_path: str | Path,
+    checkpoint: dict | None = None,
+) -> Config | None:
+    """Load the authored config carried by or stored beside a checkpoint."""
+    checkpoint_path = Path(checkpoint_path)
+    if checkpoint is None and checkpoint_path.exists():
+        import torch
+
+        checkpoint = torch.load(
+            checkpoint_path, map_location="cpu", weights_only=True
+        )
+        if checkpoint is None:
+            return None
+    if checkpoint is not None:
+        snapshot = checkpoint.get("config_snapshot")
+        if isinstance(snapshot, dict):
+            return config_from_snapshot(snapshot, checkpoint)
+
+    config_path = checkpoint_path.parent.parent / "config.json"
+    if config_path.exists():
+        return config_from_snapshot(json.loads(config_path.read_text()), checkpoint)
+    return None
 
 
 def atari100k_pong_config() -> Config:
@@ -214,8 +323,10 @@ def validate_config(cfg: Config) -> None:
         "d_hidden": cfg.d_hidden,
         "num_latents": cfg.num_latents,
         "rnn_n_blocks": cfg.rnn_n_blocks,
+        "encoder_mlp_n_layers": cfg.encoder_mlp_n_layers,
         "n_actions": cfg.n_actions,
         "num_dream_steps": cfg.num_dream_steps,
+        "horizon": cfg.horizon,
         "checkpoint_interval": cfg.checkpoint_interval,
         "num_collectors": cfg.num_collectors,
         "replay_buffer_size": cfg.replay_buffer_size,
@@ -229,18 +340,111 @@ def validate_config(cfg: Config) -> None:
 
     if cfg.d_hidden < 16 or cfg.d_hidden % 16 != 0:
         errors.append("d_hidden must be at least 16 and divisible by 16")
+    reference_state_contracts = {
+        "reference_v3_state",
+        "reference_v3_state_v1",
+    }
+    if cfg.architecture_contract not in {"historical", *reference_state_contracts}:
+        errors.append(
+            "architecture_contract must be 'historical', 'reference_v3_state', "
+            "or 'reference_v3_state_v1'"
+        )
+    if cfg.rssm_core not in {"legacy", "reference"}:
+        errors.append("rssm_core must be 'legacy' or 'reference'")
+    if cfg.continue_head_layers not in {0, 1}:
+        errors.append("continue_head_layers must be 0 or 1")
+    if cfg.vector_encoder_mode not in {"legacy", "reference"}:
+        errors.append("vector_encoder_mode must be 'legacy' or 'reference'")
+    if cfg.posterior_head_layers not in {0, 1}:
+        errors.append("posterior_head_layers must be 0 or 1")
+    if cfg.architecture_contract in reference_state_contracts:
+        if cfg.use_pixels:
+            errors.append("reference_v3_state does not yet support pixel observations")
+        if cfg.rssm_core != "reference":
+            errors.append("reference_v3_state requires rssm_core='reference'")
+        if cfg.continue_head_layers != 1:
+            errors.append("reference_v3_state requires continue_head_layers=1")
+        if cfg.vector_encoder_mode != "reference":
+            errors.append("reference_v3_state requires vector_encoder_mode='reference'")
+        if cfg.posterior_head_layers != 1:
+            errors.append("reference_v3_state requires posterior_head_layers=1")
+        if cfg.rnn_n_blocks != 8:
+            errors.append("reference_v3_state requires rnn_n_blocks=8")
+    if cfg.optimizer_contract not in {"legacy", "reference"}:
+        errors.append("optimizer_contract must be 'legacy' or 'reference'")
+    if cfg.critic_ema_target not in {"distribution", "mean_twohot"}:
+        errors.append("critic_ema_target must be 'distribution' or 'mean_twohot'")
+    if cfg.state_loss_mode not in {"legacy_half_mean", "reference_sum"}:
+        errors.append(
+            "state_loss_mode must be 'legacy_half_mean' or 'reference_sum'"
+        )
+    if cfg.optimizer_warmup_steps < 0:
+        errors.append("optimizer_warmup_steps must be >= 0")
+    if cfg.actor_warmup_steps < 0:
+        errors.append("actor_warmup_steps must be >= 0")
+    if cfg.optimizer_contract == "reference":
+        rates = (cfg.wm_lr, cfg.actor_lr, cfg.critic_lr)
+        if not math.isclose(rates[0], rates[1]) or not math.isclose(
+            rates[0], rates[2]
+        ):
+            errors.append(
+                "reference optimizer_contract requires equal wm/actor/critic rates"
+            )
     if not 0 <= cfg.replay_burn_in < cfg.sequence_length:
         errors.append("replay_burn_in must satisfy 0 <= burn-in < sequence_length")
     if cfg.min_buffer_episodes > cfg.replay_buffer_size:
         errors.append("min_buffer_episodes cannot exceed replay_buffer_size")
+    if cfg.replay_sequence_mode not in {"episode", "stream"}:
+        errors.append("replay_sequence_mode must be 'episode' or 'stream'")
+    if cfg.collector_policy_mode not in {"sample", "argmax"}:
+        errors.append("collector_policy_mode must be 'sample' or 'argmax'")
+    if cfg.replay_row_alignment not in {"post_action", "reference"}:
+        errors.append("replay_row_alignment must be 'post_action' or 'reference'")
+    if (
+        cfg.architecture_contract in reference_state_contracts
+        and cfg.replay_row_alignment != "reference"
+    ):
+        errors.append("reference_v3_state requires replay_row_alignment='reference'")
+    if cfg.online_replay and cfg.replay_sequence_mode != "stream":
+        errors.append("online_replay requires replay_sequence_mode='stream'")
+    if cfg.continuous_replay_delivery and cfg.replay_sequence_mode != "stream":
+        errors.append(
+            "continuous_replay_delivery requires replay_sequence_mode='stream'"
+        )
+    if cfg.continuous_replay_delivery and cfg.critic_real_return_scale > 0.0:
+        errors.append(
+            "continuous_replay_delivery is incompatible with "
+            "critic_real_return_scale > 0"
+        )
+    if cfg.replay_evidence_samples < 0:
+        errors.append("replay_evidence_samples must be >= 0")
+    if cfg.replay_carry_mode not in {"bounded_burn", "cached"}:
+        errors.append("replay_carry_mode must be 'bounded_burn' or 'cached'")
+    if cfg.replay_evidence_samples > 0 and cfg.replay_sequence_mode != "stream":
+        errors.append(
+            "replay_evidence_samples requires replay_sequence_mode='stream'"
+        )
+    if cfg.replay_evidence_samples > 0 and cfg.n_observations <= 0:
+        errors.append("replay_evidence_samples requires vector observations")
     if cfg.replay_ratio <= 0:
         errors.append("replay_ratio must be > 0")
     if not 0.0 <= cfg.recent_fraction <= 1.0:
         errors.append("recent_fraction must be between 0 and 1")
     if not 0.0 < cfg.gamma <= 1.0:
         errors.append("gamma must be in (0, 1]")
+    if cfg.contdisc and cfg.horizon > 0:
+        continuation_discount = 1.0 - 1.0 / float(cfg.horizon)
+        if not math.isclose(cfg.gamma, continuation_discount, abs_tol=1e-5):
+            errors.append(
+                "contdisc requires gamma to match 1 - 1 / horizon "
+                f"(got gamma={cfg.gamma!r}, horizon={cfg.horizon!r})"
+            )
     if not 0.0 <= cfg.lam <= 1.0:
         errors.append("lam must be between 0 and 1")
+    if not 0.0 <= cfg.actor_unimix <= 1.0:
+        errors.append("actor_unimix must be between 0 and 1")
+    if not 0.0 < cfg.continuation_balance_rate <= 1.0:
+        errors.append("continuation_balance_rate must be in (0, 1]")
     if cfg.b_end <= cfg.b_start:
         errors.append("b_end must be greater than b_start")
     if cfg.num_bins < 2:

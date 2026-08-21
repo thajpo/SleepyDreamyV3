@@ -14,6 +14,50 @@ from .env import create_env
 logger = logging.getLogger(__name__)
 
 
+def select_policy_action(action_logits: torch.Tensor, policy_mode: str) -> torch.Tensor:
+    """Select a learned collector action under the configured behavior mode."""
+    if policy_mode == "argmax":
+        return action_logits.argmax(dim=-1)
+    if policy_mode == "sample":
+        return torch.distributions.Categorical(logits=action_logits).sample()
+    raise ValueError(
+        f"unsupported collector_policy_mode={policy_mode!r}; "
+        "choose 'sample' or 'argmax'"
+    )
+
+
+def _queue_replay_packet(data_queue, packet, stop_event) -> bool:
+    """Publish one bounded replay packet, respecting supervised shutdown."""
+    while not stop_event.is_set():
+        try:
+            data_queue.put(packet, timeout=0.1)
+            return True
+        except Full:
+            continue
+    return False
+
+
+def _replay_arrays(
+    pixels,
+    states,
+    actions,
+    rewards,
+    is_last,
+    is_terminal,
+    *,
+    use_pixels: bool,
+):
+    """Freeze aligned collector lists into transport-owned NumPy arrays."""
+    return (
+        np.array(pixels, dtype=np.uint8) if use_pixels else None,
+        np.array(states, dtype=np.float32),
+        np.array(actions, dtype=np.float32),
+        np.array(rewards, dtype=np.float32),
+        np.array(is_last, dtype=bool),
+        np.array(is_terminal, dtype=bool),
+    )
+
+
 def collect_experiences(
     data_queue,
     model_queue,
@@ -35,6 +79,14 @@ def collect_experiences(
         format="%(asctime)s %(processName)s %(levelname)s %(name)s %(message)s",
     )
     use_pixels = config.use_pixels
+    collector_policy_mode = str(
+        getattr(config, "collector_policy_mode", "sample")
+    )
+    if collector_policy_mode not in {"sample", "argmax"}:
+        raise ValueError(
+            f"unsupported collector_policy_mode={collector_policy_mode!r}; "
+            "choose 'sample' or 'argmax'"
+        )
     env = create_env(config.environment_name, use_pixels=use_pixels, config=config)
     device = "cpu"
     n_actions = config.n_actions
@@ -65,7 +117,7 @@ def collect_experiences(
         checkpoint = torch.load(
             checkpoint_path,
             map_location=device,
-            weights_only=False,
+            weights_only=True,
         )
         actor.load_state_dict(checkpoint["actor"])
         encoder.load_state_dict(checkpoint["encoder"])
@@ -77,8 +129,8 @@ def collect_experiences(
             "model_weights_loaded collector_id=%d source=checkpoint", collector_id
         )
 
-    def pull_latest_models() -> None:
-        """Apply the pending update from this collector's one-item mailbox."""
+    def pull_latest_models(episode_number: int) -> None:
+        """Apply one coherent model snapshot at an episode boundary."""
         nonlocal actor, encoder, world_model, use_random_actions
         try:
             latest_model_update = model_queue.get_nowait()
@@ -97,24 +149,33 @@ def collect_experiences(
 
         if use_random_actions:
             logger.info(
-                "model_weights_loaded collector_id=%d version=%s policy_mode=learned",
+                "model_weights_loaded collector_id=%d version=%s episode=%d "
+                "policy_mode=learned",
                 collector_id,
                 latest_model_update["version"],
+                episode_number,
             )
             use_random_actions = False
         else:
             logger.info(
-                "model_weights_loaded collector_id=%d version=%s",
+                "model_weights_loaded collector_id=%d version=%s episode=%d",
                 collector_id,
                 latest_model_update["version"],
+                episode_number,
             )
 
     episode_count = 0
+    continuous_delivery = bool(
+        getattr(config, "continuous_replay_delivery", False)
+    )
+    replay_chunk_rows = int(config.sequence_length)
 
     while not stop_event.is_set():
-        pull_latest_models()
-
         episode_count += 1
+        # Recurrent carry is parameter-dependent. Swap encoder/RSSM/actor
+        # snapshots only where the environment and carry are both reset, never
+        # in the middle of an episode.
+        pull_latest_models(episode_count)
         obs, info = env.reset(seed=base_seed + episode_count)
 
         (
@@ -125,6 +186,20 @@ def collect_experiences(
             episode_is_last,
             episode_is_terminal,
         ) = ([], [], [], [], [], [])
+
+        if getattr(config, "replay_row_alignment", "post_action") == "reference":
+            # Reference replay contains the environment reset observation. Its
+            # aligned model input is the zero previous action and its reward is
+            # zero because no transition has occurred yet.
+            if use_pixels:
+                episode_pixels.append(obs["pixels"])
+                episode_vec_obs.append(np.zeros(1, dtype=np.float32))
+            else:
+                episode_vec_obs.append(obs)
+            episode_actions.append(np.zeros(n_actions, dtype=np.float32))
+            episode_rewards.append(0.0)
+            episode_is_last.append(False)
+            episode_is_terminal.append(False)
 
         h = None
         action_onehot = None
@@ -153,10 +228,10 @@ def collect_experiences(
             )
 
         env_steps_in_episode = 0
+        chunk_env_steps = 0
+        chunk_row_offset = 0
 
         while not stop_event.is_set():
-            pull_latest_models()
-
             if use_random_actions:
                 # Fast path: random action, no model inference
                 action_np = env.action_space.sample()
@@ -215,9 +290,13 @@ def collect_experiences(
 
                     actor_input = world_model.join_h_and_z(h, z_sample)
                     action_logits = actor(actor_input)
-                    action_logits = unimix_logits(action_logits, unimix_ratio=0.01)
-                    action_dist = torch.distributions.Categorical(logits=action_logits)
-                    action = action_dist.sample()
+                    action_logits = unimix_logits(
+                        action_logits,
+                        unimix_ratio=float(getattr(config, "actor_unimix", 0.01)),
+                    )
+                    action = select_policy_action(
+                        action_logits, collector_policy_mode
+                    )
 
                 action_np = action.item()
                 action_onehot = F.one_hot(action, num_classes=n_actions).float()
@@ -232,6 +311,7 @@ def collect_experiences(
                 obs, reward, terminated, truncated, info = env.step(action_np)
                 total_reward += float(reward)
                 env_steps_in_episode += 1
+                chunk_env_steps += 1
                 if terminated or truncated:
                     break
 
@@ -249,42 +329,68 @@ def collect_experiences(
             episode_is_last.append(terminated or truncated)
             episode_is_terminal.append(terminated)
 
-            if terminated or truncated:
+            episode_complete = terminated or truncated
+            if continuous_delivery and (
+                len(episode_vec_obs) >= replay_chunk_rows or episode_complete
+            ):
+                arrays = _replay_arrays(
+                    episode_pixels,
+                    episode_vec_obs,
+                    episode_actions,
+                    episode_rewards,
+                    episode_is_last,
+                    episode_is_terminal,
+                    use_pixels=use_pixels,
+                )
+                packet = (
+                    *arrays,
+                    chunk_env_steps,
+                    collector_id,
+                    episode_count,
+                    episode_complete,
+                    chunk_row_offset,
+                )
+                if not _queue_replay_packet(data_queue, packet, stop_event):
+                    break
+                chunk_row_offset += len(episode_vec_obs)
+                chunk_env_steps = 0
+                (
+                    episode_pixels,
+                    episode_vec_obs,
+                    episode_actions,
+                    episode_rewards,
+                    episode_is_last,
+                    episode_is_terminal,
+                ) = ([], [], [], [], [], [])
+
+            if episode_complete:
                 break
 
         # Once training is complete, replay is no longer being consumed. Drop an
         # interrupted/final episode rather than blocking shutdown on a full queue.
-        if not stop_event.is_set():
+        if not stop_event.is_set() and not continuous_delivery:
             # Package and send episode
-            if use_pixels:
-                pixels_np = np.array(episode_pixels, dtype=np.uint8)
-            else:
-                pixels_np = None  # State-only mode: no pixels
-            vec_obs_np = np.array(episode_vec_obs, dtype=np.float32)
-            actions_np = np.array(episode_actions, dtype=np.float32)
-            rewards_np = np.array(episode_rewards, dtype=np.float32)
-            is_last_np = np.array(episode_is_last, dtype=bool)
-            is_terminal_np = np.array(episode_is_terminal, dtype=bool)
+            arrays = _replay_arrays(
+                episode_pixels,
+                episode_vec_obs,
+                episode_actions,
+                episode_rewards,
+                episode_is_last,
+                episode_is_terminal,
+                use_pixels=use_pixels,
+            )
 
             episode_length = env_steps_in_episode
             episode = (
-                pixels_np,
-                vec_obs_np,
-                actions_np,
-                rewards_np,
-                is_last_np,
-                is_terminal_np,
+                *arrays,
                 episode_length,
+                collector_id,
+                episode_count,
             )
-            while not stop_event.is_set():
-                try:
-                    data_queue.put(episode, timeout=0.1)
-                    break
-                except Full:
-                    continue
+            _queue_replay_packet(data_queue, episode, stop_event)
 
-            # On-demand collection: wait if queue is sufficiently full
-            # This prevents wasteful over-collection in fast envs (e.g., state-only CartPole)
+        if not stop_event.is_set():
+            # On-demand collection: wait if queue is sufficiently full.
             while not stop_event.is_set():
                 queue_fill_ratio = (
                     data_queue.qsize() / data_queue._maxsize

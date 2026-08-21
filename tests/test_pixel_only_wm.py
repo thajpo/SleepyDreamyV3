@@ -1,9 +1,15 @@
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from dreamer.models.decoder import ObservationDecoder
-from dreamer.models.losses import compute_actor_critic_losses, compute_wm_loss
+from dreamer.models.losses import (
+    compute_actor_critic_losses,
+    compute_wm_loss,
+    slow_value_regularizer_loss,
+    slow_value_regularizer_targets,
+)
 from dreamer.models.math_utils import symlog
 
 
@@ -128,6 +134,105 @@ def test_state_decoder_loss_uses_raw_target_symlog_once():
     assert loss_dict["prediction_vector"].item() == 0.0
 
 
+def test_reference_state_loss_is_sum_without_gaussian_half_factor():
+    batch_size = 2
+    state_size = 4
+    n_bins = 5
+    n_latents = 2
+    n_classes = 3
+    target = torch.zeros(batch_size, state_size)
+
+    def evaluate(mode):
+        prediction = torch.tensor(
+            [[1.0, -2.0, 0.5, -0.25], [-1.0, 0.25, 2.0, -0.5]],
+            requires_grad=True,
+        )
+        _total, losses = compute_wm_loss(
+            obs_reconstruction={"state": prediction},
+            obs_t={"state": target},
+            reward_dist=torch.zeros(batch_size, n_bins),
+            reward_t=torch.zeros(batch_size),
+            terminated_t=torch.zeros(batch_size, dtype=torch.bool),
+            continue_logits=torch.zeros(batch_size, 1),
+            posterior_logits=torch.zeros(batch_size, n_latents, n_classes),
+            prior_logits=torch.zeros(batch_size, n_latents, n_classes),
+            B=torch.linspace(-2.0, 2.0, n_bins),
+            config=SimpleNamespace(
+                beta_dyn=0.0,
+                beta_rep=0.0,
+                beta_pred=1.0,
+                state_loss_mode=mode,
+            ),
+            device=target.device,
+            use_pixels=False,
+            sample_mask=torch.ones(batch_size),
+        )
+        losses["prediction_vector"].backward()
+        return losses, prediction.grad
+
+    legacy_losses, legacy_gradient = evaluate("legacy_half_mean")
+    reference_losses, reference_gradient = evaluate("reference_sum")
+
+    assert reference_losses["prediction_vector"].item() == pytest.approx(
+        8.0 * legacy_losses["prediction_vector"].item()
+    )
+    assert torch.allclose(reference_gradient, 8.0 * legacy_gradient)
+    for key in (
+        "prediction_pixel",
+        "prediction_reward",
+        "prediction_continue",
+        "dynamics",
+        "representation",
+    ):
+        assert reference_losses[key].item() == pytest.approx(
+            legacy_losses[key].item()
+        )
+
+
+def test_continue_importance_weights_only_change_continue_loss():
+    batch_size = 2
+    n_bins = 5
+    n_latents = 2
+    n_classes = 3
+    common = dict(
+        obs_reconstruction={"state": torch.zeros(batch_size, 1)},
+        obs_t={"state": torch.zeros(batch_size, 1)},
+        reward_dist=torch.zeros(batch_size, n_bins),
+        reward_t=torch.zeros(batch_size),
+        terminated_t=torch.tensor([True, False]),
+        continue_logits=torch.zeros(batch_size, 1),
+        posterior_logits=torch.zeros(batch_size, n_latents, n_classes),
+        prior_logits=torch.zeros(batch_size, n_latents, n_classes),
+        B=torch.linspace(-2.0, 2.0, n_bins),
+        config=SimpleNamespace(
+            beta_dyn=0.0,
+            beta_rep=0.0,
+            beta_pred=1.0,
+            contdisc=False,
+        ),
+        device=torch.device("cpu"),
+        use_pixels=False,
+        sample_mask=torch.ones(batch_size),
+    )
+
+    _plain_total, plain = compute_wm_loss(**common)
+    _weighted_total, weighted = compute_wm_loss(
+        **common,
+        continue_loss_weights=torch.tensor([3.0, 0.5]),
+    )
+
+    assert weighted["prediction_continue"].item() == pytest.approx(
+        plain["prediction_continue"].item() * 1.75
+    )
+    for key in (
+        "prediction_vector",
+        "prediction_reward",
+        "dynamics",
+        "representation",
+    ):
+        assert weighted[key].item() == pytest.approx(plain[key].item())
+
+
 def test_actor_advantage_normalization_centers_constant_returns():
     horizon = 2
     batch_size = 3
@@ -171,6 +276,140 @@ def test_actor_advantage_normalization_centers_constant_returns():
 
     assert normalized_actor_loss.item() == 0.0
     assert raw_actor_loss.item() > 0.0
+
+
+def test_actor_advantage_uses_slow_critic_baseline():
+    bins = torch.linspace(-2.0, 2.0, 5)
+    value_logits = torch.zeros(1, 1, 5)
+    online_values = torch.full((1, 1), 100.0)
+    slow_values = torch.zeros(1, 1)
+    lambda_returns = torch.ones(1, 1)
+    continues = torch.zeros(1, 1)
+    action_logits = torch.zeros(1, 1, 2)
+    sampled_actions = torch.zeros(1, 1, dtype=torch.long)
+
+    actor_loss, _critic_loss, _entropy = compute_actor_critic_losses(
+        value_logits,
+        online_values,
+        lambda_returns,
+        continues,
+        action_logits,
+        sampled_actions,
+        bins,
+        S=1.0,
+        gamma=1.0,
+        actor_entropy_coef=0.0,
+        normalize_advantages=False,
+        actor_baseline_values=slow_values,
+    )
+
+    assert actor_loss.item() > 0.0
+
+
+def test_start_continuation_weights_entire_imagined_actor_critic_trajectory():
+    horizon = 3
+    batch_size = 2
+    bins = torch.linspace(-2.0, 2.0, 5)
+    value_logits = torch.zeros(horizon, batch_size, bins.numel())
+    values = torch.zeros(horizon, batch_size)
+    lambda_returns = torch.ones(horizon, batch_size)
+    successor_continues = torch.full((horizon, batch_size), 20.0)
+    action_logits = torch.zeros(horizon, batch_size, 2)
+    sampled_actions = torch.zeros(horizon, batch_size, dtype=torch.long)
+
+    unweighted_actor, unweighted_critic, _entropy = compute_actor_critic_losses(
+        value_logits,
+        values,
+        lambda_returns,
+        successor_continues,
+        action_logits,
+        sampled_actions,
+        bins,
+        S=1.0,
+        gamma=0.997,
+        actor_entropy_coef=0.0,
+        normalize_advantages=False,
+    )
+    weighted_actor, weighted_critic, _entropy = compute_actor_critic_losses(
+        value_logits,
+        values,
+        lambda_returns,
+        successor_continues,
+        action_logits,
+        sampled_actions,
+        bins,
+        S=1.0,
+        gamma=0.997,
+        actor_entropy_coef=0.0,
+        normalize_advantages=False,
+        start_continue_logits=torch.zeros(batch_size),
+    )
+
+    assert weighted_actor.item() == pytest.approx(unweighted_actor.item() * 0.5)
+    assert weighted_critic.item() == pytest.approx(
+        unweighted_critic.item() * 0.5
+    )
+
+
+def test_start_continuation_weight_is_not_a_world_model_gradient_path():
+    bins = torch.linspace(-2.0, 2.0, 5)
+    value_logits = torch.zeros(1, 1, bins.numel(), requires_grad=True)
+    action_logits = torch.zeros(1, 1, 2, requires_grad=True)
+    start_continue_logits = torch.zeros(1, requires_grad=True)
+
+    actor_loss, critic_loss, _entropy = compute_actor_critic_losses(
+        value_logits,
+        torch.zeros(1, 1),
+        torch.ones(1, 1),
+        torch.zeros(1, 1),
+        action_logits,
+        torch.zeros(1, 1, dtype=torch.long),
+        bins,
+        S=1.0,
+        gamma=0.997,
+        actor_entropy_coef=0.0,
+        normalize_advantages=False,
+        start_continue_logits=start_continue_logits,
+    )
+    (actor_loss + critic_loss).backward()
+
+    assert value_logits.grad is not None
+    assert action_logits.grad is not None
+    assert start_continue_logits.grad is None
+
+
+def test_reference_slow_value_target_reencodes_decoded_mean_and_detaches():
+    bins = torch.tensor([-1.0, 0.0, 1.0])
+    slow_logits = torch.tensor([[3.0, 0.0, 3.0]], requires_grad=True)
+
+    distribution = slow_value_regularizer_targets(
+        slow_logits, bins, target_mode="distribution"
+    )
+    mean_twohot = slow_value_regularizer_targets(
+        slow_logits, bins, target_mode="mean_twohot"
+    )
+
+    assert distribution[0, 1].item() < 0.1
+    assert torch.equal(mean_twohot, torch.tensor([[0.0, 1.0, 0.0]]))
+    assert distribution.requires_grad is False
+    assert mean_twohot.requires_grad is False
+
+
+def test_slow_value_regularizer_loss_selects_target_contract():
+    bins = torch.tensor([-1.0, 0.0, 1.0])
+    online_logits = torch.tensor([[0.0, 3.0, 0.0]], requires_grad=True)
+    slow_logits = torch.tensor([[3.0, 0.0, 3.0]])
+
+    distribution_loss = slow_value_regularizer_loss(
+        online_logits, slow_logits, bins, target_mode="distribution"
+    )
+    mean_twohot_loss = slow_value_regularizer_loss(
+        online_logits, slow_logits, bins, target_mode="mean_twohot"
+    )
+
+    assert distribution_loss.item() > mean_twohot_loss.item()
+    mean_twohot_loss.sum().backward()
+    assert online_logits.grad is not None
 
 
 def test_observation_decoder_skips_state_head_when_n_observations_zero():
